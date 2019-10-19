@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Hive语法</title>
+	<section>
+		<title>DDL语法</title>
+		<section>
+			<title>数据库相关</title>
+			<orderedlist>
+				<listitem>
+					<para>数据库定义</para>
+					<programlistingco>
+						<programlisting>
+CREATE DATABASE &lt;IF NOT EXISTS> dbname <co id="co.db.create" linkends="co.note.db.create"/>
+    LOCATION '/my/preferred/directory' <co id="co.db.location" linkends="co.note.db.location"/>
+    WITH DBPROPERTIES ('creator' = 'Mark Moneybags', 'date' = '2012-01-02')  <co id="co.db.property" linkends="co.note.db.property"/>
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.db.create" arearefs="co.db.create" ><para>使用IF NOT EXISTS关键字如果数据库已经存在则跳过创建；</para></callout>
+							<callout id="co.note.db.location" arearefs="co.db.location" ><para>指定数据库物理存储路径；</para></callout>
+							<callout id="co.note.db.property" arearefs="co.db.property" ><para>为数据库添加属性描述(可通过DESCRIBE DATABASE EXTENDED命令查看到这些属性定义)。</para></callout>
+						</calloutlist>
+					</programlistingco>
+				</listitem>
+				<listitem>
+					<para>查看数据库列表</para>
+					<para>SHOW DATABASES &lt;LIKE 'h.*'></para>
+				</listitem>
+				<listitem>
+					<para>查看数据库定义</para>
+					<para>DESCRIBE DATABASE &lt;EXTENDED> dbname</para>
+				</listitem>
+				<listitem>
+					<para>数据库修改</para>
+					<para>ALTER DATABASE dbname SET DBPROPERTIES ('edited-by' = 'Joe Dba')</para>
+				</listitem>
+				<listitem>
+					<para>删除数据库</para>
+					<para>DROP DATABASE &lt;IF EXISTS> dbname &lt;CASCADE></para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>表格相关</title>
+			<orderedlist>
+				<listitem>
+					<para>表格定义</para>
+					<programlistingco>
+						<programlisting>
+CREATE &lt;EXTERNAL> TABLE &lt;IF NOT EXISTS> demo_table(viewTime INT, userid BIGINT, <co id="co.table.external" linkends="co.note.table.external"/>
+        name STRING, percent FLOAT,
+        friends ARRAY&lt;BIGINT>, properties MAP&lt;STRING, STRING>, 
+        address STRUCT&lt;street:STRING, city:STRING, state:STRING, zip:INT> <co id="co.create.fieldtype" linkends="co.note.create.fieldtype"/>
+        ip STRING COMMENT 'IP Address of the User')  <co id="co.comment" linkends="co.note.comment"/>
+    COMMENT 'This is the page view table'
+    TBLPROPERTIES ('creator'='me') <co id="co.table.properties" linkends="co.note.table.properties"/>
+    LOCATION '/user/hive/warehouse/mydb.db/employees' <co id="co.table.location" linkends="co.note.table.location"/>
+    PARTITIONED BY(dt STRING, country STRING)  <co id="co.partitioned" linkends="co.note.partitioned"/>
+    CLUSTERED BY(userid) SORTED BY(viewTime) INTO 32 BUCKETS  <co id="co.buckets" linkends="co.note.buckets"/>
+    ROW FORMAT DELIMITED  <co id="co.rowformat" linkends="co.note.rowformat"/>
+        FIELDS TERMINATED BY '1'
+        COLLECTION ITEMS TERMINATED BY '2'
+        MAP KEYS TERMINATED BY '3'
+    STORED AS SEQUENCEFILE;  <co id="co.store" linkends="co.note.store"/>
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.table.external" arearefs="co.table.external" ><para>EXTERNAL关键字告诉Hive表格数据是第三方的，即使对表格执行删除操作，表格数据也会依然存在，需要在定义表格的时候通过LOCATION属性来指向表格数据的存储位置；</para></callout>
+							<callout id="co.note.create.fieldtype" arearefs="co.create.fieldtype" >
+								<para>Hive的字段类型包括私有类型(Primitive Type)和复杂类型(Complex Type)，其中私有类型包括：TINYINT、SMALLINT、INT、BIGINT、BOOLEAN、FLOAT、DOUBLE和STRING，复杂类型包括：Structs、Maps和Arrays；</para>
+							</callout>
+							<callout id="co.note.comment" arearefs="co.comment" ><para>通过COMMENT关键字为表格和字段添加注释；</para></callout>
+							<callout id="co.note.table.properties" arearefs="co.table.properties" ><para>为表格添加属性描述；</para></callout>
+							<callout id="co.note.table.location" arearefs="co.table.location" ><para>指定表格数据物理存放位置，结合external table使用；</para></callout>
+							<callout id="co.note.partitioned" arearefs="co.partitioned" ><para>通过PARTITIONED BY关键字为表格分区；</para></callout>
+							<callout id="co.note.buckets" arearefs="co.buckets" ><para>通过CLUSTERED BY关键字为PATITION划分BUCKET；</para></callout>
+							<callout id="co.note.rowformat" arearefs="co.rowformat" >
+								<para>定义记录存储字段分隔符：</para>
+								<blockquote>
+									<para>fields之间通过'1'来分隔；</para>
+									<para>集合中的元素通过'2'来分隔；</para>
+									<para>Map的key之间通过'3'来分隔；</para>
+								</blockquote>
+							</callout>
+							<callout id="co.note.store" arearefs="co.store" ><para>指定表格数据存储格式为SequenceFile。</para></callout>
+						</calloutlist>
+					</programlistingco>
+				</listitem>
+				<listitem>
+					<para>查看表结构</para>
+					<para>DESCRIBE &lt;EXTENDED | FORMATTED> tablename</para>
+				</listitem>
+				<listitem>
+					<para>修改表结构</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>修改表名称</para>
+							<para>ALTER TABLE logs RENAME TO logmsgs</para>
+						</listitem>
+						<listitem>
+							<para>添加字段</para>
+							<para>ALTER TABLE pokes ADD COLUMNS (new_col INT)</para>
+						</listitem>
+						<listitem>
+							<para>修改字段</para>
+							<para>ALTER TABLE pokes CHANGE COLUMN new_col new_col2 INT &lt;AFTER col | FIRST></para>
+						</listitem>
+						<listitem>
+							<para>新增分区</para>
+							<para>ALTER TABLE logs ADD PARTITION(year = 2012) LOCATION 'hdfs://path'</para>	
+						</listitem>
+						<listitem>
+							<para>改变分区地址</para>
+							<para>ALTER TABLE logs PARTITION(year = 2011) SET LOCATION 'hdfs://newpath'</para>
+						</listitem>
+						<listitem>
+							<para>删除分区</para>
+							<para>ALTER TABLE logs DROP IF EXISTS PARTITION(year = 2011)</para>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>修复表格</para>
+					<para>MSCK REPAIR TABLE tablename;</para>
+				</listitem>
+				<listitem>
+					<para>删除表格</para>
+					<para>DROP TABLE tablename;</para>
+				</listitem>
+				<listitem>
+					<para>查看表格分区</para>
+					<para>SHOW PARTITIONS dbname</para>
+					<para>SHOW PARTITIONS dbname PARTITION(parentPartition='value')</para>
+					<para>DESCRIBE EXTENDED tablename PARTITION (name=value)</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>DML语法</title>
+		<section>
+			<title>数据导入</title>
+			<orderedlist>
+				<listitem>
+					<para>从文档导入数据</para>
+					<para>导入操作，只是将文件内容复制到表格目录中，并不会对文档的schema进行校验</para>
+					<para>从HDFS导入数据：LOAD DATA INPATH 'data.txt' INTO TABLE demo_table PARTITION(date='2008-06-08', country='US')</para>
+					<para>从本地导入并覆盖原数据：LOAD DATA LOCAL INPATH 'data.txt' OVERWRITE INTO TABLE demo_table PARTITION(date='2008-06-08', country='US')</para>
+				</listitem>
+				<listitem>
+					<para>从其他表格导入数据</para>
+					<programlistingco>
+						<programlisting>
+FROM staged_employees se <co id="co.import.table" linkends="co.note.import.table"/>
+INSERT OVERWRITE TABLE employees PARTITION (country = 'US', state = 'OR') <co id="co.import.target" linkends="co.note.import.target"/>
+    SELECT * WHERE se.cnty = 'US' AND se.st = 'OR'
+INSERT INTO TABLE employees PARTITION (country = 'US', state = 'CA') <co id="co.import.into" linkends="co.note.import.into"/>
+    SELECT * WHERE se.cnty = 'US' AND se.st = 'CA'
+INSERT OVERWRITE &lt;LOCAL> DIRECTORY '/tmp/or_employees' <co id="co.import.toDir" linkends="co.note.import.toDir"/>
+    SELECT * WHERE se.cnty = 'US' AND se.st = 'IL';
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.import.table" arearefs="co.import.table"><para>从staged_employees表格导入数据到其他表；</para></callout>
+							<callout id="co.note.import.target" arearefs="co.import.target"><para>每条INSERT语句可导入到不同的表中；</para></callout>
+							<callout id="co.note.import.into" arearefs="co.import.into"><para>INTO表示追加数据，OVERWRITE表示覆盖原数据；</para></callout>
+							<callout id="co.note.import.toDir" arearefs="co.import.toDir"><para>相当于将表格数据导出到指定文件夹。</para></callout>
+						</calloutlist>
+					</programlistingco>
+					<para>或者使用动态分区的方法进行导入，导入前提：</para>
+					<blockquote>
+						<itemizedlist make='bullet'>
+							<listitem>
+								<para>开启了动态分区功能：hive.exec.dynamic.partition参数值为true；</para>
+							</listitem>
+							<listitem>
+								<para>动态分区模式(hive.exec.dynamic.partition.mode)为nonstrict。</para>
+							</listitem>
+						</itemizedlist>
+					</blockquote>
+					<programlistingco>
+						<programlisting>
+执行语句如下：
+    FROM staged_employees se 
+    INSERT OVERWRITE TABLE employees
+    PARTITION (country, state) <co id="co.dynamic.field" linkends="co.note.dynamic.field"/>
+    SELECT ..., se.cty, se.st <co id="co.dynamic.field.target" linkends="co.note.dynamic.field.target"/>
+    FROM staged_employees se
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.dynamic.field" arearefs="co.dynamic.field"><para>动态分区，只声明出字段不声明字段值；</para></callout>
+							<callout id="co.note.dynamic.field.target" arearefs="co.dynamic.field.target"><para>查询导入源数据表时，分区字段要放最后，顺序按分区的层级结构设置。</para></callout>
+						</calloutlist>
+					</programlistingco>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>数据查询</title>
+			<orderedlist>
+				<listitem>
+					<para>普通查询</para>
+					<programlisting>
+hive> SELECT name as n, 
+    >   friends[0] 
+    >   properties["key"]
+    >   address.city
+    > FROM employees
+    > WHERE percent > cast(0.2 AS FLOAT)
+    > LIMIT 2;					
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>子查询</para>
+					<programlisting>
+hive> FROM (
+    >   SELECT upper(name), salary, deductions["Federal Taxes"] as fed_taxes,
+    >   round(salary * (1 - deductions["Federal Taxes"])) as salary_minus_fed_taxes
+    >   FROM employees
+    > ) e
+    > SELECT e.name, e.salary_minus_fed_taxes
+    > WHERE e.salary_minus_fed_taxes > 70000;
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>分组查询</para>
+					<programlisting>
+hive> SELECT year(ymd), avg(price_close) FROM stocks //涉及分组查询一定会使用到聚合函数
+    > WHERE exchange = 'NASDAQ' AND symbol = 'AAPL'
+    > GROUP BY year(ymd) //groupBy指定分组字段
+    >   HAVING avg(price_close) > 50.0;	//having用于分组过滤				
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>JOIN查询</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>Inner JOIN</para>
+							<programlisting>
+hive> SELECT s.ymd, s.symbol, s.price_close, d.dividend
+    > FROM dividends d JOIN stocks s //大表放后，小表放前
+    > ON s.ymd = d.ymd AND s.symbol = d.symbol //只支持equal操作，而不支持其他比较操作，也不支持OR逻辑运算操作
+    > WHERE s.symbol = 'AAPL'
+							</programlisting>
+						</listitem>
+						<listitem>
+							<para>LEFT OUTER JOIN</para>
+							<programlisting>
+hive> SELECT s.ymd, s.symbol, s.price_close, d.dividend 
+    > FROM stocks s LEFT OUTER JOIN dividends d //将右边的表格数据插入到左边，没有数据将NULL插入到左边
+    > ON s.ymd = d.ymd AND s.symbol = d.symbol 
+    > WHERE s.symbol = 'AAPL'; 
+							</programlisting>
+						</listitem>
+						<listitem>
+							<para>RIGHT OUTER JOIN</para>
+							<programlisting>
+hive> SELECT s.ymd, s.symbol, s.price_close, d.dividend
+    > FROM dividends d RIGHT OUTER JOIN stocks s ON d.ymd = s.ymd AND d.symbol = s.symbol
+    > WHERE s.symbol = 'AAPL';
+							</programlisting>
+						</listitem>
+						<listitem>
+							<para>FULL OUTER JOIN</para>
+							<programlisting>
+hive> SELECT s.ymd, s.symbol, s.price_close, d.dividend
+    > FROM dividends d FULL OUTER JOIN stocks s ON d.ymd = s.ymd AND d.symbol = s.symbol
+    > WHERE s.symbol = 'AAPL';
+							</programlisting>
+						</listitem>
+						<listitem>
+							<para>LEFT SEMI-JOIN</para>
+							<programlisting>
+hive> SELECT s.ymd, s.symbol, s.price_close
+    > FROM stocks s LEFT SEMI JOIN dividends d 
+    > ON s.ymd = d.ymd;
+相当于SQL中的IN语句
+      SELECT s.ymd, s.symbol, s.price_close FROM stocks s
+      WHERE s.ymd IN
+      (SELECT d.ymd FROM dividends d);
+							</programlisting>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>CASE … WHEN … THEN语句</para>
+					<programlisting>
+hive> SELECT name, salary,
+    > CASE
+    >   WHEN salary &lt; 50000.0 THEN 'low'
+    >   WHEN salary >= 50000.0 AND salary &lt; 70000.0 THEN 'middle'
+    >   WHEN salary >= 70000.0 AND salary &lt; 100000.0 THEN 'high'
+    >   ELSE 'very high'
+    > END AS bracket 
+    > FROM employees;
+					</programlisting>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+</section>

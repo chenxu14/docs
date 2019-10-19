@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RDD弹性分布式数据集</title>
+	<para>RDD数据集具备以下特点：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem><para>数据集一旦创建便不可修改；</para></listitem>
+			<listitem><para>数据集的某个分区出错或丢失以后会自动修复；</para></listitem>
+			<listitem><para>数据集可持久化存储到硬盘上或缓存在内存里。</para></listitem>
+		</itemizedlist>
+	</blockquote>
+	<para>RDD的概念视图如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="60%" scalefit="1" fileref="../media/spark/RDD.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>如图所示，RDD主要由5部分信息构成，分别是：</para>
+	<orderedlist>
+		<listitem>
+			<para>数据分区信息</para>
+			<para>RDD1和RDD2由两个分区构成，每个分区对应HDFS文件的一个block。</para>
+		</listitem>
+		<listitem>
+			<para>依赖关系</para>
+			<para>在依赖关系的处理上共有两种类型，分别是窄依赖和宽依赖：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>窄依赖：每个父RDD分区最多只能被一个子RDD分区引用，拿图片来讲，RDD2对RDD1的依赖就是窄依赖，因为mem1只被mem2引用；</para></listitem>
+				<listitem><para>宽依赖：每个父RDD分区被多个子RDD分区引用，如reduce对map的依赖就是一个宽依赖，当map数据需要传递到多个Reduce端进行处理时。</para></listitem>
+			</itemizedlist>
+			<tip>一般涉及到数据shuffle的普遍都是宽依赖(如join，groupByKey等)；而基于流水线式的作业都是窄依赖(如map、filter、union等)。</tip>
+		</listitem>
+		<listitem>
+			<para>计算方法</para>
+			<para>对mem1数据执行相应的计算方法来得到mem2数据。</para>
+		</listitem>
+		<listitem><para>分区元数据信息</para></listitem>
+		<listitem>
+			<para>分区的存储地址</para>
+			<para>分别存储在机器1和机器2上。</para>
+		</listitem>
+	</orderedlist>	
+	<section>
+		<title>数据集构建</title>
+		<para>RDD的数据来源可以有两种，分别是ParallelCollection(并行集合)和HadoopDataset(Hadoop数据集)：</para>
+		<orderedlist>
+			<listitem>
+				<para>基于并行集合构建RDD可通过SparkContext的parallelize方法来完成：</para>
+				<para>scala> val data = Array(1, 2, 3, 4, 5)</para>
+				<para>scala> val distData = sc.parallelize(data)</para>
+			</listitem>
+			<listitem>
+				<para>基于Hadoop数据集构建RDD可通如下方法来实现：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>通过SparkContext的textFile方法，如：</para>
+						<para>sc.textFile(“file.txt”)</para>
+						<para>sc.textFile(“directory/*.txt”)</para>
+						<para>sc.textFile(“hdfs://namenode:9000/path/file”)</para>
+					</listitem>
+					<listitem>
+						<para>或者通过SparkContext的hadoopFile方法匹配任意指定格式的文件类型：</para>
+						<para>sc.hadoopFile(keyClass, valClass, inputFmt, conf)</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>数据集操作</title>
+		<para>RDD支持两种类型的操作：Transformations(转换)和Action(执行)</para>
+		<orderedlist>
+			<listitem>
+				<para>对RDD数据集执行转换操作后会生成新的RDD数据集，常用的转换操作有；</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>map</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.map(x => x*x) // => {1, 4, 9}</para>
+					</listitem>
+					<listitem>
+						<para>filter</para>
+						<para>val nums = sc.parallelize(List(1, 4, 9))</para>
+						<para>nums.filter(_ % 2 == 0) // => {4}</para>
+					</listitem>
+					<listitem>
+						<para>flatMap</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.flatMap(x => 1 to x) // => {1, 1, 2, 1, 2, 3}</para>
+					</listitem>
+					<listitem>
+						<para>join &amp; cogroup</para>
+						<programlisting>
+数据集信息如下：
+  val visits = sc.parallelize(List(
+    (“index.html”, “1.2.3.4”),
+    (“about.html”, “3.4.5.6”),
+    (“index.html”, “1.3.3.1”))
+  )
+  val pageNames = sc.parallelize(List(
+    (“index.html”, “Home”), 
+    (“about.html”, “About”))
+  )
+  
+执行visits.join(pageNames)操作，产生如下数据集：
+  (“index.html”, (“1.2.3.4”, “Home”))
+  (“index.html”, (“1.3.3.1”, “Home”))
+  (“about.html”, (“3.4.5.6”, “About”))
+
+执行visits.cogroup(pageNames)操作，产生如下数据集：
+  (“index.html”, (Seq(“1.2.3.4”, “1.3.3.1”), Seq(“Home”)))
+  (“about.html”, (Seq(“3.4.5.6”), Seq(“About”)))
+						</programlisting>
+					</listitem>
+					<listitem>
+						<para>reduceByKey</para>
+						<para>val pets = sc.parallelize(List((“cat”, 1), (“dog”, 1), (“cat”, 2)))</para>
+						<para>pets.reduceByKey(_ + _) // => {(cat, 3), (dog, 1)}</para>
+					</listitem>
+					<listitem>
+						<para>groupByKey</para>
+						<para>val pets = sc.parallelize(List((“cat”, 1), (“dog”, 1), (“cat”, 2)))</para>
+						<para>pets.groupByKey() // => {(cat, Seq(1, 2)), (dog, Seq(1)}</para>
+					</listitem>
+					<listitem>
+						<para>sortByKey</para>
+						<para>val pets = sc.parallelize(List((“cat”, 1), (“dog”, 1), (“cat”, 2)))</para>
+						<para>pets.sortByKey() // => {(cat, 1), (cat, 2), (dog, 1)}</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>执行Action操作后会将数据集的执行结果返回给DriverProgram，常用Action操作有：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>collect</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.collect() // => Array(1, 2, 3)</para>
+					</listitem>
+					<listitem>
+						<para>take</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.take(2) // => Array(1, 2)</para>
+					</listitem>
+					<listitem>
+						<para>count</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.count() // => 3</para>
+					</listitem>
+					<listitem>
+						<para>reduce</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.reduce(_ + _) // => 6</para>
+					</listitem>
+					<listitem>
+						<para>saveAsTextFile</para>
+						<para>val nums = sc.parallelize(List(1, 2, 3))</para>
+						<para>nums.saveAsTextFile(“hdfs://file.txt”)</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>数据集存储</title>
+		<para>Spark能够比MapReduce快的主要原因在于其对作业运行期间的中间数据集提供了缓存功能，这样在对相同的数据执行重复的计算逻辑时便可直接从缓存中获取对应的执行结果而省去了之前的计算过程，通过这种方式处理后针对作业的迭代计算逻辑会在效率上大大提升。</para>
+		<para>Spark针对这些缓存的中间数据集提供了容错处理能力，如果数据集的某个分区片段发生了错误或者数据遗失，那么它会按照之前的计算逻辑将这些数据集重新计算出来。</para>
+		<para>除此之外，Spark还为数据集的存储声明了多种策略，可通过persist方法参数来决定采用哪一种：</para>
+		<table frame='all'>
+			<title>数据集存储策略</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="12em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>存储策略</entry><entry>描述</entry></row>
+				</thead>
+				<tbody>
+					<row>
+						<entry>MEMORY_ONLY</entry>
+						<entry>将数据集缓存在内存里，存储格式为没有序列化的Java对象(默认存储策略)。</entry>
+					</row>
+					<row>
+						<entry>MEMORY_AND_DISK</entry>
+						<entry>如果内存空间足够用，将数据集缓存在内存里，否则将其存储在硬盘上。</entry>
+					</row>
+					<row>
+						<entry>MEMORY_ONLY_SER</entry>
+						<entry>将数据集缓存在内存里，与MEMORY_ONLY不同的是缓存的数据不是Java对象而是序列化后的字节数组。因此在空间上比较节约内存资源，但同时也需要消耗更多的cpu。</entry>
+					</row>
+					<row>
+						<entry>MEMORY_AND_DISK_SER</entry>
+						<entry>同MEMORY_AND_DISK类似，只不过需要执行序列化操作。</entry>
+					</row>
+					<row>
+						<entry>DISK_ONLY</entry>
+						<entry>只将数据集保存在硬盘上。</entry>
+					</row>
+				</tbody>
+			</tgroup>
+		</table>
+	</section>
+</section>

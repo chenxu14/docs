@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region拆分</title>
+	<para>Region的拆分逻辑是通过CompactSplitThread线程的requestSplit方法来触发的，每当执行MemstoreFlush操作时都会调用该方法进行判断，看是否有必要对目标Region进行拆分。</para>
+	<section>
+		<title>拆分前提</title>
+		<para>Region可拆分的前提是需要满足如下约束条件：</para>
+		<orderedlist>
+			<listitem>
+				<para>目标RegionServer的线上Region数没有达到hbase.regionserver.regionSplitLimit参数阀值</para>
+				<para>该参数的默认值为1000，达到900时RegionServer将会打印警告：Total number of regions is approaching the upper limit。</para>
+			</listitem>
+			<listitem>
+				<para>StoreFile文件数量没有达到hbase.hstore.blockingStoreFiles参数阀值</para>
+				<para>此时会优先触发整理操作(详细参考Region整理章节)</para>
+			</listitem>
+			<listitem>
+				<para>要拆分的Region不属于meta表格</para>
+				<para>HBase不支持对meta表格中的Region做拆分操作。</para>
+			</listitem>
+			<listitem><para>Region没有处于recovering状态(参考Region恢复章节)</para></listitem>
+			<listitem>
+				<para>由具体的拆分策略来做决定，通过其shouldSplit方法</para>
+				<para>HBase对外提供了5中拆分策略，全部由RegionSplitPolicy派生而来，5中策略分别为：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>ConstantSizeRegionSplitPolicy</para>
+						<para>当Region中某个Store数据量达到hbase.hregion.max.filesize参数阀值时进行拆分</para>
+					</listitem>
+					<listitem>
+						<para>IncreasingToUpperBoundRegionSplitPolicy</para>
+						<para>当Region中某个Store数据量达到sizeToCheck阀值时进行拆分，sizeToCheck是通过如下方法计算得出的，如果RegionServer上含有指定Table的Region数量在(0,100]之间，返回如下公式的值：</para>
+						<blockquote><para>min(hbase.hregion.max.filesize, regionCount^3 * initialSize)</para></blockquote>
+						<para>否则返回hbase.hregion.max.filesize参数值。由此可见该拆分策略是增量式的，随着Region数量的增多，拆分阀值也逐渐越大，直至达到目标上限为止。</para>
+					</listitem>
+					<listitem>
+						<para>DelimitedKeyPrefixRegionSplitPolicy</para>
+						<para>拆分策略如下：如果定义rowkey时，采用'_'作为字段分隔符(如：userid_eventtype_eventid)，则采用该策略拆分之后，能够确保具有相同userid的记录隶属于同一Region。</para>
+						<para>该类继承至IncreasingToUpperBoundRegionSplitPolicy，其拆分前提与父类相同，只是在拆分点的获取上略有不同(参考下一章节)。</para>
+					</listitem>
+					<listitem>
+						<para>KeyPrefixRegionSplitPolicy</para>
+						<para>与DelimitedKeyPrefixRegionSplitPolicy类似，只不过是选取指定长度的字符前缀来作为row的分组。</para>
+					</listitem>
+					<listitem>
+						<para>DisabledRegionSplitPolicy</para>
+						<para>该策略shouldSplit方法永远返回false，表示不启用拆分功能，不对Region做任何拆分。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>获取拆分点</title>
+		<para>拆分点主要是通过调用拆分策略的getSplitPoint方法来进行获取，不同的拆分策略有着不同的获取逻辑，具体如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>如果拆分点是用过通过split命令强制声明的，返回用户指定的拆分点。</para>
+			</listitem>
+			<listitem>
+				<para>如果采用的拆分策略为ConstantSizeRegionSplitPolicy或IncreasingToUpperBoundRegionSplitPolicy，则选取Region中数据总量最大的Store，通过其getSplitPoint方法来获取切分点。</para>
+				<para>方法在执行过程中还需要考虑StoreFileManager的实现类型：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果是DefaultStoreFileManager</para>
+						<para>从目标Store中选择一个数据量最大的StoreFile，对其执行getFileSplitPoint方法来获取midkey作为拆分点(从根索引中读取，参考HFile存储结构)。</para>
+					</listitem>
+					<listitem>
+						<para>如果是StripeStoreFileManager(采用了StripeCompaction)</para>
+						<para>如果Store中只有一个Stripe，获取数据量最大的StoreFile，对其执行getFileSplitPoint方法来获取midKey信息作为该Region的拆分点。</para>
+						<para>如果有多个Stripe，则试图在所有Stripe中间找到如下图所示的分隔线，使分割线左右两侧的数据总量最为接近。</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="90%" scalefit="1" fileref="../media/hbase/stripe.jpg"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>分割线确立以后，如果能满足以下约束条件，便可直接确定该Region的拆分点。</para>
+						<blockquote><para>largeSideSize / smallSideSize &lt; 1.5</para></blockquote>
+						<para>其中largeSideSize为数据总量偏大的一方(即图中分割线左边的数据总量)，smallSideSize为数据总量偏小的一方(即图中分割线右边的数据总量)，而1.5是通过hbase.store.stripe.region.split.max.imbalance配置项声明的。</para>
+						<para>拿示例图片来做说明：由于largeSideSize(3072m)/smallSideSize(2560M)=1.2，数值低于1.5，因此直接将Stripe-2的endRow作为该Region的拆分点。而如果Stripe-2的大小为20480m，那么便没有办法满足以上约束条件，这时需要进行如下处理：</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="90%" scalefit="1" fileref="../media/hbase/stripe-2.jpg"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>将stripe-2的一半大小划分到右侧区域(即将分割线画到如图所示位置)，然后重新生成radio值。</para>
+						<blockquote><para>largeSideSize(12800) / smallSideSize(11264) = 1.14</para></blockquote>
+						<para>如果新生成的radio值比之前的radio还要大，则放弃这种处理办法，依然采用之前的处理方式，否则从stripe-2中选择数据总量最大的StoreFile，对其执行getFileSplitPoint方法来获取midkey信息，并将其作为该Region的拆分点返回。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>执行拆分</title>
+		<para>Region在拆分过程中，需要HMaster和RegionServer的共同参与，中间的协调工作通过Zookeeper来实现。针对每一个待拆分的Region，RegionServer端会创建/hbase/region-intransition/{regionName}拆分节点，节点内容为RegionTransition对象，对象由以下几部分信息构成：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>eventType</para>
+				<para>事件类型，这里为RS_ZK_REQUEST_REGION_SPLIT，Master端会对该事件类型进行捕获，并做出相应的回调处理。</para>
+			</listitem>
+			<listitem>
+				<para>regionName</para>
+				<para>表示对哪个Region执行的转换操作。</para>
+			</listitem>
+			<listitem>
+				<para>serverName</para>
+				<para>目标Region部署在哪台RegionServer上。</para>
+			</listitem>
+			<listitem>
+				<para>payload</para>
+				<para>装载额外的信息用于处理目标事件，这里为子Region的HRegionInfo信息。</para>
+			</listitem>
+		</itemizedlist>
+		<para>拆分节点创建成功以后，HMaster端会进行相应的回调处理，通过监听Zookeeper的目标节点路径(参考AssignmentManager类的handleRegion方法)。在回调处理中，首先从目标拆分节点中读取出RegionTransition对象，修改其eventType属性值为RS_ZK_REGION_SPLITTING，并将该对象重新赋予目标拆分节点。随后对参与拆分操作的Region状态进行修改，将待拆分的父Region标记成SPLITTING状态，将两个新生成的子Region标记为SPLITTING_NEW，通过RegionStates类的updateRegionState方法。</para>
+		<para>与此同时，RegionServer端在创建出拆分节点以后会进入循环等待状态(代码逻辑参考ZKSplitTransactionCoordination类的waitForSplitTransaction方法)，直至其eventType属性值变为RS_ZK_REGION_SPLITTING，然后开始执行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>在待拆分Region目录下创建.splits子目录来作为拆分目录。</para>
+			</listitem>
+			<listitem>
+				<para>将待拆分的Region关闭，不再提供线上服务，通过HRegion的close方法。</para>
+			</listitem>
+			<listitem>
+				<para>对Region中的storeFile进行拆分。</para>
+				<para>假设将目标Region拆分成Split-A(存储拆分点之前的数据)和Split-B(存储拆分点之后的数据)，拆分规则如下：</para>
+				<para>首先定义如下3个变量：</para>
+				<blockquote>
+					<para>(1)firstKey：用于表示StoreFile文件的起始key；</para>
+					<para>(2)lastKey：用于表示StoreFile文件的结束key；</para>
+					<para>(3)splitKey：用于表示Region的拆分点。</para>
+				</blockquote>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果StoreFile满足firstKey &lt; splitKey &lt; lastKey，将[firstKey,splitKey]区间上的数据赋予Split-A。</para>
+					</listitem>
+					<listitem>
+						<para>如果StoreFile满足firstKey &lt; lastKey &lt; splitKey，将整个StoreFile赋予Region-a。</para>
+					</listitem>
+					<listitem>
+						<para>如果StoreFile满足splitKey &lt; firstKey &lt; lastKey，将整个StoreFile赋予Region-b</para>
+					</listitem>
+				</itemizedlist>
+				<tip>在HBase中，拆分后的StoreFile子文件是通过Reference来进行描述的，其数据内容采用protobuf进行序列化，每个Reference文件在HDFS上的存储路径为path/to/table/parentRegion/.splits/childRegion/cf/storefile.parentRegion</tip>
+				<para>拆分完成以后需要将子Region从path/to/table/parentRegion/.splits/childRegion路径移动到path/to/table/路径下。</para>
+			</listitem>
+			<listitem>
+				<para>修改meta表中Region元数据信息，通过MetaTableAccessor类的splitRegion方法</para>
+				<para>将子Region添加到meta表格中，并将父Region标记为splitting状态(新增splitA和splitB列信息，内容为子Region的HRegionInfo)。</para>
+				<tip>
+					<para>从该步骤开始起，Region拆分操作将无法回滚，一旦出错，需要将RegionServer停掉以便ServerShutdownHandler可以对目标Region的元数据进行修复，具体可参考Region状态管理章节中有关状态修复内容的介绍。</para>
+				</tip>
+			</listitem>
+			<listitem>
+				<para>将拆分后的子Region进行启动，通过HRegion的openHRegion方法</para>
+				<para>启动后的子Region与父Region部署在同一个RegionServer上，同时由于拆分后的子Region内部含有Reference文件，因此需要对其执行整理操作(参考Region整理章节)。</para>
+			</listitem>
+		</orderedlist>
+		<para>RegionServer端完成子Region的启动之后，需要将启动结果通知到HMaster端，通知逻辑同样是借助于Zookeeper来实现的，首先从Zookeeper的目标拆分节点中获取RegionTransition对象，将其eventType属性值修改为RS_ZK_REGION_SPLIT。节点状态修改后，Master端会进行如下回调处理：</para>
+		<blockquote>
+			<para>(1)将父Region标记成SPLIT状态，并对其进行下线处理；</para>
+			<para>(2)对拆分后的子Region进行上线，将其标记为OPEN状态；</para>
+			<para>(3)删除Zookeeper中的拆分节点。</para>
+		</blockquote>
+		<para>至此，Region的拆分逻辑成功执行，子Region开始提供线上服务。</para>
+	</section>
+	<section>
+		<title>回滚操作</title>
+		<para>Region在拆分过程中是采用事务进行管理的，如果在拆分的过程中出现了异常，可以对事务进行回滚，从而避免脏数据的产生。事务逻辑主要是通过SplitTransaction类来封装的，该类的使用模版如下：</para>
+		<programlisting>
+SplitTransaction st = new SplitTransaction(conf, parent, midKey);
+if (!st.prepare()) return;
+try {
+   st.execute(server, services);
+} catch (IOException ioe) {
+   try {
+      st.rollback(server, services);
+      return;
+   } catch (RuntimeException e) {
+      myAbortable.abort("Failed split, abort");
+   }
+}
+		</programlisting>
+		<para>可以看到回滚逻辑主要通过rollback方法来实现，方法在执行过程中会进行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先获取当前Region的拆分进度，以及到达该进度之前都做了哪些工作。</para>
+				<para>Region在拆分过程中大致会经历如下几个阶段(详细的拆分过程可参考上一章节)：</para>
+				<para>(1)STARTED - 拆分逻辑被触发；</para>
+				<para>(2)PREPARED - 执行拆分前的准备工作；</para>
+				<para>(3)BEFORE_PRE_SPLIT_HOOK - 调用协处理器进行拆分前的拦截处理；</para>
+				<para>(4)AFTER_PRE_SPLIT_HOOK - 协处理器处理结束；</para>
+				<para>(5)SET_SPLITTING - Zookeeper中创建出拆分节点；</para>
+				<para>(6)CREATE_SPLIT_DIR - 拆分目录被生成；</para>
+				<para>(7)CLOSED_PARENT_REGION - 父Region被关闭；</para>
+				<para>(8)OFFLINED_PARENT - 父Region被下线，不再提供线上服务；</para>
+				<para>(9)STARTED_REGION_A_CREATION - 第一个子Region被成功创建；</para>
+				<para>(10)STARTED_REGION_B_CREATION - 第二个子Region被成功创建；</para>
+				<para>(11)PONR - 回滚分界点，即该阶段之前的操作可以回滚；</para>
+				<para>(12)OPENED_REGION_A - 第一个子Region被开启；</para>
+				<para>(13)OPENED_REGION_B - 第二个子Region被开启；</para>
+				<para>(14)BEFORE_POST_SPLIT_HOOK - 调用协处理器进行拆分后的拦截处理；</para>
+				<para>(15)AFTER_POST_SPLIT_HOOK - 协处理器处理结束。</para>
+				<para>每到达一个阶段，HBase都会创建JournalEntry实体来对当前的进度进行标记，并将该实体添加到journal集合中。这样，通过journal集合便可获知当前拆分进度已经进入到了哪个阶段，然后依次向前回溯对每个阶段进行回滚即可。需要注意的是如果拆分进度到达了PONR阶段(point-of-no-return)，此时将无法在执行回滚操作，只能将RegionServer停掉以便ServerShutdownHandler对Region的元数据进行修复(参考Region状态管理章节中有关状态修复的介绍)。</para>
+				<para>针对该情况RegionServer宕掉以后将会打印如下提示信息：</para>
+				<blockquote><para>Abort; we got an error after point-of-no-return</para></blockquote>
+			</listitem>
+			<listitem>
+				<para>针对当前进度之前的所有操作进行回滚。</para>
+				<para>回滚操作是通过不断迭代来完成的，每次回滚都是针对一个具体的阶段来进行。</para>
+				<para>(1)如果回滚时处于SET_SPLITTING阶段，删除Zookeeper中的拆分节点；</para>
+				<para>(2)如果回滚时处于CREATE_SPLIT_DIR阶段，清理父Region下的拆分目录；</para>
+				<para>(3)如果回滚时处于CLOSED_PARENT_REGION阶段，重新对父Region执行初始化操作；</para>
+				<para>(4)如果回滚时处于STARTED_REGION_A_CREATION阶段，清理第一个子Region的存储目录；</para>
+				<para>(5)如果回滚时处于STARTED_REGION_B_CREATION阶段，清理第二个子Region的存储目录；</para>
+				<para>(6)如果回滚时处于OFFLINED_PARENT阶段，重新将父Region上线；</para>
+				<para>(7)如果回滚时处于PONR或以后的阶段，将RegionServer停掉。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

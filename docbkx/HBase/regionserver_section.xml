@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RegionServer实现</title>
+	<section>
+		<title>启动关闭</title>
+		<section>
+			<title>启动过程</title>
+			<para>RegionServer在启动过程中会做以下操作处理(具体参考HRegionServer类的run方法)。</para>
+			<orderedlist>
+				<listitem>
+					<para>向HMaster注册之前，做一些初始化准备工作，包括：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>创建ClusterConnection用于远程调用RPC服务。</para></listitem>
+						<listitem><para>开启HealthCheckChore对RS进行周期性的健康监测。</para></listitem>
+						<listitem>
+							<para>等待Master端一些服务的初始化完成，包括MasterFileSystem、MasterWalManager以及ServerManager等。</para>
+							<para>Master端初始化完成这些服务之后会在ZK中创建/master节点和/running节点，因此RS端只需要对这些节点进行watch便可得到相应反馈(具体参考initializeZooKeeper方法实现)。</para>
+						</listitem>
+						<listitem>
+							<para>通过initializeThreads方法来初始化RS运行所需要的一些服务线程，包括：</para>
+							<para>(1)MemStoreFlusher：用于对Region执行flush；</para>
+							<para>(2)CompactSplitThread：用于对Region执行拆分和整理；</para>
+							<para>(3)CompactionChecker：周期性检测Region是否需要整理；</para>
+							<para>(4)PeriodicMemstoreFlusher：周期性检测Region是否需要执行flush；</para>
+							<para>(5)Leases：用于管理Scan租约；</para>
+							<para>(6)nonceManagerChore：定期清理过期的nonce；</para>
+							<para>(7)RegionServerQuotaManager：用于Quota管理；</para>
+							<para>(8)StorefileRefresherChore：对Region副本的StoreFile进行刷新。</para>
+						</listitem>
+						<listitem>
+							<para>注册钩子函数，待RS进程被kill时进行回调处理(通过调用ShutdownHook类的install方法)。</para>
+							<para>钩子函数的运行可通过hbase.shutdown.hook参数来控制是否开启，默认为true。</para>
+						</listitem>
+						<listitem><para>在ZK中创建/hbase/rs/$servername节点，以便于Master知晓当前RS已经上线。</para></listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>准备工作做好之后开始向HMaster进行注册。</para>
+					<para>注册过程是通过调用RegionServerStatusService服务的regionServerStartup方法来实现的，RS会周期性的调用该方法直至注册成功为止。注册成功后RS端会执行如下回调处理(具体参考handleReportForDutyResponse方法)：</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>首先将ZK路径(/hbase/rs/$serverName)写入到$HBASE_ZNODE_FILE文件(默认为$HBASE_PID_DIR/hbase-$user-regionserver.znode)。</para>
+						</listitem>
+						<listitem><para>然后实例化JvmPauseMonitor线程用于监控RS JVM的暂停情况。</para></listitem>
+						<listitem>
+							<para>接着开启如下线程池实例(名称 &amp; 线程数量)，并对步骤1所初始化的服务线程进行调度处理(代码参考startServiceThreads方法)。</para>
+							<para>(1)RS_OPEN_REGION(3)，该线程池用于对用户表格的Region进行加载；</para>
+							<para>(2)RS_OPEN_META(1)，该线程池用于对meta表格的Region进行加载；</para>
+							<para>(3)RS_OPEN_PRIORITY_REGION(3)；</para>
+							<para>(4)RS_CLOSE_REGION(3)，该线程池用于对用户表格的Region进行关闭；</para>
+							<para>(5)RS_CLOSE_META(1)，该线程池用于对meta表格的Region进行关闭；</para>
+							<para>(6)RS_PARALLEL_SEEK(10)，开启该线程池的前提是RS开启了并发定位功能(即hbase.storescanner.parallel.seek.enable参数值为true)；</para>
+							<para>(7)RS_LOG_REPLAY_OPS(2)</para>
+							<para>(8)RS_COMPACTED_FILES_DISCHARGER(10)</para>
+							<para>(9)RS_REGION_REPLICA_FLUSH_OPS(3)，开启该线程池的前提是集群启用了hbase.region.replica.wait.for.primary.flush配置。</para>
+						</listitem>
+						<listitem><para>最后开启HeapMemoryManager用来监控RS的堆内存使用情况。</para></listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>向Master注册成功后，将RS切换到运行模式。</para>
+					<para>进入该模式后会每隔一段时间(默认为3秒，通过hbase.regionserver.msginterval参数指定)向HMaster进行一次心跳汇报，汇报过程通过调用RegionServerStatusService服务的regionServerReport方法，直至RS被停止或健康监测失败。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>关闭过程</title>
+			<para>每当对RegionServer执行shutdown或kill操作时都会触发ShutdownHookThread线程的调用，线程在运行过程中会首先对HRegionServer执行stop操作，然后将HRegionServer线程join到主线程，并等待其运行结束。</para>
+			<para>执行stop期间，HRegionServer主要进行如下处理：首先触发协处理器执行preStop操作，然后唤醒线程的run方法，如果其之前处于sleep状态。线程被唤醒后开始执行Shutdown操作，包括：</para>
+			<orderedlist>
+				<listitem><para>清空所有查询租约信息(通过调用Leases类的closeAfterLeasesExpire方法)。</para></listitem>
+				<listitem><para>关闭SplitLogWorker线程，不再抢占Master的LogReplay任务。</para></listitem>
+				<listitem><para>关闭InfoServer，不在提供http界面访问。</para></listitem>
+				<listitem><para>关闭BlockCache，不在提供缓存服务(通过调用其shutdown方法)。</para></listitem>
+				<listitem>
+					<para>对如下服务线程执行中断操作。</para>
+					<para>(1)HeapMemoryManager，用于监控堆内存使用的线程；</para>
+					<para>(2)MemStoreFlusher，用于对MemStore执行flush；</para>
+					<para>(3)CompactSplitThread，用于对Region执行整理和拆分操作；</para>
+					<para>(4)CompactionChecker，周期性监测Region是否需要整理；</para>
+					<para>(5)HealthCheckChore，监测RS是否健康的线程；</para>
+					<para>(6)nonceManagerChore，定期清理nonce的线程；</para>
+					<para>(7)StorefileRefresherChore，定期刷新Region副本中StoreFile的线程。</para>
+				</listitem>
+				<listitem><para>关闭RegionServerQuotaManager。</para></listitem>
+				<listitem><para>关闭并杀死当前正在运行的Procedure(通过调用RegionServerProcedureManagerHost的stop方法)。</para></listitem>
+				<listitem>
+					<para>关闭所有线上Region并对其执行flush(通过提交CloseRegionHandler到ExecutorService线程池)。</para>
+					<para>此操作为同步操作，Region关闭过程中主线程将会进入等待状态直至所有Region成功关闭，如果RS的Region数量比较庞大，可以加大RS_CLOSE_REGION线程池的容量(通过hbase.regionserver.executor.closeregion.threads参数设置)，从而加快Region的并发关闭效率。</para>
+				</listitem>
+				<listitem><para>对RS所写入的HLog进行关闭和归档，由于线上Region在关闭的时候已经执行了flush，所以RS在下次启动的时候无需在进行LogReplay(abort操作除外)。</para></listitem>
+				<listitem><para>关闭ZK连接，删除ZK中对应的/hbase/rs/$serverName节点并移除本地的$HBASE_ZNODE_FILE文件(默认为$HBASE_PID_DIR/hbase-$user-regionserver.znode)。</para></listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>租约管理</title>
+		<para>HBase的租约管理功能主要应用在scan查询上，如果客户端执行scan操作以后，在60秒内没有将Scanner进行关闭，也没有显示的将租约移除，这时查询租约将会过期，RegionServer会强行关闭与之对应的Scanner，来防止无效连接数过多的情况发生。查询租约的过期时间可通过hbase.client.scanner.timeout.period参数来声明，默认为60秒。</para>
+		<para>在功能实现上租约管理逻辑主要是通过Leases类来封装的，其对内声明了如下数据结构用于存储所有的租约信息(租约信息通过Lease对象来封装)</para>
+		<blockquote><para>leases : Map&lt;String, Lease></para></blockquote>
+		<para>同时其还对外声明了createLease和cancelLease方法用于向leases集合中添加/删除租约。Leases线程启动后，其会循环遍历leases集合，一旦发现有租约已经过期，便通知其LeaseListener进行回调处理。而Lease对象主要实现了java的Delayed接口，可通过其getDelay方法来返回当前租约还有多久过期。</para>
+	</section>
+	<section>
+		<title>Nonce管理</title>
+		<para>客户端提交RPC申请之后，如果服务端的响应超时，其会将该申请重新发送，直至重试次数达到指定参数值之后，在退出申请逻辑。经过这样处理之后，服务端有可能出现如下问题：</para>
+		<para>拿append操作举例，原本客户端只想添加一条KeyValue数据到数据库中，但由于服务端的响应超时，会导致append申请重复多次发送，造成的结果是目标数据在服务端被多次添加，出现append操作冗余的情况。</para>
+		<para>为了防止该情况发生，HBase对外声明了nonce管理功能(通过ServerNonceManager类)，客户端的每次申请及重复申请使用同一个nonce进行描述，发送到服务端以后，服务端会首先判断该nonce是否存在，如果不存在则可放心执行nonce所对应操作(如append或increment)。否则需要根据当前nonce的状态进行相应的回调处理：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>如果nonce处于WAIT状态，表明该nonce所对应的操作正在被执行，当前线程需等待其执行结束，在根据其执行结果做进一步的处理；</para></listitem>
+			<listitem><para>如果nonce处于PROCEED状态，表明该nonce所对应的操作已经被执行，只不过执行结果以失败而告终，因此在这里可重新执行；</para></listitem>
+			<listitem><para>如果nonce处于DONT_PROCEED状态，表明该nonce所对应的操作已经成功被执行，这里无需在做处理。</para></listitem>
+		</itemizedlist>
+		<para>因此，当nonce进入DONT_PROCEED状态以后，所有通过它来执行的操作都将被忽略掉，从而防止了操作冗余的情况发生。需要注意的是当nonce计入DONT_PROCEED或PROCEED状态后，其可存活的时间是受参数控制的(hbase.server.hashNonce.gracePeriod)，默认为30分钟。30分钟之后，ServerNonceManager会将该nonce进行删除，通过其cleanUpOldNonces方法。</para>
+	</section>
+	<section>
+		<title>堆内存监控</title>
+		<orderedlist>
+			<listitem>
+				<para>当用于MemStore和BlockCache的堆内存百分比达到80%时，系统将会抛出异常。</para>
+				<para>因此在设置相关参数时，应满足如下判断条件：</para>
+				<para>hfile.block.cache.size + hbase.regionserver.global.memstore.size &lt;= 0.8</para>	
+			</listitem>
+			<listitem>
+				<para>堆内存的使用空间达到95%时，系统将会打印警告信息</para>
+				<para>95%的参数值是通过hbase.heap.occupancy.low_water_mark来设置的，相关警告信息如下：</para>
+				<para>heapOccupancyPercent is above heap occupancy alarm watermark</para>
+			</listitem>
+			<listitem>
+				<para>弹性调整MemStore和BlockCache的空间比例，但总大小不能大于堆内存的80%</para>
+				<para>当指定如下4个参数时，RegionServer会根据当前堆内存的使用情况对MemStore和BlockCache的大小做动态调整(通过HeapMemoryTuner来实现)。</para>
+				<para>memstore弹性空间：[hbase.regionserver.global.memstore.size.min.range, hbase.regionserver.global.memstore.size.max.range]</para>
+				<para>blockcache弹性空间：[hfile.block.cache.size.min.range,hfile.block.cache.size.max.range]</para>
+			</listitem>
+			<listitem>
+				<para>监控因GC所导致的应用暂停时间</para>
+				<para>如果暂停时间大于1秒(jvm.pause.info-threshold.ms参数控制)，打印如下输出信息：</para>
+				<blockquote><para>Detected pause in JVM or host machine (eg GC): pause of approximately...</para></blockquote>
+				<para>如果暂停时间大于10秒(jvm.pause.warn-threshold.ms参数控制)，同样打印上面的输出信息，只不过信息级别为WARN。具体的监控逻辑可参考org.apache.hadoop.hbase.util.JvmPauseMonitor.Monitor类的实现(HADOOP-9618)。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>健康检测</title>
+		<para>RegionServer进程启动以后，会在后台开启HealthCheckChore线程，默认情况下会每隔10秒钟对RegionServer进行一次健康检测，看其是否处于健康状态，检测周期是通过hbase.node.health.script.frequency参数来声明的。</para>
+		<para>在检测过程中主要是执行hbase.node.health.script.location参数对应的脚本(示例脚本可参考hbase-examples/src/main/sh/healthcheck/healthcheck.sh)，如果脚本在执行过程中出现以下异常情况：</para>
+		<para>(1)脚本执行的返回值不为0；</para>
+		<para>(2)脚本执行超时(超时时间通过hbase.node.health.script.timeout参数设置，默认为60秒)；</para>
+		<para>(3)脚本执行过程中，打印了以ERROR开头的文字信息；</para>
+		<para>则RegionServer的健康检测将以失败而告终。而如果HealthCheckChore线程在循环过程中出现了3次(hbase.node.health.failure.threshold参数控制)健康检测失败的情况，并且前后两次失败的时间间隔小于30秒，其会认为RegionServer没有处于健康状态，会强行将其关闭，并打印如下信息：</para>
+		<blockquote><para>The node reported unhealthy {threshold} number of times consecutively.</para></blockquote>
+		<para>30秒的时间间隔是通过如下方式计算得出的：</para>
+		<blockquote><para>hbase.node.health.script.frequency * hbase.node.health.failure.threshold</para></blockquote>
+	</section>
+	<xi:include href="clientservice_section.xml"/>
+</section>

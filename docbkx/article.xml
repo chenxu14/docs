@@ -1,0 +1,132 @@
+<article>
+	<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Metric统计功能</title>
+	<para>HBase的Metrics统计功能主要依附与Hadoop的common组件来实现，通过它可以统计出系统进程在运行期间的各项参数指标，从而便于开发人员对系统的运行状态做全局的监控处理。</para>
+	<para>整个Metrics体系的构建是基于生产者-消费者模式来设计的，其中MetricsSource为生产者，负责产出Metrics数据；而MetricsSink为消费者，负责对这些Metrics数据进行消费处理，两者间的贸易关系是通过MetricsSystem来建立，如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="./media/common/metrics.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>相关角色说明如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>MetricsSystem</para>
+			<para>MetricsSystem相当于整个Metrics体系的容器，系统主要通过它来注册与管理MetricsSource和MetricsSink。在启用Metrics功能前，需要首先对其执行初始化操作：</para>
+			<blockquote><para>DefaultMetricsSystem.initialize(prefix);</para></blockquote>
+			<para>在初始化过程中，MetricsSystem会去检索hadoop-metrics2.properties配置文件，并查找以prefix为开头的配置，然后将这些配置信息加载到系统中去(具体参考Metrics配置)。</para>
+		</listitem>
+		<listitem>
+			<para>MetricsSource</para>
+			<para>针对每个MetricsSource，MetricsSystem会周期性的执行其getMetrics方法来获取其内部的Metrics数据。Metrics数据是按照如下方式进行组织的：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>每一个监控指标称之为一个Metric，它是Metrics系统中最小的统计单元；</para></listitem>
+				<listitem><para>将某些具有相同性质的Metric组织到一起，便形成了一个Metric分组，称之为context；</para></listitem>
+				<listitem><para>将某个context在指定时间点上的指标数据值封装到一起，便形成了一条MetricRecord记录。</para></listitem>
+			</itemizedlist>
+			<para>每当getMetrics方法调用时，便会产出一条MetricRecord记录，并将其交付与MetricsSystem进行支配处理。</para>
+			<para>在HBase框架中，MetricsSource的构建主要是通过继承BaseSourceImpl类来实现的，其对外实现了MetricsSource接口，并对内封装了DynamicMetricsRegistry实现类，可通过它来完成Metric的动态添加和删除功能，大致实现如下：</para>
+			<programlistingco>
+				<programlisting>
+public class BaseSourceImpl implements MetricsSource {
+    ......
+    MutableCounterLong demoMetric;
+    DynamicMetricsRegistry metricsRegistry;
+    public BaseSourceImpl(recordName, sourceDesc, contextName, sourceName) {
+        ......
+        DefaultMetricsSystem.initialize(prefix); <co id="co.metricsource.init" linkends="co.note.metricsource.init"/>
+        DefaultMetricsSystem.instance().register(sourceName, sourceDesc, this); <co id="co.metricsource.register" linkends="co.note.metricsource.register"/>
+        metricsRegistry = new DynamicMetricsRegistry(recordName)
+            .setContext(contextName); <co id="co.metricsource.registry" linkends="co.note.metricsource.registry"/>
+        demoMetric = metricsRegistry.newCounter("demoMetric", "demoMetricDesc", 0L); <co id="co.metricsource.metric" linkends="co.note.metricsource.metric"/>
+        ......
+    }
+    public void getMetrics(MetricsCollector metricsCollector, boolean all) { <co id="co.metricsource.getmetrics" linkends="co.note.metricsource.getmetrics"/>
+        metricsRegistry.snapshot(metricsCollector
+            .addRecord(metricsRegistry.info()), all); <co id="co.metricsource.snapshot" linkends="co.note.metricsource.snapshot"/>
+    }
+    public void changeDemoMetric(long value){
+        demoMetric.incr(value);
+    }
+    ......
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.metricsource.init" arearefs="co.metricsource.init"><para>初始化MetricsSystem，如果已经初始化成功则直接返回；</para></callout>
+					<callout id="co.note.metricsource.register" arearefs="co.metricsource.register"><para>将MetricsSource注册到MetricsSystem系统中去；</para></callout>
+					<callout id="co.note.metricsource.registry" arearefs="co.metricsource.registry"><para>通过DynamicMetricsRegistry来实现Metric的动态添加和删除功能(参考HADOOP-8313)；</para></callout>
+					<callout id="co.note.metricsource.metric" arearefs="co.metricsource.metric"><para>声明Metric监控项，并注入metricsRegistry；</para></callout>
+					<callout id="co.note.metricsource.getmetrics" arearefs="co.metricsource.getmetrics"><para>MetricsSystem会周期性的执行该方法来通过MetricsCollector收集MetricsRecord；</para></callout>
+					<callout id="co.note.metricsource.snapshot" arearefs="co.metricsource.snapshot"><para>统计所有已注册的Metric数值到MetricsRecord中，并返回给MetricsSystem；</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>除了实现指定接口，MetricsSource的声明还可通过注解的方式来实现，示例如下：</para>
+			<programlistingco>
+				<programlisting>
+@Metrics(about="sourceDesc", context="contextName") <co id="co.metricsource.annotation" linkends="co.note.metricsource.annotation"/>
+public class BaseSourceImpl { <co id="co.metricsource.class" linkends="co.note.metricsource.class"/>
+    long demoMetric = 0;
+    @Metric("demoMetricDesc") <co id="co.metric.annotation" linkends="co.note.metric.annotation"/>
+    public long getDemoMetric() {
+        return demoMetric;
+    }
+    public synchronized void changeDemoMetric(long value) {
+        demoMetric += value;
+    }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.metricsource.annotation" arearefs="co.metricsource.annotation"><para>Metrics标签用来表明该对象为MetricsSource，MetricsSystem会通过反射机制自动将其加载，其中about为source描述，context为Metrics分组；</para></callout>
+					<callout id="co.note.metricsource.class" arearefs="co.metricsource.class"><para>通过注解的方式来声明MetricsSource，sourceName和recordName都为类名；</para></callout>
+					<callout id="co.note.metric.annotation" arearefs="co.metric.annotation"><para>Metric标签用于声明统计指标，指标名称为get方法的后缀(首字母小写，即demoMetric)。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>虽然以注解的方式声明MetricsSource可以省略很多代码，但其本身也存在相应的局限性，即只能静态的声明Metric而不能通过DynamicMetricsRegistry来实现Metric的动态添加和删除功能。</para>
+		</listitem>
+		<listitem>
+			<para>MetricsSink</para>
+			<para>MetricsSystem获取到MetricRecord记录后会将其交付与MetricsSink进行消费处理，Hadoop目前声明了两种MetricsSink的实现，分别是：</para>
+			<para>(1)GangliaSink：将metrics信息广播给Ganglia进行处理；</para>
+			<para>(2)FileSink：将metrics信息写入到指定文件中。</para>
+			<para>除此之外还可通过实现MetricsSink接口来为集群引入自定义的消费处理，比如将Metrics信息写入小米的OpenFalcon(详细可参考https://github.com/JavamanChen/hadoop_ext/blob/master/src/main/java/com/chen/hadoop/metric/OpenFalconSink.java)。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>Metric配置</title>
+		<para>metrics配置默认保存在$HBASE_HOME/conf/hadoop-metrics2-hbase.properties文件中，每一行的配置语法如下：</para>
+		<blockquote><para>[prefix].[source|sink].[instance].[options]</para></blockquote>
+		<para>其中[prefix]为MetricsSystem在初始化时指定的前缀信息；[instance]可以是任意字符串，用来唯一标识source或sink实例，也可以是"*"，用来标识所有实例；[options]为一些具体的配置项信息，配置示例如下：</para>
+		<programlistingco>
+			<programlisting>
+*.sink.file.class=org.apache.hadoop.metrics2.sink.FileSink <co id="co.hbasemetric.conf" linkends="co.note.hbasemetric.conf"/>
+*.period=100 <co id="co.hbasemetric.conf.period" linkends="co.note.hbasemetric.conf.period"/> 
+hbase.sink.file.filename=/tmp/hbase-metrics.out <co id="co.hbasemetric.conf.file" linkends="co.note.hbasemetric.conf.file"/>
+hbase.sink.file.context=regionserver <co id="co.hbasemetric.conf.context" linkends="co.note.hbasemetric.conf.context"/>
+
+*.source.filter.class=org.apache.hadoop.metrics2.filter.RegexFilter <co id="co.hbasemetric.conf.filter" linkends="co.note.hbasemetric.conf.filter"/>
+*.record.filter.class=${*.source.filter.class}
+*.metric.filter.class=${*.source.filter.class}
+hbase.*.source.filter.include=.*sub=Server <co id="co.hbasemetric.filter.source" linkends="co.note.hbasemetric.filter.source"/>
+hbase.*.record.filter.exclude=foo.* <co id="co.hbasemetric.filter.record" linkends="co.note.hbasemetric.filter.record"/>
+hbase.sink.file.metric.filter.include=slow.*Count|.*QueueLength <co id="co.hbasemetric.filter.metric" linkends="co.note.hbasemetric.filter.metric"/>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.hbasemetric.conf" arearefs="co.hbasemetric.conf" ><para>对所有进程使用FileSink做metrics消费处理，hadoop目前对外声明了两种类型的MetricsSink，分别是GangliaSink(将metrics信息广播给Ganglia框架进行处理)和FileSink(将metrics信息保存到指定文件中)；</para></callout>
+				<callout id="co.note.hbasemetric.conf.period" arearefs="co.hbasemetric.conf.period" ><para>指定metrics的统计周期为100秒；</para></callout>
+				<callout id="co.note.hbasemetric.conf.file" arearefs="co.hbasemetric.conf.file" ><para>将metrics信息保存到/tmp/hbase-metrics.out文件中；</para></callout>
+				<callout id="co.note.hbasemetric.conf.context" arearefs="co.hbasemetric.conf.context" ><para>context可理解为一个metrics分组，可用来做metrics过滤，这里表示只接受regionserver分组的metrics消息。</para></callout>
+				<callout id="co.note.hbasemetric.conf.filter" arearefs="co.hbasemetric.conf.filter" ><para>分别为source(监控源),record(监控记录)和metrics(监控项)声明过滤器，它们之间的关系是：监控源可提供多条监控记录，监控记录可包含多个监控项；</para></callout>
+				<callout id="co.note.hbasemetric.filter.source" arearefs="co.hbasemetric.filter.source" ><para>对MetricsSource进行过滤；</para></callout>
+				<callout id="co.note.hbasemetric.filter.record" arearefs="co.hbasemetric.filter.record" ><para>对MetricRecord进行过滤；</para></callout>
+				<callout id="co.note.hbasemetric.filter.metric" arearefs="co.hbasemetric.filter.metric" ><para>对Metric进行过滤。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>
+</article>

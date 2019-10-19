@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>原理解析</title>
+	<section>
+		<title>Join原理</title>
+		<orderedlist>
+			<listitem>
+				<para>执行Hive-Sql如下：</para>
+				<programlisting>
+INSERT INTO TABLE pv_users
+SELECT pv.pageid, u.age
+FROM page_view pv JOIN user u ON (pv.userid = u.userid);			
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>数据流图：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="70%" scalefit="1" fileref="../media/hive/join.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Map阶段：</para>
+						<para>将Joinkey作为Map输出的Key值，这里的JoinKey为userid；</para>
+						<para>将表格的select字段值作为Map输出的Value，page_view表格的select字段是pageid，user表格的select字段是age；</para>
+						<para>将表格标识符也加入到Map输出的Value中，这样Reduce阶段就能知道该记录来自哪张表，如蓝色的1标识page_view表，红色的2标识user表。</para>
+					</listitem>
+					<listitem>
+						<para>Shuffle阶段：</para>
+						<para>选取JoinKey作为PartitionKey，将Map数据分发给不同的Reduce进行处理；</para>
+					</listitem>
+					<listitem>
+						<para>Reduce阶段</para>
+						<para>Reduce接收完Shuffle数据后，首先将Join操作左边的表格数据导入内存(page_view表格数据)，然后对Join右边的表格数据依次执行合并操作。因此在执行Join操作时，最好将数据量低的表格放在Join操作的左边，来防止OOM的生成几率。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>GroupBy原理</title>
+		<orderedlist>
+			<listitem>
+				<para>执行Hive-Sql如下：</para>
+				<para>select rank, isonline, count(*) from city group by rank, isonline;</para>
+			</listitem>
+			<listitem>
+				<para>数据流图：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="70%" scalefit="1" fileref="../media/hive/groupBy.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Map阶段：</para>
+						<para>选取groupBy字段作为Map输出的Key值，字段可以有多个，如这里的rank和isonline；</para>
+						<para>Map端首先执行聚合操作，从而降低Shuffle数据量，相当于使用combiner功能。</para>
+					</listitem>
+					<listitem>
+						<para>Shuffle阶段：</para>
+						<para>同样选取groupBy字段作为PartitionKey，将Map数据分发给不同的Reduce；</para>
+					</listitem>
+					<listitem>
+						<para>Reduce阶段：</para>
+						<para>Reduce接收到Shuffle数据后处理最后的聚合操作。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Distinct原理</title>
+		<orderedlist>
+			<listitem>
+				<para>执行Hive-Sql如下：</para>
+				<para>select dealid, count(distinct uid) num from order group by dealid;</para>
+			</listitem>
+			<listitem>
+				<para>数据流图：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="70%" scalefit="1" fileref="../media/hive/distinct.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Map阶段：</para>
+						<para>选取groupBy字段和distinct字段作为Map输出的Key值，如这里的groupBy字段为dealid，distinct字段为uid；</para>
+						<para>Map端首先执行聚合操作(通过Key值来进行记录去重)，从而降低Shuffle数据量，相当于使用combiner功能。</para>
+					</listitem>
+					<listitem>
+						<para>Shuffle阶段：</para>
+						<para>选取groupBy字段作为PartitionKey，将Map数据分发给不同的Reduce；</para>
+					</listitem>
+					<listitem>
+						<para>Reduce阶段：</para>
+						<para>Reduce接收到Shuffle数据后处理最后的聚合操作，通过Key值来进行记录去重。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<tip>如果distinct字段有多个，可以对所有的distinct字段进行编号，这样每行数据便会生成n条(distinct字段数)记录，具体方式如图所示：</tip>
+		<para>select dealid, count(distinct uid), count(distinct date) from order group by dealid;</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="60%" scalefit="1" fileref="../media/hive/distinct-b.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+	</section>
+	<xi:include href="compile_section.xml" />
+</section>

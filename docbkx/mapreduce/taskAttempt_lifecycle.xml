@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>TaskAttempt状态机</title>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->UNASSIGNED</para>
+			<para>触发事件：TA_SCHEDULE 或 TA_RESCHEDULE</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para>触发SpeculatorEvent事件，事件类型为TASK_CONTAINER_NEED_UPDATE，使Speculator做相应处理(参考Speculator)；</para></listitem>
+				<listitem><para>触发ContainerRequestEvent事件，事件类型为CONTAINER_REQ，通过ContainerAllocator向资源调度器申请Container计算资源(参考ContainerAllocator)。</para></listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>状态转换：UNASSIGNED-->UNASSIGNED</para>
+			<para>触发事件：TA_SCHEDULE 或 TA_RESCHEDULE</para>
+			<para>回调处理：</para>
+		</listitem>
+		<listitem>
+			<para>状态转换：UNASSIGNED-->ASSIGNED</para>
+			<para>触发事件：TA_ASSIGNED(AM成功为Task申请Container后触发，参考ContainerAllocator服务)</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem>
+					<para>构造ContainerLaunchContext对象用于封装Container运行所需资源和启动命令，启动命令大致如下：</para>
+					<programlistingco>
+						<programlisting>
+$JAVA_HOME/bin/java 
+-Djava.net.preferIPv4Stack=true -Dhadoop.metrics.log.level=WARN <co id="co.taskcontainer.admin.opts" linkends="co.note.taskcontainer.admin.opts"/>
+-Xmx2560M <co id="co.taskcontainer.java.opts" linkends="co.note.taskcontainer.java.opts"/>
+-Djava.io.tmpdir = ${LOCAL_DIR}/usercache/${user}/appcache/${appId}/${containerId}/tmp <co id="co.taskcontainer.tmp" linkends="co.note.taskcontainer.tmp"/>
+-Dlog4j.configuration = container-log4j.properties 
+-Dyarn.app.container.log.dir = ${LOG_DIR} <co id="co.taskcontainer.log" linkends="co.note.taskcontainer.log"/>
+-Dyarn.app.container.log.filesize = ${LOG_SIZE} <co id="co.taskcontainer.log.size" linkends="co.note.taskcontainer.log.size"/>
+-Dhadoop.root.logger = ${LOG_LEVEL},CLA <co id="co.taskcontainer.log.level" linkends="co.note.taskcontainer.log.level"/>
+org.apache.hadoop.mapred.YarnChild ${ListenerIP} ${ListenerPort} ${attemptID} ${jvmID} <co id="co.taskcontainer.class" linkends="co.note.taskcontainer.class"/>
+1>${LOG_DIR}/${appId}/${containerId}/stdout 
+2>${LOG_DIR}/${appId}/${containerId}/stderr 
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.taskcontainer.admin.opts" arearefs="co.taskcontainer.admin.opts" ><para>任务管理参数，通过mapreduce.admin.&lt;map|reduce>.child.java.opts配置来指定；</para></callout>
+							<callout id="co.note.taskcontainer.java.opts" arearefs="co.taskcontainer.java.opts" ><para>任务堆内存大小，通过mapreduce.&lt;map|reduce>.java.opts配置来指定；</para></callout>
+							<callout id="co.note.taskcontainer.tmp" arearefs="co.taskcontainer.tmp" ><para>任务运行临时目录，LOCAL_DIR通过yarn.nodemanager.local-dirs配置参数来指定；</para></callout>
+							<callout id="co.note.taskcontainer.log" arearefs="co.taskcontainer.log" ><para>日志输出目录(LOG_DIR)通过yarn.nodemanager.log-dirs配置参数来指定；</para></callout>
+							<callout id="co.note.taskcontainer.log.size" arearefs="co.taskcontainer.log.size" ><para>限制日志文件大小通过mapreduce.task.userlog.limit.kb配置参数来指定；</para></callout>
+							<callout id="co.note.taskcontainer.log.level" arearefs="co.taskcontainer.log.level" ><para>日志级别通过mapreduce.&lt;map|reduce>.log.level配置参数来指定；</para></callout>
+							<callout id="co.note.taskcontainer.class" arearefs="co.taskcontainer.class" ><para>TaskContainer主要是加载YarnChild类。</para></callout>
+						</calloutlist>
+					</programlistingco>
+					<para>对象成功构建后通过RPC服务传递至NM端进行Container加载操作(参考ContainerManager服务)，加载成功后触发TaskAttemptEvent事件，事件类型为TA_CONTAINER_LAUNCHED，将TaskAttempt状态机切换成RUNNING状态。</para>
+				</listitem>
+				<listitem>
+					<para>触发SpeculatorEvent事件，事件类型为TASK_CONTAINER_NEED_UPDATE，使Speculator服务做相应处理。</para>
+				</listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+</section>

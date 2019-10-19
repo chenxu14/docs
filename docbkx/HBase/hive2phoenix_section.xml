@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>hive2phoenix应用</title>
+	<section>
+		<title>实时put方式</title>
+		<orderedlist>
+			<listitem>
+				<para>pom中添加如下依赖</para>
+				<para>com.meituan.phoenix:phoenix-spark1.6:4.13.0</para>
+				<para>org.apache.spark:spark-core_2.10:1.6.1</para>
+				<para>org.apache.spark:spark-sql_2.10:1.6.1</para>
+				<para>org.apache.spark:spark-hive_2.10:1.6.1</para>
+			</listitem>
+			<listitem>
+				<para>主应用程序如下</para>
+				<programlisting>
+object Hive2Phoenix {
+  def main(args: Array[String]) {
+    val conf = new SparkConf().setAppName("Hive2PhoenixDemo")
+    val hbaseConf = HBaseConfiguration.create()
+    val realUser = UserGroupInformation.getLoginUser().getRealUser()
+    var user: User = null
+    if (realUser != null) {
+      user = new SecureHadoopUser(realUser)
+    } else {
+      user = new SecureHadoopUser(UserGroupInformation.getLoginUser())
+    }
+    val conn = ConnectionFactory.createConnection(hbaseConf, user)
+    val token = TokenUtil.obtainToken(conn)
+    UserGroupInformation.getCurrentUser().addToken(token)
+    println("obtain token success!")
+    val sc = new SparkContext(conf)
+    val sqlContext = new HiveContext(sc)
+    val df = sqlContext.sql("FROM hive2phoenix SELECT uid,uname where uid is not null")
+    df.save("org.apache.phoenix.spark", SaveMode.Overwrite, Map("table" -> "TESTTABLE",
+        "zkUrl" -> "gh-data-hbase-test01.gh.sankuai.com:2181:/hbase"))
+  }
+}
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>bulkload方式</title>
+		<para>phoniex对外提供了CsvBulkLoadTool工具，可通过MR应用将csv文件转换成HFile，再将HFile以bulkload的方式进行导入(此方式支持本地索引)，为此可考虑先将hive数据导出成csv，在通过CsvBulkLoadTool来实现bulkload。</para>
+		<orderedlist>
+			<listitem>
+				<para>hive数据导出成csv文件</para>
+				<para>这里主要借助于spark-csv来实现，pom.xml中添加以下依赖。</para>
+				<para>com.databricks:spark-csv_2.10:1.5.0</para>
+			</listitem>
+			<listitem>
+				<para>然后定义如下主程序</para>
+				<programlisting>
+object Hive2Phoenix {
+  def main(args: Array[String]) {
+    val conf = new SparkConf().setAppName("Hive2PhoenixDemo")
+    val sc = new SparkContext(conf)
+    val sqlContext = new HiveContext(sc)
+    val df = sqlContext.sql("FROM hive2phoenix SELECT uid,uname where uid is not null")
+    df.write.format("com.databricks.spark.csv")
+            .option("header", "false")
+            .save("hdfs://rz-nn09/tmp/hive2phoenix.csv")
+
+    val hadoopConf = new Configuration();
+    hadoopConf.set("hadoop.tmp.dir", "/tmp/${user.name}");
+    hadoopConf.set("mapreduce.job.queuename", "root.gh.hadoop-hdp.hbase");
+    hadoopConf.set("mapreduce.map.speculative", "false");
+    hadoopConf.set("mapreduce.reduce.speculative", "false");
+    val nss = hadoopConf.get("dfs.nameservices", null);
+    hadoopConf.set("dfs.nameservices", nss + ",gh-data-hbase-finance")
+    hadoopConf.set("fs.permissions.umask-mode", "000")
+    hadoopConf.set("dfs.ha.namenodes.gh-data-hbase-finance", "nn1,nn2");
+    hadoopConf.set("dfs.namenode.rpc-address.gh-data-hbase-finance.nn1",
+        "gh-data-hbase-finance01.gh.sankuai.com:8020");
+    hadoopConf.set("dfs.namenode.rpc-address.gh-data-hbase-finance.nn2",
+        "gh-data-hbase-finance02.gh.sankuai.com:8020");
+    hadoopConf.set("dfs.namenode.http-address.gh-data-hbase-finance.nn1",
+        "gh-data-hbase-finance01.gh.sankuai.com:50070");
+    hadoopConf.set("dfs.namenode.http-address.gh-data-hbase-finance.nn2",
+        "gh-data-hbase-finance02.gh.sankuai.com:50070");
+    hadoopConf.set("dfs.namenode.shared.edits.dir",
+        "qjournal://gh-data-hbase-finance01.gh.sankuai.com:8485/gh-data-hbase-finance");
+    hadoopConf.set("dfs.client.failover.proxy.provider.gh-data-hbase-finance",
+        "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider");
+    val exitStatus = ToolRunner.run(hadoopConf, new CsvBulkLoadTool(),
+        Array("--table", "HIVE2PHOENIX",
+              "--input", "hdfs://rz-nn09/tmp/hive2phoenix.csv",
+              "--output", "hdfs://gh-data-hbase-finance/tmp/hfiles"));
+    System.exit(exitStatus);
+  }
+}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>或者直接通过命令终端导入</para>
+				<programlisting>
+export HADOOP_HOME=/home/hbase/hadoop
+export HADOOP_CONF_DIR=/home/hbase/hadoop/etc/hadoop
+export HADOOP_CLASSPATH=$(/opt/meituan/hbase/bin/hbase classpath):/opt/meituan/hbase/conf
+./bin/hadoop jar /home/hbase/phoenix-4.13.0-client.jar
+    org.apache.phoenix.mapreduce.CsvBulkLoadTool
+    -libjars=/home/hbase/phoenix-4.13.0-client.jar
+    --table TESTTABLE 
+    --input hdfs://rz-nn09/tmp/hive2phoenix.csv
+    --output hdfs://gh-data-hbase-finance/tmp/hfiles
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

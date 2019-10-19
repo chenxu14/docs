@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg" xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml" xmlns:db="http://docbook.org/ns/docbook">
+	<title>大对象存储</title>
+	<para>MOB对象一般指100kb~10M之间的数据，针对这类数据如果直接向HBase写入会产生写放大的效果，因为整理和拆分操作将会变得非常频繁，从而牺牲过多的IO性能。为此HBase针对MOB数据提供了另外一种存储策略：将MOB数据分别通过线上的mobStore和线下的mobRegion进行管理，线上的mobStore用于保存MOB相关的元数据信息(metaCell)，而线下的mobRegion用于保存MOB数据内容(mobCell)，并且针对线下的mobRegion采用不同的拆分和整理策略，以达到降低磁盘IO的效果。</para>
+	<para>在采用该策略之前，HBase也曾尝试过其它实现(社区讨论参考HBASE-11339)，比如：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>调高Region的拆分阈值并定义额外的整理策略，以便降低Region的拆分和整理的频率。</para>
+			<para>缺点：查询过程中将遍历大量的HFile，从而占用过多的文件句柄，消耗内存。 </para>
+		</listitem>
+		<listitem>
+			<para>将MOB对象的数据内容存储到HDFS，在HBase端记录目标数据的存储位置。</para>
+			<para>缺点：HDFS会存储大量的小文件，牺牲NN性能。</para>
+		</listitem>
+		<listitem>
+			<para>将MOB对象的数据内容写入SequenceFile，在HBase端记录目标数据的存储位置及偏移量信息。</para>
+			<para>缺点：因SequenceFile不支持删除操作，难以满足HBase的整理和删除需求。并且由于meta和data分别托管于两个不同的存储媒介，难以满足一致性要求。</para>
+		</listitem>
+	</itemizedlist>
+	<section>
+		<title>读写路径</title>
+		<para>采用MOB存储之后，HBase的读写路径会发生一些变化，针对读操作体现在Scanner的构造上有所不同，而针对写操作则体现在flush的执行策略以及StoreFile的整理策略上发生了变化。</para>
+		<itemizedlist make='bullet'>
+		  <listitem>
+		      <para>MobStoreScanner</para>
+		      <para>针对MOB数据的读取主要通过构造MobStoreScanner来实现，具体细节如图所示：</para>
+		      <mediaobject>
+                <imageobject>
+                    <imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/mobScanner.png"></imagedata>
+                </imageobject>
+              </mediaobject>
+              <para>MobStoreScanner在类结构上继承至StoreScanner，检索数据时首先调用超类的next方法来获取metaCell集合，然后针对每一个metaCell，调用HMobStore的resolve方法解析出对应的mobCell，并将其返回。在对HMobStore执行resolve方法时，主要是开启目标mobFile的Reader实例，并通过seek+fetch的方式来获取目标数据内容。为了提高读取效率，HBase针对mob文件的读取提供了缓存功能，将常用mobFile的Reader缓存下来，并基于LRU的方法进行淘汰。相关的配置参数可参考配置整理章节。</para>
+		  </listitem>
+		  <listitem>
+		      <para>DefaultMobStoreFlusher</para>
+		      <para>MOB数据同样会先写MemStore并记录HLog，当MemStore达到flush阈值之后，将采用DefaultMobStoreFlusher进行flush处理，处理细节如下： </para>
+		      <mediaobject>
+                <imageobject>
+                    <imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/mobflusher.png"></imagedata>
+                </imageobject>
+              </mediaobject>
+              <orderedlist>
+                <listitem>
+                    <para>首先将当前的MemStore内容打包生成一份数据快照，并调用flushSnapshot方法对快照内容进行冲刷。</para>
+                    <para>冲刷过程会构造两个StoreFileWriter(metaWriter和mobWriter)，分别用于保存MOB元数据信息(线上mobStore)和数据内容信息(线下mobRegion)，其中mobWriter的临时写入路径为/hbase/mobdir/.tmp/$startkey_$data_$uuid</para>
+                </listitem>
+                <listitem>
+                    <para>读取快照中的每一个Cell，进行如下处理</para>
+                    <para>如果Cell满足如下判断条件之一，调用metaWriter进行写入。</para>
+                    <para>(1)Cell大小低于MOB对象的设置阈值(通过列族的MOB_THRESHOLD属性声明)</para>
+                    <para>(2)Cell中有Tag显示该Cell为metaCell(含有MOB_REFERENCE_TAG_TYPE类型的Tag)</para>
+                    <para>(3)Cell的操作类型不为Put</para>
+                    <para>否则调用mobWriter进行写入，并针对该Cell创建metaCell(值为mobCell的大小_mobCell所存储到的文件)，在将metaCell通过metaWriter进行写入。</para>
+                </listitem>
+                <listitem>
+                    <para>Cell处理完成之后，将如下元数据信息写入到目标文件的FileInfo块。</para>
+                    <para>如果是mobWriter写入MAX_SEQ_ID_KEY，MAJOR_COMPACTION_KEY和MOB_CELLS_COUNT；如果是metaWriter写入MAX_SEQ_ID_KEY，MAJOR_COMPACTION_KEY，TIMERANGE_KEY和EARLIEST_PUT_TS。</para>
+                </listitem>
+                <listitem>
+                    <para>将mobFile从临时路径移动到/hbase/mobdir/$ns/$table/$mobRegion/$cf路径下，并将metaWriter新生成的StoreFile加入到线上集合。</para>
+                </listitem>
+              </orderedlist>
+		  </listitem>
+		  <listitem>
+		      <para>DefaultMobStoreCompactor</para>
+		      <para>由于线上的Region只存储MOB对象的元数据信息，相应的元数据被删除以后，线下的MOB数据也需要级联进行删除。因此针对mob数据的整理策略也会发生一些变化，变化逻辑主要通过DefaultMobStoreCompactor类来封装(代码可参考其performCompaction方法)。</para>
+		      <orderedlist>
+                <listitem>
+                    <para>首先构造出如下几个输出流实例。</para>
+                    <para>(1)创建metaWriter，通过HStore的createWriterInTmp方法。</para>
+                    <para>(2)创建mobFileWriter，通过HMobStore的createWriterInTmp方法，目标写入路径为/hbase/mobdir/.tmp/$startkey_$data_uuid，其中startKey为当前线上Region的startKey，data为数据写入时间(精确到天)。</para>
+                    <para>(3)创建delFileWriter，通过HMobStore的createDelFileWriterInTmp方法(与createWriterInTmp实现类似，只不过文件名以_del为后缀)</para>
+                    <para>针对线上的mobStore执行大整理操作时，如果目标Cell已被删除，会将该Cell存储至delFile，以便针对线下的mobRegion执行整理操作时，对应的mobCell能够级联删除。由于metaCell和mobCell具有相同的rowkey和column信息，因此虽然物理空间上两个Cell的存储位置不太一样，并且存储性质也不相同，但是逻辑空间上却可认为是同一个Cell。这样将被删除的Cell写入delFile后，便能与mobFile做合并读取。</para>
+                </listitem>
+                <listitem>
+                    <para>构造StoreScanner对线上的mobStore进行读取。</para>
+                    <para>Scan类型为COMPACT_RETAIN_DELETES，对于逻辑上已被删除的记录Scan操作依然将其结果进行保留，因为Cell数据在被移除前需要记录到delFile中，以便后续对线下的mobRegion执行整理操作时，相应的mobCell能够做级联删除处理(即步骤3的第一步能够正确执行)。</para>
+                </listitem>
+                <listitem>
+                    <para>通过步骤2构造的Scanner检索所有的Cell，并针对每一个Cell执行如下处理。</para>
+                    <para>(1)如果方法参数显示当前整理操作为大整理，并且目标Cell含有delete标识。</para>
+                    <para>如果目标Cell为metaCell，直接通过metaWriter进行写入(是否可省略这部分逻辑??)；否则将其通过delFileWriter进行写入，以便针对线下的mobRegion执行整理操作时对应的mobCell能够级联删除。在将目标Cell转换成metaCell(通过调用MobUtils类的createMobRefDeleteMarker方法)并通过metaWriter进行写入(是否可省略这部分逻辑??)；疑问：非mob记录被删除也将写入delFile？</para>
+                    <para>(2)否则，如果mobFileWriter构建失败，或者Cell不是Put类型，将该Cell写入metaWriter。</para>
+                    <para>(3)否则，如果目标Cell为metaCell，从value值中读取出其对应的mobCell的大小(metaCell的存储格式为mobSize_mobFileName)。</para>
+                    <para>如果大小高于mob对象的设置阈值，说明该Cell已被当作MOB数据进行处理，直接将metaCell写入metaWriter即可。否则表明MOB对象的阈值被进行了新的调整，当前Cell已不在认为是MOB数据，需要从目标mobFileName文件中将当前mobCell解析出来，然后将其写入metaWriter。</para>
+                    <para>(4)否则说明该Cell不是metaCell</para>
+                    <para>如果其大小低于MOB阈值，直接通过metaWriter进行写入；否则将目标Cell写入mobFileWriter，并创建其对应的metaCell，在将metaCell写入metaWriter。</para>
+                </listitem>
+                <listitem>
+                    <para>关闭mobFileWriter和delFileWriter并将meta信息写入新生成的mobFile和delFile，在将mobFile和delFile从tmp目录移动至正确目录。</para>
+                </listitem>
+              </orderedlist>
+		  </listitem>
+		</itemizedlist>
+	</section>
+	<section>
+	   <title>线下整理</title>
+	   <para>随着数据的不断写入以及flush操作的不断执行，会生成越来越多的mob小文件，为此需要对这些小文件进行不断的合并及整理，防止文件数超过dfs.namenode.fs-limits.max-directory-items阈值(默认为100万)。线下mobRegion的整理操作可通过两种方式来触发：</para>
+       <para>(1)HMaster后台开启了MobCompactionChore线程，会每隔一段时间遍历所有的线上表格，如果有表格列族启用了IS_MOB，开始提交CompactionRunner线程对其进行整理。线程在运行过程中会首先对目标表格锁进行抢占，抢占失败将进入等待状态，直至目标锁被释放或等待超时。</para>
+       <para>(2)客户端手动触发了如下整理命令，服务端收到请求后同样会开启CompactionRunner线程进行处理。</para>
+       <blockquote>
+         <para>hbase> compact ‘t1’, ‘f1’, ‘MOB’</para>
+         <para>hbase> major_compact ‘t1’, ‘f1’, ‘MOB’</para>
+       </blockquote>
+       <para>MOB整理完全是在master端进行的，CompactionRunner线程在执行过程中会去读取hbase.mob.compactor.class配置，将配置参数对应的类进行实例化(默认为PartitionedMobCompactor)，然后执行其compact方法，方法细节大致如下：</para>
+       <orderedlist>
+         <listitem>
+            <para>首先构造待整理分区</para>
+            <para>分区策略通过列族的MOB_COMPACT_PARTITION_POLICY的元数据属性进行声明(默认为MobCompactPartitionPolicy.DAILY，表示按天分区)。确定分区策略以后开始遍历所有待整理的StoreFile文件集，如果其为delFile(文件名含有_del字符串)，将其加入allDelFiles集合，否则从文件名中提取出startKey信息和data信息(mobFile的文件名格式为：$startKey_$data_$uuid) ，并通过它来来构造CompactionPartitionId(如果内存中不存在)代表一个待整理分区，如果当前遍历的mobFile文件大小低于hbase.mob.compaction.mergeable.threshold参数阈值，将其放入目标待整理分区中进行存储。待所有待整理分区统计完成之后，判断整理操作是否为大整理，如果不是将所有文件数量为1的待整理分区过滤掉，然后调用performCompaction方法开启整理操作。</para>
+         </listitem>
+         <listitem>
+            <para>对待整理分区执行整理操作(代码逻辑通过performCompaction方法来封装)</para>
+            <para>(1)首先对delFile文件集进行合并处理。</para>
+            <para>如果delFile的文件数量大于hbase.mob.delfile.max.count参数阈值，开始分批次对其进行合并整理，每个批次所整理的delFile文件数量不得高于hbase.mob.compaction.batch.size阈值，防止文件句柄占用过多。整理过程主要是通过构造Scanner来查询delFile文件数据，在通过新的Writer完成数据写入。新写入的delFile将存储在/hbase/mobdir/$ns/$table/$mobRegion/$cf路径下。</para>
+            <para>(2)然后针对每一个待整理分区开启新的线程执行如下整理操作(代码逻辑参考compactMobFilePartition方法)，线程的最大并发数通过hbase.mob.compaction.threads.max参数指定。</para>
+            <para>整理过程同样是分批次进行，每个批次所整理的mobFile文件数量不能大于hbase.mob.compaction.batch.size阈值。针对待整理的mobFile集合，首先构造Scanner进行读取，Scan类型为COMPACT_DROP_DELETES，然后将读取出的mobCell数据进行如下处理：将Cell内容通过新构造的writer写入到/hbase/mobdir/.tmp/$mobFileName文件；并针对mobCell构造metaCell，然后通过另外一个writer将其写入到 /hbase/mobdir/.tmp/.bulkload/$ns/$table/$partionId/$cf/uuid路径。待两个目标文件生成以后，将mobFile从/hbase/mobdir/.tmp/$mobFileName移动到/hbase/mobdir/$ns/$table/$mobRegion/$cf路径下。并以bulkhead的方式将/hbase/mobdir/.tmp/.bulkload/$ns/$table/$partionId/$cf/uuid进行加载，使其存储到线上mobStore的数据集中。最后对tmp目录进行清理，将整理前的mobFile加入到归档目录。</para>
+         </listitem>
+       </orderedlist>
+	</section>
+	<section>
+	   <title>过期清理</title>
+	   <para>针对TTL过期的mobFile，HBase在master端开启了ExpiredMobFileCleanerChore线程，会每隔86400秒(hbase.master.mob.ttl.cleaner.period参数指定)执行一次清理，或者通过执行如下命令来手动进行触发：</para>
+       <para>hbase> hbase org.apache.hadoop.hbase.mob.ExpiredMobFileCleaner table family</para>
+       <para>清理过程主要是执行ExpiredMobFileCleaner的cleanExpiredMobFiles方法，方法逻辑大致如下：首先从列族的元数据声明中获取TTL信息，然后遍历/hbase/mobdir/$ns/$table/$mobRegion/$cf路径下的所有文件，并由文件名获取data信息，如果满足data &lt; curTime - TTL判断条件，将该文件加入到归档目录，等待HFileCleaner进行清理。</para>
+       <tip><para>MOB数据主要由两部分组成，包括线上索引数据和线下内容数据，两部分数据有自己独立的TTL判断逻辑。在社区早期版本实现中存在以下BUG：线上数据的TTL还没有过期，线下数据的TTL确被过期清理，导致数据查询的时候不断抛出FileNotFoundException异常，找不到离线数据所在的文件，详细可参考HBASE-19650修复。</para></tip>
+	</section>
+	<section>
+	   <title>配置整理</title>
+	   <orderedlist>
+	       <listitem>
+	           <para>hbase.master.mob.ttl.cleaner.period</para>
+	           <para>默认值为86400秒，表示每隔86400秒清理一次过期的mobFile。</para>
+	       </listitem>
+	       <listitem>
+               <para>hbase.mob.compaction.threads.max</para>
+               <para>默认值为1，表示同一时间最多只能对一个待整理分区进行整理，适当提高该参数值可以加快MOB的整理效率，但也会给master带来额外的压力。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.compactor.class</para>
+               <para>默认值为org.apache.hadoop.hbase.mob.compactions.PartitionedMobCompactor，表示基于分区的方式进行mob整理。默认情况下，每个Region的每天数据作为一个分区。</para>
+           </listitem>
+           <listitem>
+           	   <para>hbase.mob.compaction.chore.period</para>
+           	   <para>每隔多久对线下的mobRegion执行一次整理，默认值为604800(一周)。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.compaction.mergeable.threshold</para>
+               <para>大于该阈值的mobfile不参与整理，如果值&lt;=0，所有mobFile都参与整理，默认值为201326592。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.delfile.max.count</para>
+               <para>对线下的mobRegion执行整理操作时，如果delFile的数量大于该阈值时，先做合并。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.compaction.batch.size</para>
+               <para>为防止文件句柄占用过多，限制每个批次最多整理的mobFile数，默认值为100。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.hstore.compaction.kv.max</para>
+               <para>对delFile执行Scan操作时的batch数量。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.file.cache.size</para>
+               <para>最多可以缓存的mobFileReader数量，大于该数量将基于LRU算法进行淘汰，默认值为1000。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.cache.evict.period</para>
+               <para>每隔一段时间调度一次EvictionThread线程，对久不使用的Reader进行关闭、淘汰，默认值为3600秒。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.cache.evict.remain.ratio</para>
+               <para>每次淘汰保留的Reader比率，默认为0.5。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.cache.blocks</para>
+               <para>是否缓存mobCell到BlockCache，默认值为false，可通过Scan对象的setAttribute进行指定。</para>
+           </listitem>
+           <listitem>
+               <para>hbase.mob.scan.raw</para>
+               <para>Scan过程中是否只对metaCell进行读取，而不读取mobCell，默认值为false，可通过Scan对象的setAttribute进行指定。</para>
+           </listitem>
+           <listitem>
+               <para>empty.value.on.mobcell.miss</para>
+               <para>查询过程中如果目标mobCell不存在是否返回空的KeyValue，默认值为false，可通过Scan对象的setAttribute进行指定。</para>
+           </listitem>
+	   </orderedlist>
+	</section>
+	<section>
+	   <title>功能启用</title>
+	   <para>首先确保hfile.format.version属性值为3，因为MOB存储利用了Cell的Tag特性。然后在创建表格的DDL语句中为目标列族指定如下meta信息：</para>
+	   <para>hbase> create 't1', {NAME => 'f1', IS_MOB => true, MOB_THRESHOLD => 102400}</para>
+	   <para>除此之外还可通过如下命令来完成MOB特性的集成测试：</para>
+	   <programlistingco>
+		<programlisting>
+./bin/hbase org.apache.hadoop.hbase.IntegrationTestIngestWithMOB
+    -threshold 100000 <co id="co.mob.threshold" linkends="co.note.mob.threshold"/>
+    -minMobDataSize 100000 <co id="co.mob.min" linkends="co.note.mob.min"/>
+    -maxMobDataSize 1000000 <co id="co.mob.max" linkends="co.note.mob.max"/>
+	   	</programlisting>
+	   	<calloutlist>
+			<callout id="co.note.mob.threshold" arearefs="co.mob.threshold" ><para>通过该参数项来指定MOB数据的阈值，这里为100k。</para></callout>
+			<callout id="co.note.mob.min" arearefs="co.mob.min" ><para>通过该参数项来指定写入数据的最小字节数。</para></callout>
+			<callout id="co.note.mob.max" arearefs="co.mob.max" ><para>通过该参数项来指定写入数据的最大字节数。</para></callout>
+		</calloutlist>
+	   </programlistingco>
+	</section>
+	<section>
+		<title>个性化定制</title>
+		<para>社区MOB特性虽然一定程度上解决了大对象存储带来的写放大问题，但在使用过程中也存在一些局限性</para>
+		<para>多路径存储</para>
+		<para>兼容Stripe整理</para>
+	</section>
+</section>

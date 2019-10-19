@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>二级索引</title>
+	<para>HBase表格在创建之初只会针对rowkey来创建唯一索引，如果想通过其他字段来对表格进行查询，几乎都是全表扫描操作，这样会给服务端的磁盘IO带来很大负荷，因此非常有必要启用二级索引。</para>
+	<para>HBase在原生状态下是不支持二级索引功能的，这里所介绍的二级索引是由Phoenix引入的，其本地索引功能在4.8.0版本进行了比较大规模的重构，索引信息不在采用单独的表格进行存储，而是存放到一个索引列簇中，从而有效实现了索引记录和数据记录更新一致性原则(具体参考PHOENIX-1734)，这里主要围绕该功能进行介绍。</para>
+	<section>
+		<title>索引生成</title>
+		<para>由于数据记录和索引记录并不在同一行，而HBase默认的事务处理级别只能限制到行级别，要想实现跨行范围的事务处理需要满足如下应用条件(具体可参考MultiRowMutationEndpoint的mutateRows方法实现)：</para>
+		<blockquote>
+			<para>(1)已获取到全部行对应的行锁(多线程情况下有可能产生死锁问题)。</para>
+			<para>(2)所有操作采用相同的mvcc事物编号。</para>
+		</blockquote>
+		<para>为此，要想实现数据记录和索引记录写入一致性需求，需要依赖HBASE-15600这个补丁，该补丁为HRegion引入了如下功能特性：针对每一个要处理的Mutate，通过协处理器为其引入级联相关的Mutate操作，然后将这些Mutate操作放到一起，作为一个事物来提交(采用同一个mvcc事物编号)，以此来实现相关数据写入一致性的原则。引入办法主要是在协处理器执行preBatchMutate方法时，通过调用MiniBatchOperationInProgress的addOperationsFromCP方法，来对目标Mutate级联相关的操作进行指定，这样HRegion在执行doMinibatchMutate操作时便可通过MiniBatchOperationInProgress对象来对这些操作进行获取(通过调用其getOperationsFromCoprocessors方法)，然后将所有操作封装成一个事务。</para>
+		<para>在Phoenix框架中索引生成操作主要是通过Indexer这个协处理器来实现的，在对HRegion执行doMiniBatchMutation操作时，会先后执行Indexer的如下方法，以便拦截数据表格的写入操作，级联添加相关的索引数据。</para>
+		<orderedlist>
+			<listitem>
+				<para>preBatchMutate</para>
+				<para>在对协处理器执行该操作时，相应的表格数据尚未写入到MemStore和WAL。Indexer在执行该方法时会首先判断每个Mutate对应的列是否包含索引声明，如果包含则生成对应的索引操作(通过IndexBuildManager的getIndexUpdate方法)，然后将这些操作注入到MiniBatchOperationInProgress类实例中，以便实现数据记录和索引记录写入一致性原则(如章节开始所描述)。</para>
+				<para>同时，Indexer还会生成与索引操作相关的WALEdit(代码参考Indexer的doPre方法)，并将其注入到协处理器相关的上下文环境中(BatchOperationInProgress对象的WALEdit集合)，待HRegion执行wal写入操作时在将索引WALEdit连同数据WALEdit一同写入到HLog(代码参考HRegion的addFamilyMapToWALEdit方法)。</para>
+			</listitem>
+			<listitem>
+				<para>postBatchMutate</para>
+				<para>Phoenix索引包含两种类型：本地索引和全局索引，目前针对全局索引尚不能满足索引记录和数据记录写入一致性原则，需要放到两个事务中单独进行写入。在postBatchMutate方法中主要完成全局索引的写入操作，通过调用IndexWriter的writeAndKillYourselfOnFailure方法，如果索引写入失败将会对RS执行kill操作，以便实现LogReplay。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>索引使用</title>
+		<para>启用本地索引功能之后，scan的检索逻辑会发生一些变动，这些变动逻辑是通过BaseScannerRegionObserver协处理器来进行封装的，具体过程大致如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先对索引区间进行定位，从而缩减Region数据的检索范围。</para>
+				<para>假设目标表结构为Test{name : String, phone : num}，并且表格中存放了如下5条记录信息：</para>
+				<programlisting>
+   01,  zhangsan, 12345678
+   02,  zhangsan, 34567890
+   03,  wangwu,   12345678
+   04,  wangwu,   34567890
+   05,  xiaoliu,  12345678
+				</programlisting>
+				<para>对name字段创建本地索引后，Region中会包含如下rowkey(其中前5行为索引rowkey，其存储格式为：regionStartKey_indexId_indexValue_dataRowKey)：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/secIdx_table.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>当查询姓名为zhangsan的数据记录时，可将scan范围缩小至(00_1_zhangsan, 00_1_zhangsan')，而不必对整个Region进行扫描，从而有效降低磁盘的IO负荷。查询区间的界定是通过协处理器的preScannerOpen方法来实现的，在方法实现中会去调用ScanUtil类的setupLocalIndexScan方法来对客户端指定的Scan区间进行重新的指定。</para>
+			</listitem>
+			<listitem>
+				<para>遍历索引区间，通过索引rowkey解析出数据rowkey，在通过数据rowkey来对目标Region执行get操作，从而返回目标数据记录。</para>
+				<para>该操作逻辑是通过协处理器的postScannerOpen方法来封装的，方法实现中主要是对新构造的RegionScaner进行包装，覆盖其nextRaw方法实现来通过索引信息定位目标记录。包装过程可以参考ScanRegionObserver类的getWrappedScanner方法。</para>
+			</listitem>
+		</orderedlist>
+		<tip>在使用HBase的API对表格执行查询操作时并不会利用到phoenix的本地索引，因为没有为Scan对象设置级联相关的元数据，导致协处理器不能正确截获相应的方法，这些信息的设置可参考BaseQueryPlan类的iterator方法。</tip>
+	</section>
+	<section>
+		<title>Region拆分影响</title>
+		<para>对Region执行拆分操作以后要保证每条索引rowkey和它对应的数据rowkey依然隶属于同一个Region，否则本地索引将无法正常使用，而基于HBase原有的Region拆分逻辑很难做到这一点，因为Region在拆分过程中，会对每一个StoreFile的rowkey区间进行判断，如果该区间范围不包含splitKey则将该StoreFile全部划分给某个子Region，而不会创建针对top或bottom的Reference文件。在加上每条索引rowkey是以父region的startKey来作为前缀的，这样当Region拆分以后，几乎全部索引HFile都会被划分到bottom区域，如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/secIdx_split.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>这样在对daughterB进行数据查询时便没有办法应用本地索引功能，为此需要对Region的拆分逻辑进行定制，在phoenix框架中主要通过IndexRegionSplitPolicy类来实现。实现策略也比较简单，在执行StoreFile拆分的时候，如果该StoreFile对应的columnfamily为索引列簇，那么无论其rowkey区间范围如何，都将在子Region中创建针对该StoreFile的引用文件。并且在计算Region拆分点的时候，不在考虑索引记录，只针对数据记录进行考量，这样Region被拆分以后便会进入如下场景：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/secIdx_split2.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>虽然daughterB在物理逻辑上不包含任何索引记录，但是其依然可以对索引文件进行检索，因其对目标文件进行了Reference。</para>
+		<para>拆分逻辑修改之后，查询和整理逻辑也要进行相应的调整，在phoenix框架中主要是通过协处理器来实现的，具体的实现类为IndexHalfStoreFileReaderGenerator，该协处理器会对Region的如下操作进行拦截处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>preStoreFileReaderOpen</para>
+				<para>如果目标Region中含有索引StoreFile的Reference文件，构造IndexHalfStoreFileReader进行读取。</para>
+			</listitem>
+			<listitem>
+				<para>preStoreScannerOpen</para>
+				<para>构造StoreScaner进行数据检索时，如果Store对应的列簇为索引列簇，并且Store中含有Reference文件则构造LocalIndexStoreFileScanner对该文件进行扫描。LocalIndexStoreFileScanner的seek方法决定了索引数据的定位规则，拿上面的图片举例：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果有客户端对daughterB进行了数据检索，想要查询name等于xiaoliu的记录信息。</para>
+						<para>对应的phoenix会首先构建出要检索的索引rowkey信息，在通过这些索引rowkey来定位数据rowkey。其所构建的索引rowkey格式大致如下：daughterBStartKey_xiaoliu_*，然而通过这些索引rowkey却无法在索引StoreFile中查找到任何记录，因其内部每条记录的rowkey值都是以parentStartKey为前缀的。为此，LocalIndexStoreFileScanner进行了如下处理(代码参考其getKeyPresentInHFiles方法)：首先将daughterBStartKey替换成parentStartKey，这样要检索的索引rowkey格式就变成了parentStartKey_xiaoliu_*，在通过替换后的索引rowkey来定位数据rowkey，如果数据rowkey隶属于daughterB则定位成功，否则继续下一条索引rowkey的遍历直至条件满足为止。</para>
+					</listitem>
+					<listitem>
+						<para>如果客户端对daughterA进行了数据检索，则无需进行startKey的替换操作，因daughterA的startKey与parentStartKey相同。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>preCompactScannerOpen</para>
+				<para>对Store进行整理操作时需要首先构造Scaner来对文件内容进行检索，如果目标Store对应的是索引列簇，并且Store中含有Refernece文件，拦截器同样会构造LocalIndexStoreFileScanner来对该文件进行扫描。LocalIndexStoreFileScanner的peek和next方法决定了索引数据的获取规则，同样拿上面的图片举例，如果整理操作是对daughterB进行的，那么其在遍历索引数据的时候会首先判断索引rowkey对应的数据rowkey是否隶属于daughterB，如果条件满足对索引rowkey进行如下变换(代码参考getChangedKey方法)：将索引rowkey的startkey部分由parentStartKey替换成daughterB的startKey。这样便确保了整理过后新生成的索引文件与其对应的数据文件部署在同一Region区间内。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>功能启用</title>
+		<orderedlist>
+			<listitem><para>拷贝phoenix-${version}-server.jar到HBase的lib目录下。</para></listitem>
+			<listitem>
+				<para>在hbase-site.xml中添加如下配置。</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>hbase.regionserver.wal.codec</para>
+						<para>将参数值设置为org.apache.hadoop.hbase.regionserver.wal.IndexedWALEditCodec。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.region.server.rpc.scheduler.factory.class</para>
+						<para>将参数值设置为org.apache.hadoop.hbase.ipc.PhoenixRpcSchedulerFactory，该RPC调度在SimpleRpcScheduler的基础上新增了两个产品分组用于处理索引及元数据相关的请求，产品分组的概念可参考RPC通信功能实现章节。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.controllerfactory.class</para>
+						<para>将参数值设置为org.apache.hadoop.hbase.ipc.controller.ServerRpcControllerFactory。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>与本地索引有关的操作</para>
+				<para>ALTER TABLE TEST SET IMMUTABLE_ROWS=true;</para>
+				<para>CREATE LOCAL INDEX nameIndex ON TEST (name);</para>
+				<para>CREATE LOCAL INDEX mixIndex ON TEST (name, sex);</para>
+				<para>DROP INDEX nameIndex ON TEST;</para>
+			</listitem>
+			<listitem>
+				<para>二级索引性能比较</para>
+				<para>基于索引字段(city)和非索引字段(population)的查询响应时间如下：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/secIdx.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>索引容灾</title>
+		<para>phoenix原生的二级索引(本地索引)在容灾过程中会有这样一个问题，如果源集群和目标集群的表格分区不一样，索引记录在同步到目标集群之后是没有办法被正确使用的，因为索引数据的rowkey都是以region的startkey为前缀的，这样在目标集群对索引数据进行查询的时候会因为startkey不匹配而被过滤掉。针对该问题我们可以采用索引重建的方式来进行修复，即在replication过程中只将数据Cell同步至目标集群，然后在目标集群重新生成对应的索引数据。</para>
+		<para>phoenix的SQL语句是在客户端进行编译和处理的，如果UPSERT语句包含索引字段信息，则在构建Mutation对象时会去调用setAttribute方法来对索引元数据信息进行指定，以便服务端在处理写操作时能够进行感知和识别，级联生成索引相关的记录。其中索引信息的序列化处理是通过依赖protobuf来实现的，相关的protocol声明可参考ServerCachingService.proto文件中有关IndexMaintainer的描述，在调用Mutation#setAttribute方法时通过IdxProtoMD这个key值进行指定。除此之外还需指定另外一个key值(名称为IdxUUID)，用来标识唯一的索引ID信息。</para>
+		<para>因此我们可以在源集群端将IdxUUID和IdxProtoMD这两个属性序列化到WAL里，在通过Replication的方式将其同步到目标集群端，这样目标集群在处理数据同步的时候便可以基于这两个属性来重新构建索引，核心的代码补丁逻辑如下：</para>
+		<programlistingco>
+			<programlisting>
++++ hbase-protocol-shaded/src/main/protobuf/WAL.proto
+   optional uint64 orig_sequence_number = 11;
++  repeated NameBytesPair attribute = 12; <co id="co.secIdx.repAttr" linkends="co.note.secIdx.repAttr"/>
+
++++ hbase-server/src/main/java/org/apache/hadoop/hbase/wal/WALKey.java
+   public WALProtos.WALKey.Builder getBuilder(
+       WALCellCodec.ByteStringCompressor compressor) throws IOException {
+     ...
+     for (UUID clusterId : clusterIds) {
+       ...
+     }
++    if (this.attributes != null &amp;&amp; attributes.size() > 0) { <co id="co.secIdx.builder" linkends="co.note.secIdx.builder"/>
++      HBaseProtos.NameBytesPair.Builder attrBuilder = HBaseProtos.NameBytesPair.newBuilder();
++      for (Map.Entry&lt;String, byte[]> attrEntry : attributes.entrySet()) {
++        attrBuilder.setName(attrEntry.getKey());
++        attrBuilder.setValue(ByteString.copyFrom(attrEntry.getValue()));
++        builder.addAttribute(attrBuilder.build());
++      }
++    }
+     ...
+   }
+   ...
+   public void readFieldsFromPb(WALProtos.WALKey walKey,
+                               WALCellCodec.ByteStringUncompressor uncompressor)
+     ...
+     if (walKey.hasNonce()) {
+       this.nonce = walKey.getNonce();
+     }
++    this.attributes = null;
++    List&lt;NameBytesPair> attrList = walKey.getAttributeList();
++    if (attrList != null &amp;&amp; attrList.size() > 0) { <co id="co.secIdx.parser" linkends="co.note.secIdx.parser"/>
++      attributes = new HashMap&lt;String, byte[]>();
++      for (NameBytesPair attr : attrList) {
++        attributes.put(attr.getName(), attr.getValue().toByteArray());
++      }
++    }
+     ...
+   }
+
++++ org/apache/hadoop/hbase/regionserver/HRegion.java
+   private void doMiniBatchMutate(BatchOperation&lt;?> batchOp) throws IOException {
+     ...
+     // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
+     walKey = new WALKey(this.getRegionInfo().getEncodedNameAsBytes(),
+         this.htableDescriptor.getTableName(), WALKey.NO_SEQUENCE_ID, now,
+         mutation.getClusterIds(), currentNonceGroup, currentNonce, mvcc,
+         this.getReplicationScope());
++    if (mutation.getAttribute("IdxUUID") != null) {
++      walKey.setAttribute("IdxUUID", mutation.getAttribute("IdxUUID"));
++    }
++    if (mutation.getAttribute("IdxProtoMD") != null) { <co id="co.secIdx.wal" linkends="co.note.secIdx.wal"/>
++      walKey.setAttribute("IdxProtoMD", mutation.getAttribute("IdxProtoMD"));
++    }
+     // TODO: Use the doAppend methods below... complicated by the replay stuff above.
+
++++ org/apache/hadoop/hbase/protobuf/ReplicationProtbufUtil.java
+   public static Pair&lt;AdminProtos.ReplicateWALEntryRequest, CellScanner>
+     buildReplicateWALEntryRequest(final Entry[] entries, byte[] encodedRegionName,
+        String replicationClusterId, Path sourceBaseNamespaceDir, Path sourceHFileArchiveDir) {
+     ...
+     HBaseProtos.UUID.Builder uuidBuilder = HBaseProtos.UUID.newBuilder();
++    HBaseProtos.NameBytesPair.Builder attrBuilder = HBaseProtos.NameBytesPair.newBuilder();
+     ...
+     for(UUID clusterId : key.getClusterIds()) {
+       ...
+     }
++    Map&lt;String, byte[]> attrMap = key.getAttributeMap();
++    if (attrMap != null) { <co id="co.secIdx.gen" linkends="co.note.secIdx.gen"/>
++      for (Map.Entry&lt;String, byte[]> attrEntry : attrMap.entrySet()) {
++        attrBuilder.setName(attrEntry.getKey());
++        attrBuilder.setValue(ByteString.copyFrom(attrEntry.getValue()));
++        keyBuilder.addAttribute(attrBuilder.build());
++      }
++    }
+     ...
+   }
+
++++ org/apache/hadoop/hbase/replication/regionserver/ReplicationSink.java
+   public void replicateEntries(List&lt;WALEntry> entries, final CellScanner cells,
+       String replicationClusterId, String sourceBaseNamespaceDirPath,
+       String sourceHFileArchiveDirPath) throws IOException {
+     ...
+     for (HBaseProtos.UUID clusterId : entry.getKey().getClusterIdsList()) {
+       ...
+     }
+     m.setClusterIds(clusterIds);
++    List&lt;NameBytesPair> attrList = entry.getKey().getAttributeList();
++    if (attrList != null &amp;&amp; attrList.size() > 0) { <co id="co.secIdx.replica" linkends="co.note.secIdx.replica"/>
++      for (NameBytesPair attr : attrList) {
++        m.setAttribute(attr.getName(), attr.getValue().toByteArray());
++      }
++    }
+     addToHashMultiMap(rowMap, table, clusterIds, m);
+     ...
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.secIdx.repAttr" arearefs="co.secIdx.repAttr"><para>执行WAL写入时，将索引元数据信息序列化到该字段里；</para></callout>
+				<callout id="co.note.secIdx.builder" arearefs="co.secIdx.builder"><para>构建Builder时需要考虑attribute是否为空，如果不为空需要对其进行序列化处理；</para></callout>
+				<callout id="co.note.secIdx.parser" arearefs="co.secIdx.parser"><para>反序列化WAL时从中解析出attribute信息；</para></callout>
+				<callout id="co.note.secIdx.wal" arearefs="co.secIdx.wal"><para>执行写操作时，判断当前处理的Mutation对象是否含有索引相关的元数据信息，如果有将其序列化到WAL中进行存储；</para></callout>
+				<callout id="co.note.secIdx.gen" arearefs="co.secIdx.gen"><para>执行Replication操作时，将索引元数据信息一并同步到目标集群端进行处理；</para></callout>
+				<callout id="co.note.secIdx.replica" arearefs="co.secIdx.replica"><para>目标集群执行数据同步操作时，级联判断要写入的数据是否含有索引声明信息，如果有则通过setAttribute进行指定。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

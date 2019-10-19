@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude"
+    xmlns:ns5="http://www.w3.org/2000/svg"
+    xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+    xmlns:ns3="http://www.w3.org/1999/xhtml"
+    xmlns:db="http://docbook.org/ns/docbook">
+    <title>数据迁移</title>
+    <para>数据迁移是HBase运维过程中比较常见的一项操作，比如在执行跨版本升级操作时为了确保升级过程中不对已有业务造成任何坏的影响，通常的做法是新搭建一套集群，然后将已有集群的数据迁移到目标集群中去。待新集群运行稳定后在将流量切换至新集群，而在此之前需要通过数据双写来保证新老集群的一致性。</para>
+    <para>HBase比较常用的数据迁移方法有以下3种：</para>
+    <blockquote>
+    	<para>(1) distcp + hbck</para>
+    	<para>(2) Export + Import</para>
+    	<para>(3) CopyTable工具</para>
+    </blockquote>
+    <para>通常情况下会普遍采用第一种方式进行迁移，也是最为快速的一种。但是在某些特定的应用场景下第一种方式并不能够提供支持，需要借助于第二种方式才能实现(比如0.94到1.0的迁移过程)。无论采用哪一种方式，如果想要实现online迁移，都需要数据双写的配合和支持。</para>
+    <section>
+    	<title>distcp方式</title>
+    	<para>采用distcp的方式进行数据迁移大致需要执行如下几个步骤：</para>
+    	<orderedlist>
+			<listitem>
+				<para>首先关闭目标表格的拆分和整理功能，防止数据在拷贝过程中源文件列表发生变动。</para>
+				<programlisting>
+alter 'table', { METADATA => 
+  { 
+    'SPLIT_POLICY' => 'org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy’, 
+    'COMPACTION_ENABLED' => 'false'
+  }
+}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>执行distcp命令将源集群的表格数据迁移到新集群并记录迁移时间。</para>
+				<programlistingco>
+					<programlisting>
+hadoop distcp -i <co id="co.distcp.ignore" linkends="co.note.distcp.ignore"/> -update <co id="co.distcp.update" linkends="co.note.distcp.update"/> -skipcrccheck <co id="co.distcp.crc" linkends="co.note.distcp.crc"/> 
+      -m 100 <co id="co.distcp.map" linkends="co.note.distcp.map"/> -log /tmp/distcp-logs <co id="co.distcp.log" linkends="co.note.distcp.log"/>
+      -strategy dynamic <co id="co.distcp.strategy" linkends="co.note.distcp.strategy"/> -bandwidth 100 <co id="co.distcp.bandwidth" linkends="co.note.distcp.bandwidth"/>
+      source <co id="co.distcp.src" linkends="co.note.distcp.src"/> target <co id="co.distcp.target" linkends="co.note.distcp.target"/>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.distcp.ignore" arearefs="co.distcp.ignore" ><para>指定该参数后，如果mapTask出错，其错误日志将保留下来，而不会被其他TaskAttempt覆盖掉，同时一个Map任务的出错并不阻碍整个Job的运行(如不指定该参数，Map出错后会尝试杀死剩余的Map)。</para></callout>
+						<callout id="co.note.distcp.update" arearefs="co.distcp.update" ><para>如果目标地址出现同名文件，并且文件大小不相同则覆盖。</para></callout>
+						<callout id="co.note.distcp.crc" arearefs="co.distcp.crc" ><para>跳过签名校验过程，如果两个文件的大小和文件名相同则认为它们是同一个文件。</para></callout>
+						<callout id="co.note.distcp.map" arearefs="co.distcp.map" ><para>指定map任务数量，如果采用dynamic拷贝策略，默认map数为20；如果采用uniformsize拷贝策略默认map数为min(total_bytes/bytes.per.map,20*num_task_trackers),其中bytes.per.map默认值为256M。</para></callout>
+						<callout id="co.note.distcp.log" arearefs="co.distcp.log" ><para>指向日志文件的输出目录(注:如果日志目录有冲突会引发租约过期异常,因此在执行多项拷贝任务时,最好为它们指向不同的日志输出目录)。</para></callout>
+						<callout id="co.note.distcp.strategy" arearefs="co.distcp.strategy" ><para>拷贝策略,共有两种dynamic和uniformsize(默认)。</para></callout>
+						<callout id="co.note.distcp.bandwidth" arearefs="co.distcp.bandwidth" ><para>限制每个Map任务的传输带宽。</para></callout>
+						<callout id="co.note.distcp.src" arearefs="co.distcp.src" ><para>源集群上的待拷贝路径。</para></callout>
+						<callout id="co.note.distcp.target" arearefs="co.distcp.target" ><para>目标集群上的目标路径。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>数据拷贝成功后恢复老集群的拆分和整理功能，通过执行如下命令。</para>
+				<programlisting>
+alter 'table', { METADATA => 
+  {
+    'SPLIT_POLICY' => 'org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy',
+    'COMPACTION_ENABLED' => 'true'
+  }
+}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>对拷贝到新集群的表格数据执行hbck修复操作。</para>
+				<para>hbase hbck -repairHoles table</para>
+				<para>如果目标表格引入了自定义的协处理器，并且封装协处理器的jar包保存在新老集群不同的路径上，那么直接调用repairHoles修复将会产生问题，目标Region由于协处理器的路径不对将无法进行加载。为此需要首先对tabledesc进行修复，修复办法如下：</para>
+				<para>(1)首先删除新集群上目标table的tabledesc目录。</para>
+				<para>bin/hdfs dfs -rm -r /hbase/data/default/$table/.tabledesc</para>
+				<para>(2)然后执行如下命令对tabledesc进行修复。</para>
+				<para>hbase hbck -fixTableOrphans $table</para>
+				<para>(3)接着通过alter语法为目标表格引入自定义的协处理器。</para>
+				<para>alter 'table', 'coprocessor'=>'hdfs:///foo.jar|com.foo.FooRegionObserver|1001'</para>
+				<para>(4)最后调用repairHoles对目标表格进行修复上线。</para>
+			</listitem>
+			<listitem>
+				<para>通过Replication特性开启新老集群的双写功能(参考Replication章节)。</para>
+				<programlisting>
+add_peer 'ID' 'CLUSTER_KEY'
+alter 'table', {NAME => 'family_name', REPLICATION_SCOPE => '1'}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>将老集群中步骤2所记录时间点之后的HFile拷贝到新集群，并通过bulkload的方式进行补数。</para>
+				<para>(1)通过如下脚本过滤出老集群指定时间之后的HFile文件，比如这里过滤出2017-08-20 06:30之后产出的HFile。</para>
+				<programlisting>
+hdfs dfs -ls /hbase/data/default/$table/$region/$cf | grep "2017-08" | 
+  awk '{if(($6 == "2017-08-20" &amp;&amp; $7 &gt;="06:30") || ($6 &gt; "2017-08-20")) print $0}'
+				</programlisting>
+				<para>(2)通过distcp命令将这些HFile拷贝到新集群上。</para>
+				<programlisting>
+hadoop distcp -i -update -skipcrccheck -m 100 
+  -f filelist.txt -log /tmp/distcp-logs -strategy dynamic -bandwidth 10 target
+				</programlisting>
+				<para>(3)通过bulkhead方式将这些HFile导入新集群(执行前确保这些HFile的owner是hbase管理员账号)。</para>
+				<para>hbase org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles /path/to/hfiles table</para>
+			</listitem>
+		</orderedlist>
+		<para>如流程所描述，为了确保distcp过程中目标表格依然可以提供服务，需要临时关闭表格的拆分和整理功能，待目标数据拷贝完成后在对这些功能进行启用。但是这样处理也存在一个很大的弊端：如果表格的历史数据非常庞大，distcp过程将会非常耗时，而由于distcp过程中表格没有开启整理，因此有可能会积压大量的HFile，以至于达到hbase.hstore.blockingStoreFiles阈值。同时大量的HFile意味着查询过程中需要构造更多的HFileScanner，对StoreScaner的遍历也便需要更多的排序操作。因此针对大表的数据迁移可考虑进行如下处理：</para>
+		<orderedlist>
+			<listitem><para>首先同样需要关闭目标表格的拆分功能，防止文件在迁移过程中发生了变动导致distcp执行失败。</para></listitem>
+			<listitem>
+				<para>然后通过如下命令限制目标表格每个Region的整理阈值，比如这里将Region的整理阈值限制为3G，这样大于3G的HFile将不会参与整理，可将这部分HFile直接迁移至新集群而不用考虑文件变动风险。</para>
+				<programlisting>
+alter 'table',{NAME => 'cf', 
+  CONFIGURATION => {'hbase.hstore.compaction.max.size' => '3000000000'}}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>接下来针对对小于3G的小文件执行之前所描述的distcp操作，从而防止数据迁移过程中HFile积压的情况。</para>
+			</listitem>
+		</orderedlist>
+    </section>
+    <section>
+    	<title>Export加Import方式</title>
+    	<para>该方式一般用于跨版本的数据迁移操作，比如从0.94迁移到1.0之后的版本。由于版本跨度比较大，HFile的存储结构发生了比较大的变动，如果直接distcp会导致目标HFile无法被加载，加载过程中会抛出以下异常：</para>
+        <programlisting>
+java.io.IOException: org.apache.hadoop.hbase.io.hfile.CorruptHFileException: 
+  Problem reading HFile Trailer from file path/to/hfile。
+        </programlisting>
+        <para>产生该异常的主要原因是新版本的HBase采用HFileV2存储结构，其在计算目标HFile的trailer大小时与老版本不太一致，因此需要借助于Export加Import方式来完成表格的迁移工作。</para>
+    	<orderedlist>
+    		<listitem>
+    			<para>首先通过Export命令将老集群的表格数据导出成SequenceFile。</para>
+    			<para>hbase org.apache.hadoop.hbase.mapreduce.Export $table /path/to/seqFile</para>
+    		</listitem>
+    		<listitem>
+    			<para>然后通过执行Import命令来对步骤1所生成的SequenceFile进行并行读取，并将读取到的数据以Put方式写入新集群。</para>
+    			<programlisting>
+./bin/hbase org.apache.hadoop.hbase.mapreduce.Import 
+  -Dhbase.import.version=0.94 -Dimport.wal.durability=SKIP_WAL 
+  -Dmapreduce.map.speculative=false -Dmapreduce.reduce.speculative=false 
+  $table /path/to/seqFile
+    			</programlisting>
+    			<para>或者通过bulkload方式来进行数据导入，此时需要首先执行如下命令来生成HFile。</para>
+    			<programlisting>
+./bin/hbase org.apache.hadoop.hbase.mapreduce.Import 
+  -Dimport.bulk.output=/path/to/hfiles -Dhbase.import.version=0.94
+  $table /path/to/seqFile
+    			</programlisting>
+    			<para>然后执行如下命令将新生成的HFile导入到新集群。</para>
+    			<para>hbase org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles /path/to/hfiles $table</para>
+    		</listitem>
+    	</orderedlist>
+    	<para>如果在表格迁移过程中，老集群依然有数据写入，此时需要通过Replication特性来开启新老集群的双写，HBase原生自带的Replication特性需要满足大版本相同的情况下才能可用，而这里需要跨版本Replication特性的支持(详细参考跨版本Replication章节)。</para>
+    </section>
+</section>

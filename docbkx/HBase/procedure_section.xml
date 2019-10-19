@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Procedure功能</title>
+	<para>由于HBase不同与传统的关系型数据库，其在部署上采用了master/slave的方式进行分布式部署，因此在Procedure的实现上其与传统的关系型数据库也不尽相同，这主要体现在Procedure的调用执行以及初始化等方面。</para>
+	<para>在HBase中，Procedure的调用是通过访问HMaster来实现的(通过MasterRpcServices服务的execProcedure方法)，但是初始化阶段却需要在HMaster端和RegionServer端同时进行。</para>
+	<para>从HMaster的角度来看，Procedure是通过MasterProcedureManager对象进行管理的，初始化阶段主要是通过其initialize方法来创建ProcedureCoordinator对象，以便在后续处理中通过它开启Procedure实例。</para>
+	<para>而从RegionServer的角度观察，Procedure却是通过RegionServerProcedureManager对象进行管理的，在初始化阶段主要是通过它来创建ProcedureMember对象，以便对Subprocedure的运行进行监管，并将运行结果向ProcedureCoordinator进行汇报。</para>
+	<para>Procedure的运行环境同样是基于master/slave的方式进行部署的，其中ProcedureCoordinator起到Master的作用，负责协调所有的ProcedureMember共同实现一项功能；而ProcedureMember则起到了slave的作用，负责开启Subprocedure实例并执行具体的业务逻辑。</para>
+	<para>Procedure实例的运行其实是一种基于Zookeeper的Double-Barriers应用(详细可参考http://zookeeper.apache.org/doc/trunk/recipes.html#sc_doubleBarriers)，实例在运行过程中需要经历如下两个阶段：</para>
+	<orderedlist>
+		<listitem>
+			<para>Barrier-Acquire</para>
+			<para>该阶段的主要目的是用于通知所有ProcedureMember去创建Subprocedure线程，并将线程启动。</para>
+			<para>在master端，Procedure对象实例是通过Procedure类来进行封装的，对象实例启动后，其会首先执行sendGlobalBarrierStart方法来使Procedure的执行进入第一阶段，方法逻辑大致如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>首先判断Zookeeper中是否存在/hbase/[procType]/abort/[procName]节点，如果存在直接执行abort操作。</para>
+					<tip>procType相当于是Procedure的唯一签名，可通过ProcedureManager的getProcedureSignature方法进行获取；而procName为Procedure的实例名称，针对同一类型的Procedure可同时开启多个实例，这些实例通过procName来区分彼此。</tip>
+				</listitem>
+				<listitem>
+					<para>否则创建/hbase/[procType]/acquired/[procName]节点，节点创建成功后ProcedureMember会进行如下回调处理：</para>
+					<para>针对每个新增的procName节点，创建Subprocedure实例，并提交到线程池中去运行处理。Subprocedure线程在运行过程中会首先执行acquireBarrier方法，从而在Procedure进入第二阶段前做一些准备工作。然后通过ZKProcedureMemberRpcs的sendMemberAcquired方法向ProcedureCoordinator汇报Barrier获取成功。在汇报过程中Subprocedure会进入等待状态，直至第二阶段的到来。</para>
+				</listitem>
+			</itemizedlist>
+			<para>sendGlobalBarrierStart方法执行后，Procedure线程将会处于等待状态，直至所有的ProcedureMember向其汇报Barrier获取成功。汇报过程同样是基于Zookeeper进行协调控制的，每当有ProcedureMember获取Barrier成功后，其会在Zookeeper中创建/hbase/[procType]/acquired/[procName]/[member]节点，而ProcedureCoordinator通过监听其父节点的相关事件便可得知当前阶段有哪些ProcedureMember已成功获取了Barrier。当所有ProcedureMember都成功获取到Barrier之后开始进入下一阶段。</para>
+		</listitem>
+		<listitem>
+			<para>In-Barrier Execution</para>
+			<para>第二阶段的开启是通过Procedure的sendGlobalBarrierReached方法来进行的，方法执行后会在Zookeeper中创建/hbase/[procType]/reached/[procName]节点，然后使主线程再次进入等待状态。这时，ProcedureMember通过监控目标节点的相关事件会进行如下回调处理：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>唤醒第一阶段中暂停的Subprocedure线程，使其进入第二阶段。</para>
+					<para>进入第二阶段后，Subprocedure线程开始执行insideBarrier方法用于完成具体的业务逻辑。</para>
+				</listitem>
+				<listitem>
+					<para>insideBarrier方法执行结束后通知ProcedureCoordinator，SubProcedure成功运行结束。</para>
+					<para>汇报过程主要是创建/hbase/[procType]/reached/[procName]/[member]节点，使ProcedureCoordinator进行相应的回调处理。</para>
+					<para>同第一阶段的处理类似，当ProcedureCoordinator收到所有Subprocedure运行成功的反馈消息后开始唤醒主线程执行最后的收尾工作，至此Procedure成功运行结束。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>表格快照功能</title>
+		<para>HBase的表格快照功能是基于Procedure的一项典型应用，由于表格数据被分散部署到不同的RegionServer端，因此需要协调所有的目标节点来统一完成这项功能。</para>
+		<para>在HMaster端，表格快照功能是通过SnapshotManager进行管理的，该类继承了MasterProcedureManager抽象类，可通过其execProcedure方法来开启目标Procedure实例。Procedure被调用以后，会首先检测目标快照名是否已经存在于/hbase/.hbase-snapshot/{snapshotName}路径中。若存在直接抛出异常，否则进行如下处理：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>首先要确保目标集群满足如下约束条件</para>
+				<para>(1)执行快照操作的表格存在于目标集群之中；</para>
+				<para>(2)当前没有线程正在对目标表格执行snapshot操作；</para>
+				<para>(3)目标表格当前没有执行restore操作。</para>
+			</listitem>
+			<listitem>
+				<para>如果上个步骤中的约束条件满足，开始提交TableSnapshotHandler线程，执行数据快照处理操作。</para>
+				<para>HBase的表格快照功能支持线上、线下两种操作模式，如果选择线上的处理方式(即执行快照的时候表格没有disable掉)，则开启的是EnabledTableSnapshotHandler线程。线程在启动前会首先对/hbase/.hbase-snapshot/.tmp目录进行清理，然后尝试抢占目标表格锁，表格锁抢占成功后执行真正的快照处理逻辑。</para>
+				<orderedlist>
+					<listitem>
+						<para>首先将快照描述信息写入/hbase/.hbase-snapshot/.tmp/[name]/.snapshotinfo文件中。</para>
+						<para>信息内容是采用protobuf进行序列化的，protocol声明如下：</para>
+						<programlistingco>
+							<programlisting>
+message SnapshotDescription {
+   required string name = 1; <co id="co.snapshot.name" linkends="co.note.snapshot.name"/>
+   optional string table = 2; <co id="co.snapshot.table" linkends="co.note.snapshot.table"/>
+   optional int64 creation_time = 3 [default = 0]; 
+   enum Type { 
+      DISABLED = 0;
+      FLUSH = 1; <co id="co.snapshot.flush" linkends="co.note.snapshot.flush"/>
+      SKIPFLUSH = 2; <co id="co.snapshot.skipflush" linkends="co.note.snapshot.skipflush"/>
+   }
+   optional Type type = 4 [default = FLUSH]; <co id="co.snapshot.type" linkends="co.note.snapshot.type"/>
+   optional int32 version = 5;
+}
+							</programlisting>
+							<calloutlist>
+								<callout id="co.note.snapshot.name" arearefs="co.snapshot.name" ><para>快照名称；</para></callout>
+								<callout id="co.note.snapshot.table" arearefs="co.snapshot.table" ><para>快照应用在哪个表格上；</para></callout>
+								<callout id="co.note.snapshot.flush" arearefs="co.snapshot.flush" ><para>默认快照类型，执行快照操作前，首先对memstore中的数据执行flush操作；</para></callout>
+								<callout id="co.note.snapshot.skipflush" arearefs="co.snapshot.skipflush" ><para>略过flush操作，直接做快照处理；</para></callout>
+								<callout id="co.note.snapshot.type" arearefs="co.snapshot.type" ><para>快照的生成类型。</para></callout>
+							</calloutlist>
+						</programlistingco>
+					</listitem>
+					<listitem>
+						<para>开启Procedure实例执行快照处理操作。</para>
+						<para>Procedure实例的开启是通过ProcedureCoordinator类的startProcedure方法来实现的，实例开启后会在每个RegionServer端执行snapshot操作，而HMaser端将处于等待状态(具体逻辑可参考Procedure描述章节)。针对线上的每一个Region，RegionServer会开启RegionSnapshotTask线程进行处理，处理内容如下：</para>
+						<para>(1)首先获取目标Region的readLock。</para>
+						<para>(2)将Region信息写入/hbase/.hbase-snapshot/.tmp/[name]/region-manifest.[regionName]文件中进行保存。</para>
+						<para>同样，元数据信息是采用protobuf进行序列化的，protocol声明如下：</para>
+						<programlistingco>
+							<programlisting>
+message SnapshotRegionManifest {
+   optional int32 version = 1;
+   required RegionInfo region_info = 2; <co id="co.snapshot.regioninfo" linkends="co.note.snapshot.regioninfo"/>
+   repeated FamilyFiles family_files = 3; <co id="co.snapshot.cfinfo" linkends="co.note.snapshot.cfinfo"/>
+   message StoreFile {
+     required string name = 1;
+     optional Reference reference = 2;
+     optional uint64 file_size = 3;
+   }
+   message FamilyFiles {
+     required bytes family_name = 1;
+     repeated StoreFile store_files = 2;
+   }
+}
+							</programlisting>
+							<calloutlist>
+								<callout id="co.note.snapshot.regioninfo" arearefs="co.snapshot.regioninfo" >
+									<para>用于描述Region的基本信息，包括：id标识、所属table、数据区间、是否下线等；</para>
+								</callout>
+								<callout id="co.note.snapshot.cfinfo" arearefs="co.snapshot.cfinfo" >
+									<para>Region中的Store信息，包括：列簇名称，及每个列簇包含哪些StoreFile。</para>
+								</callout>
+							</calloutlist>
+						</programlistingco>
+						<para>(3)最后将Region的读锁进行释放。</para>
+						<para>而针对已下线的Region，同样将其元数据信息写入到/hbase/.hbase-snapshot/.tmp/[name]/region-manifest.[regionName]文件中。</para>
+					</listitem>
+					<listitem>
+						<para>整合所有快照信息到统一的配置文件中。</para>
+						<para>当所有的RegionServer端都执行完成以后，开始唤醒HMaster端做如下处理：将目标表格的描述信息连同所有的region-manifest.[regionName]文件一同打包到data.manifest文件中，打包成功后删除所有的region-manifest.[regionName]文件。并将快照信息从/hbase/.hbase-snapshot/.tmp/[name]路径移动到/hbase/.hbase-snapshot/[name]路径下，至此，快照工作成功完成。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+		</itemizedlist>
+		<section>
+			<title>快照恢复</title>
+			<para>快照恢复工作是通过SnapshotManager类的restoreSnapshot方法来实现的，方法被执行以后会首先去校验目标快照的正确性：即快照中所记录的StoreFile文件大小与线上的一致。需要注意的是HBase每次做快照处理只记录目标表格的元数据信息，即表格有哪些Region，Region中包含哪些Store，以及Store中存储了哪些StoreFile，而具体的StoreFile文件内容是不做备份处理的，这些文件一直在线上进行存储，如果触发了StoreFile合并或拆分操作，HBase会将这些原始的StoreFile保存至归档目录下，默认为/hbase/archive目录。</para>
+			<para>每次在执行数据恢复之前，HBase需要做如下判断处理：</para>
+			<blockquote>
+				<para>(1)首先要确保目标表格已经被disable掉，否则系统会抛出异常；</para>
+				<para>(2)确保当前没有线程正在对目标表格执行snapshot操作或restore操作；</para>
+				<para>(3)目标表格存在，并且不是hbase:meta表格。</para>
+			</blockquote>
+			<para>如果满足以上约束条件开始提交RestoreSnapshotHandler线程进行表格数据恢复处理，线程具体的工作逻辑如下：</para>
+			<orderedlist>
+				<listitem><para>首先获取目标表格的writeLock锁，即在执行数据恢复期间其他线程不能对目标表格执行写操作。</para></listitem>
+				<listitem>
+					<para>然后还原表格的元数据信息。</para>
+					<para>执行快照处理操作后，如果表结构发生了变动，需要首先对其进行还原。原始表结构可从快照信息中获取，在执行snapshot操作时已将其写入data.manifest文件。</para>
+				</listitem>
+				<listitem>
+					<para>基于RestoreSnapshotHelper来还原目标表格中的每一个Region数据。</para>
+					<itemizedlist>
+						<listitem>
+							<para>如果目标Region在线上表格和snapshot中同时存在，执行restoreRegion操作将Region还原成快照中的状态。</para>
+							<para>还原过程中主要是对两个Region的StoreFile进行比较。</para>
+							<para>(1)如果StoreFile只在快照中存在而线上没有则创建HFileLink文件来引向其在归档目录中的存放位置，归档路径格式为：/hbase/archive/data/[ns]/[table]/[region]/[cf]/[hfile]</para>
+							<para>(2)如果StoreFile只在线上存在，而快照中没有，则通过HFileArchiver类的archiveStoreFile方法将其移动到归档目录。</para>
+							<para>还原数据的同时更新meta表格中这些Region的元数据信息，将其一并还原成之前的状态。</para>
+						</listitem>
+						<listitem><para>如果目标Region只是在线上存在，而快照中没有，则通过HFileArchiver的archiveRegion方法将整个Region移动至归档目录。同时，将这些Region的元数据信息从meta表格中删除。</para></listitem>
+						<listitem>
+							<para>如果目标Region只是在snapshot中存在，而线上不存在，将snapshot中的数据还原到线上。</para>
+							<para>针对快照中所记录的所有StoreFile文件创建HFileLink链接引用，来引向其在归档目录中的存放位置。同时，将这些Region的元数据信息添加到meta表格中。</para>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>操作命令</title>
+			<orderedlist>
+				<listitem>
+					<para>执行快照操作</para>
+					<para>snapshot 'namespace:sourceTable', 'snapshotName', {SKIP_FLUSH => true}</para>
+				</listitem>
+				<listitem>
+					<para>列出所有快照信息</para>
+					<para>list_snapshots</para>
+				</listitem>
+				<listitem>
+					<para>删除指定快照</para>
+					<para>delete_snapshot 'snapshotName'</para>
+				</listitem>
+				<listitem>
+					<para>基于快照信息克隆出一张新表</para>
+					<para>clone_snapshot 'snapshotName', 'tableName'</para>
+				</listitem>
+				<listitem>
+					<para>还原表格数据到快照中的状态</para>
+					<para>restore_snapshot 'snapshotName'</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>自定义Procedure</title>
+		<para>HBase的Procedure目前主要应用在数据快照以及表格flush功能上，可效仿其实现方式来编写自定义的Procedure，这里给出大致实现：</para>
+		<orderedlist>
+			<listitem><para>首先编写MasterProcedureManager实现，通过它来完成Procedure在HMaster端的初始化逻辑，并实现其execProcedure方法，通过调用ProcedureCoordinator的startProcedure方法来开启Procedure实例；</para></listitem>
+			<listitem><para>将目标MasterProcedureManager的类名加入到hbase.procedure.master.classes配置参数中，便于HMaster启动后对其进行加载；</para></listitem>
+			<listitem>
+				<para>然后编写RegionServerProcedureManager实现，通过它来完成Procedure在RegionServer端的初始化逻辑。</para>
+				<para>初始化过程中主要是构建ProcedureMember对象。</para>
+			</listitem>
+			<listitem><para>将目标RegionServerProcedureManager的类名加入到hbase.procedure.regionserver.classes配置参数中，便于RegionServer启动后对其进行加载；</para></listitem>
+			<listitem>
+				<para>集群启动后，在客户端通过执行如下语句来开启目标Procedure：</para>
+				<programlisting>
+Configuration config=HBaseConfiguration.create();
+HBaseAdmin admin=new HBaseAdmin(config);
+admin.execProcedure(signature, instance, props);
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

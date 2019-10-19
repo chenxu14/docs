@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Client组件</title>
+	<para>Client组件是通过org.apache.spark.deploy.yarn.Client类来实现的，组件的主要作用是向YARN框架提交Spark应用程序，其内部封装了每个Spark应用的ApplicationMaster运行环境，环境信息包括：</para>
+	<orderedlist>
+		<listitem><para>ApplicationMaster启动依赖的资源，资源信息有：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>spark-assembly*.jar，通过SPARK_JAR环境变量来指定路径；</para></listitem>
+				<listitem>
+					<para>封装应用程序的jar包；</para>
+					<para>只有该资源的可见度是Application级别，其他资源全都是Public级别。</para>
+				</listitem>
+				<listitem><para>日志配置文件log4j.properties，通过SPARK_LOG4J_CONF环境变量来指定路径；</para></listitem>
+				<listitem><para>App运行所依赖的第三方jar，部署过程中通过--jars参数来指定；</para></listitem>
+				<listitem><para>存放在DistributeCache中的文件，部署过程中通过--files和--archives参数来指定。</para></listitem>
+			</itemizedlist>
+			<para>这些资源会在客户端提交应用时上传到HDFS里，等到ApplicationMaster启动时在将其下载到本地。</para>
+		</listitem>
+		<listitem>
+			<para>ApplicationMaster启动环境变量</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>$CLASSPATH：包括AM启动依赖的资源、hadoop自身的jar资源以及Container的工作目录；</para></listitem>
+				<listitem><para>$SPARK_YARN_MODE：值为true，表示基于YARN框架部署；</para></listitem>
+				<listitem><para>$SPARK_YARN_STAGING_DIR：Staging目录，默认为~/.sparkStaging/${appId}/；</para></listitem>
+				<listitem><para>$SPARK_USER：该App的提交用户；</para></listitem>
+				<listitem><para>$SPARK_LOG4J_CONF：log4j配置文件；</para></listitem>
+				<listitem><para>$SPARK_YARN_CACHE_FILES：添加到DistributeCache中的文件；</para></listitem>
+				<listitem><para>$SPARK_YARN_CACHE_ARCHIVES：添加到DistributeCache中的归档文件；</para></listitem>
+				<listitem><para>以及通过SPARK_YARN_USER_ENV配置的环境变量信息。</para></listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>ApplicationMaster启动命令</para>
+			<programlistingco>
+				<programlisting>
+$JAVA_HOME/bin/java -server 
+-Xmx2048m <co id="co.spark.am.memory" linkends="co.note.spark.am.memory"/>
+-Djava.io.tmpdir=$PWD/tmp <co id="co.spark.am.tmpdir" linkends="co.note.spark.am.tmpdir"/>
+-XX:+UseConcMarkSweepGC -XX:+CMSIncrementalMode -XX:+CMSIncrementalPacing 
+    -XX:CMSIncrementalDutyCycleMin=0 -XX:CMSIncrementalDutyCycle=10 <co id="co.spark.am.gc" linkends="co.note.spark.am.gc"/>
+-Dspark.eventLog.enabled=\"true\" <co id="co.spark.am.props" linkends="co.note.spark.am.props"/>
+-Dlog4j.configuration=log4j-spark-container.properties  <co id="co.spark.am.log4j" linkends="co.note.spark.am.log4j"/>
+org.apache.spark.deploy.yarn.ApplicationMaster <co id="co.spark.am.class" linkends="co.note.spark.am.class"/>
+--class org.apache.spark.examples.SparkPi <co id="co.spark.am.main" linkends="co.note.spark.am.main"/>
+--jar examples/target/scala-2.10/spark-examples-assembly-0.9.1.jar <co id="co.spark.am.jar" linkends="co.note.spark.am.jar"/>
+--executor-memory 2g <co id="co.spark.am.worker.memory" linkends="co.note.spark.am.worker.memory"/>
+--executor-cores 1 <co id="co.spark.am.worker.core" linkends="co.note.spark.am.worker.core"/>
+--num-executors 3 <co id="co.spark.am.worker.num" linkends="co.note.spark.am.worker.num"/>
+1>${LOG_DIR}/${appId}/${containerId}/stdout 
+2>${LOG_DIR}/${appId}/${containerId}/stderr 
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.spark.am.memory" arearefs="co.spark.am.memory" ><para>部署过程中通过--driver-memory参数来指定AM的堆内存大小；</para></callout>
+					<callout id="co.note.spark.am.tmpdir" arearefs="co.spark.am.tmpdir" ><para>App运行临时目录，默认在Container的工作目录下；</para></callout>
+					<callout id="co.note.spark.am.gc" arearefs="co.spark.am.gc" ><para>如果通过SPARK_YARN_USER_ENV配置了SPARK_USE_CONC_INCR_GC环境变量并且其值为true，则会为AM的运行指定CMS垃圾回收策略；</para></callout>
+					<callout id="co.note.spark.am.props" arearefs="co.spark.am.props" ><para>打印用户定义的以spark开头的配置项；</para></callout>
+					<callout id="co.note.spark.am.log4j" arearefs="co.spark.am.log4j" ><para>值为SPARK_LOG4J_CONF的配置项；</para></callout>
+					<callout id="co.note.spark.am.class" arearefs="co.spark.am.class" ><para>YARN框架通过该类加载启动AM；</para></callout>
+					<callout id="co.note.spark.am.main" arearefs="co.spark.am.main" ><para>App运行主程序类，部署过程中通过--class参数来指定；</para></callout>
+					<callout id="co.note.spark.am.jar" arearefs="co.spark.am.jar" ><para>封装App应用的jar包；</para></callout>
+					<callout id="co.note.spark.am.worker.memory" arearefs="co.spark.am.worker.memory" ><para>指定Worker运行的堆内存大小，部署过程中通过--executor-memory参数来指定；</para></callout>
+					<callout id="co.note.spark.am.worker.core" arearefs="co.spark.am.worker.core" ><para>指定Worker运行使用的cpu数，部署过程中通过--executor-cores参数来指定；</para></callout>
+					<callout id="co.note.spark.am.worker.num" arearefs="co.spark.am.worker.num" ><para>启动的worker数量，部署过程中通过--num-executors参数来指定；</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+</section>

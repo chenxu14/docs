@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Maven编译</title>
+	<para>首先需要提高Maven编译时的堆内存大小，防止编译过程中产生OOM异常：</para>
+	<para>export MAVEN_OPTS="-Xmx2g -XX:MaxPermSize=512M -XX:ReservedCodeCacheSize=512m"</para>
+	<para>其次要确保zincServer的默认端口3030没有被占用，否则通过ZINC_PORT环境变量重新设置。</para>
+	<para>编译命令如下：</para>
+	<programlistingco>
+		<programlisting>
+$SPARK_HOME/build/mvn -Pyarn -Phadoop-2.4 -Dhadoop.version=2.4.0 <co id="co.spark.mvn.version" linkends="co.note.spark.mvn.version"/>
+-Phadoop-provided <co id="co.spark.mvn.hadoop.provided" linkends="co.note.spark.mvn.hadoop.provided"/>
+-Phive -Phive-thriftserver <co id="co.spark.mvn.hive" linkends="co.note.spark.mvn.hive"/>
+-DskipTests <co id="co.spark.mvn.test" linkends="co.note.spark.mvn.test"/>
+clean package
+		</programlisting>
+		<calloutlist>
+			<callout id="co.note.spark.mvn.version" arearefs="co.spark.mvn.version" ><para>指定hadoop的依赖版本；</para></callout>
+			<callout id="co.note.spark.mvn.hadoop.provided" arearefs="co.spark.mvn.hadoop.provided" ><para>将hadoop的原生代码(common、hdfs、yarn、mapreduce、zookeeper等)从assembly中移除；</para></callout>
+			<callout id="co.note.spark.mvn.hive" arearefs="co.spark.mvn.hive" ><para>将hive依赖加入assembly jar包中；</para></callout>
+			<callout id="co.note.spark.mvn.test" arearefs="co.spark.mvn.test" ><para>跳过测试阶段；</para></callout>
+		</calloutlist>
+	</programlistingco>
+	<tip>如果在maven构建的过程中，出现无法下载依赖包的情况，那么有可能是目标资源被墙了，可从国内的第三方网站进行下载，如http://maven.oschina.net/service/local/repositories/sonatype-public-grid/content/</tip>
+	<para>编译成功后，还可通过如下命令来构建distribution(spark运行环境)，并将其保存到$SPARK_HOME/dist目录下。</para>
+	<para>$SPARK_HOME/make-distribution.sh --name dev --tgz -Pyarn -Phadoop-2.4 -Dhadoop.version=2.4.0 -Phadoop-provided -Phive -Phive-thriftserver</para>
+</section>

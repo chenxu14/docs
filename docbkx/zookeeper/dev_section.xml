@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>开发应用</title>
+	<xi:include href="config_section.xml"/>
+	<section>
+		<title>进程脚本</title>
+		<orderedlist>
+			<listitem>
+				<para>zkServer脚本，用于启动服务。</para>
+				<para>./zkServer.sh start，如果是集群环境部署需要在每台server上都执行该命令。</para>
+			</listitem>
+			<listitem>
+				<para>zkCli脚本，用于启动客户端程序。</para>
+				<para>./zkCli.sh -server host:2181，server参数用于指定连接到哪一台server</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>启用ACL校验功能</title>
+		<section>
+			<title>基于digest方式</title>
+			<orderedlist>
+				<listitem>
+					<para>首先通过如下命令生成指定用户的签名信息：</para>
+					<blockquote>
+						<para>DigestAuthenticationProvider.generateDigest("admin")</para>
+					</blockquote>
+					<para>这里为admin用户生成的签名信息为admin:0DPiKuNIrrVmD8IUCuw1hQxNqZc=</para>
+				</listitem>
+				<listitem>
+					<para>为指定路径设置acl，进入zookeeper客户端，执行如下命令：</para>
+					<blockquote>
+						<para>create /test data digest:admin:0DPiKuNIrrVmD8IUCuw1hQxNqZc=:cdrwa</para>
+					</blockquote>
+					<para>或者通过setAcl path acl方法进行指定，多个acl信息使用逗号进行分隔。</para>
+				</listitem>
+				<listitem>
+					<para>为客户端授权：addauth digest admin</para>
+				</listitem>
+			</orderedlist>
+			<tip><para>需要注意的是zookeeper对节点的acl管理是不存在继承关系的，因此在执行授权操作时，要防止断层的情况出现：如在为/test/parent/child节点授权时，最好为/test/parent指定相同的权限，否则如果用户有/test/parent节点的操作权限，即使他没有/test/parent/child节点的权限，一样可以通过删除/test/parent来级联删除/test/parent/child</para></tip>
+		</section>
+		<section>
+			<title>基于Kerberos方式</title>
+			<para>一、服务端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>首先将每台ZKServer的principal注册到KDC中</para>
+					<programlisting>
+shell% kadmin.local
+kadmin.local: addprinc zookeeper/$HOST
+					</programlisting>
+					<para>其中HOST为每台ZKServer对应的hostname，在zkClient执行访问时需要使用该hostname进行连接而不能使用ip，否则KDC将无法定位对应的principal。</para>
+				</listitem>
+				<listitem>
+					<para>将principal导出到keytab文件，并将keytab文件拷贝到对应ZKServer的$ZK_HOME/conf/zookeeper.keytab目录下。导出命令通过`ktadd $principal`来完成。</para>
+				</listitem>
+				<listitem>
+					<para>在$ZK_HOME/conf/zoo.cfg文件中添加如下配置。</para>
+					<programlisting>
+authProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider
+jaasLoginRenew=3600000
+kerberos.removeHostFromPrincipal=true
+kerberos.removeRealmFromPrincipal=true
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>在$ZK_HOME/conf/jaas.conf文件中添加如下配置。</para>
+					<programlisting>
+Server {
+   com.sun.security.auth.module.Krb5LoginModule required
+   useKeyTab=true
+   keyTab="$ZK_HOME/conf/zookeeper.keytab"
+   storeKey=true
+   useTicketCache=false
+   principal="zookeeper/&lt;HOST>@&lt;REALM>";
+};
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>在$ZK_HOME/conf/java.env文件中添加如下配置。</para>
+					<programlisting>
+export JVMFLAGS="-Xms1024m -Xmx1024m 
+  -Djava.security.auth.login.config=$ZK_HOME/conf/jaas.conf $JVMFLAGS"					
+					</programlisting>
+				</listitem>
+			</orderedlist>
+			<para>一、客户端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>同样先将客户端的principal注册到KDC中，然后导出到keytab文件并将其拷贝到客户端的$ZK_HOME/conf/zkcli.keytab路径下。</para>
+					<para>kadmin.local: addprinc zkcli</para>
+				</listitem>
+				<listitem>
+					<para>客户端的$ZK_HOME/conf/jaas.conf文件中添加如下配置。</para>
+					<programlisting>
+Client {
+  com.sun.security.auth.module.Krb5LoginModule required
+  useKeyTab=true
+  keyTab="$ZK_HOME/conf/zkcli.keytab"
+  storeKey=true
+  useTicketCache=false
+  principal="zkcli@&lt;REALM>";
+};
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>同样在$ZK_HOME/conf/java.env文件中添加如下配置。</para>
+					<programlisting>
+export JVMFLAGS="-Xms1024m -Xmx1024m 
+  -Djava.security.auth.login.config=$ZK_HOME/conf/jaas.conf $JVMFLAGS"					
+					</programlisting>
+				</listitem>
+			</orderedlist>
+			<para>三、功能校验</para>
+			<orderedlist>
+				<listitem>
+					<para>客户端通过如下命令连接到ZKServer端。</para>
+					<para>$ZK_HOME/bin/zkCli.sh -server &lt;HOST>:&lt;PORT></para>
+					<para>注意此处的HOST一定要和目标Server注册到KDC中的HOST相同，否则KDC无法定位目标Server对应的principal。</para>
+				</listitem>
+				<listitem>
+					<para>使用如下命令创建ZK数据节点。</para>
+					<para>create /testNode testdata sasl:zkcli:cdwra</para>
+					<para>由于Zookeeper启用了kerberos.removeHostFromPrincipal和kerberos.removeRealmFromPrincipal配置，所以命令设置acl的时候只需要声明用户名(即这里的zkcli)即可。</para>
+				</listitem>
+				<listitem>
+					<para>验证目标数据节点的权限。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>Java API应用</title>
+		<para>在QJM HA机制下，监控ActiveNN的变动情况，示例代码如下：</para>
+		<programlistingco>
+			<programlisting>
+public class ActiveMonitor implements Watcher,StatCallback {
+    private static String znode = "/hadoop-ha/ns1/ActiveStandbyElectorLock"; <co id="co.zookeeper.activenode" linkends="co.note.zookeeper.activenode"/>
+    private String zkConn = "hostname:2181,hostname2:2181,hostname3:2181"; <co id="co.zookeeper.conn" linkends="co.note.zookeeper.conn"/>
+    private ZooKeeper zkClient;
+    public void monitor() {
+        try {
+            zkClient = new ZooKeeper(zkConn, 5000, this); <co id="co.zookeeper.construct" linkends="co.note.zookeeper.construct"/>
+            zkClient.exists(znode, true, this, null); <co id="co.zookeeper.exist" linkends="co.note.zookeeper.exist"/>
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+    public void process(WatchedEvent event) { <co id="co.zookeeper.watcher" linkends="co.note.zookeeper.watcher"/>
+        String path = event.getPath();
+        System.out.println("path:"+path);
+        if (path != null &amp;&amp; path.equals(znode)) {
+            zkClient.exists(znode, true, this, null);
+        }
+    }
+    public void processResult(int rc, String path, Object ctx, Stat stat) { <co id="co.zookeeper.callback" linkends="co.note.zookeeper.callback"/>
+        switch (rc) {
+        case 0:
+            byte[] data;
+            try {
+                data = zkClient.getData(znode, false, new Stat());
+                ActiveNodeInfo proto = ActiveNodeInfo.parseFrom(data);
+                System.out.println(proto.getHostname());
+            } catch (KeeperException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (InvalidProtocolBufferException e) {
+                e.printStackTrace();
+            }
+            break;
+        default:
+            return;
+        }
+    }
+}
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.zookeeper.activenode" arearefs="co.zookeeper.activenode" >
+					<para>Active锁文件路径；</para>
+				</callout>
+				<callout id="co.note.zookeeper.conn" arearefs="co.zookeeper.conn" >
+					<para>zookeeper连接地址；</para>
+				</callout>
+				<callout id="co.note.zookeeper.construct" arearefs="co.zookeeper.construct" >
+					<para>构造ZooKeeper实例，其中第二个参数表示连接超时时间，第三个参数表示连接的监控对象；</para>
+				</callout>
+				<callout id="co.note.zookeeper.exist" arearefs="co.zookeeper.exist" >
+					<para>通过exists方法判断目标节点是否存在，还可对该节点启用监控(第二个参数)，节点状态发生变化时还可进行回调处理(第三个参数)；</para>
+				</callout>
+				<callout id="co.note.zookeeper.watcher" arearefs="co.zookeeper.watcher" >
+					<para>监控函数(由Watcher接口声明)，可通过WatchedEvent.getPath()来过滤感兴趣的节点；</para>
+				</callout>
+				<callout id="co.note.zookeeper.callback" arearefs="co.zookeeper.callback" >
+					<para>节点状态发生改变时，通过该函数进行回调处理(StatCallback接口声明)。</para>
+				</callout>
+			</calloutlist>
+		</programlistingco>	
+	</section>
+	<section>
+		<title>重要补丁</title>
+		<orderedlist>
+			<listitem>
+				<para>ZOOKEEPER-974</para>
+				<para>在3.6.0版本之前，TCP的backlog只能采用默认值(50)，无法通过配置项指定。当并发连接比较多时有可能造成ListenOverflows，对此该补丁引入了clientPortBacklog配置项用来指定队列长度。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

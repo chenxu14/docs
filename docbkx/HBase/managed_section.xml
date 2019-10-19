@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>手动管理</title>
+	<para>HBase针对很多特性提供了自动化管理功能，如：Region自动拆分，StoreFile自动合并，数据自动压实等，这些功能虽然降低了HBase管理的透明度，却也带来了使用上的不够灵活，因为功能的触发时间是不受控的。如果在系统访问高峰期执行这些操作，必然会带来响应上的延迟。因此非常有必要通过手动的方式来管理这些功能。</para>
+	<orderedlist>
+		<listitem>
+			<para>手动数据压实</para>
+			<para>数据压实操作(Major-Compaction)用来合并Region中所有的StoreFiles，合并文件的同时会清理逻辑上已被删除的数据和过期单元格，以此来降低磁盘的存储空间和提升数据的访问效率。</para>
+			<para>数据压实期间对Region的访问会处于阻塞状态，因此压实操作最好在系统空闲时段进行(如凌晨2:00~3:00系统访问量比较低的时候)。</para>
+			<para>HBase默认每天执行一次数据压实，通过hbase.hregion.majorcompaction属性来配置，如果需要手动管理数据压实操作可将该属性值设置成0，表示禁用自动管理功能。</para>
+			<programlisting>
+&lt;property>  
+    &lt;name>hbase.hregion.majorcompaction&lt;/name>  
+    &lt;value>0&lt;/value>  
+&lt;/property>		
+			</programlisting>
+			<para>自动管理功能被禁用之后，压实操作可通过HBaseAdmin的majorCompact方法来执行，此外还可通过Timer或quartz来定义功能触发的时间点。</para>
+		</listitem>
+		<listitem>
+			<para>禁用数据合并</para>
+			<para>数据合并(Merging-Compaction)同数据压实相比是较小范围内的StoreFiles合并，在memstore执行flush期间，如果Region的StoreFiles数量大于hbase.hstore.blockingStoreFiles属性指定的值，则需要对这些StoreFiles进行合并，合并文件的同时会阻塞客户端的写请求。</para>
+			<para>为了系统响应的及时性，可将hbase.hstore.blockingStoreFiles属性值调高，使“数据压实”操作能够发生在“数据合并”操作之前，这样对Region的写操作便不会被阻塞。</para>
+			<programlisting>
+&lt;property>  
+    &lt;name>hbase.hstore.blockingStoreFiles&lt;/name>  
+    &lt;value>10000&lt;/value>  
+&lt;/property>		
+			</programlisting>
+			<para>属性值调高之后，由于数据合并操作不会发生，从另一种角度来看便是禁用了数据合并功能。</para>			
+		</listitem>
+		<listitem>
+			<para>手动Region拆分</para>
+			<para>当Region的数据量大小超过hbase.hregion.max.filesize属性值时开始执行自动拆分功能。</para>
+			<para>HBase没有对外声明如何禁用Region自动拆分的配置，但我们可以将hbase.hregion.max.filesize的属性值设置的偏大一些(比如100GB)，这样在Region增长到该数据量之前有充裕的时间来手动对Region进行拆分。</para>
+<programlisting>
+&lt;property>  
+    &lt;name>hbase.hregion.max.filesize&lt;/name>  
+    &lt;value>107374182400&lt;/value>  
+&lt;/property>		
+			</programlisting>			
+			<para>Region的手动拆分可通过org.apache.hadoop.hbase.util.RegionSplitter来实现，具体使用可参考API说明。</para>
+			<para>或参考RegionSplitter代码自定义实现拆分逻辑。(TODO 拆分时间、拆分前提)</para>
+		</listitem>
+	</orderedlist>
+</section>

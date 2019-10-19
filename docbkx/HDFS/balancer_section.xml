@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>负载均衡</title>
+	<para>集群使用一段时间之后，block分配可能会出现不均匀的情况，由于MapReduce在执行过程中采用数据本地就近原则，从而造成数据量比较大的节点其负载偏高。因此需要为集群提供一套负载均衡策略来分散block的存储。</para>
+	<para>负载均衡策略要满足以下应用需求：</para>
+	<blockquote>
+		<orderedlist>
+			<listitem><para>首先，执行负载均衡操作以后不能降低每个block的副本备份数量，也不能降低block所分散到的机架数量；</para></listitem>
+			<listitem><para>其次，负载均衡操作的使用带宽是可控制的，防止其成为集群的网络瓶颈；</para></listitem>
+			<listitem><para>最后，执行负载均衡操作不会给NN带来过大的使用压力。</para></listitem>
+		</orderedlist>
+	</blockquote>
+	<para>针对以上需求，balancer组件的架构图如下所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/balancer.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>角色描述：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>Rebalancing Server</para>
+			<para>为了降低NN进程的处理压力，Balancer组件并没有集成到NN中进行处理，而是通过单独的进程来启动，这个进程便是RebalancingServer；</para>
+		</listitem>
+		<listitem>
+			<para>Proxy Source Data Node</para>
+			<para>在执行负载均衡操作时，block副本并不是直接从源节点(Source)移植到目标节点(Target)的，而是优先选择一个Source代理，通过代理节点将block拷贝到目标节点。这样做的好处是代理节点与Target更近(比如可能在同一个机架上)，可加快数据的拷贝进度；</para>
+		</listitem>
+		<listitem>
+			<para>Destination Data Node</para>
+			<para>block移植的目标节点。</para>
+		</listitem>
+	</itemizedlist>
+	<para>负载均衡操作是一个迭代的过程，每次迭代会移动部分数据从使用率较高的节点到使用率较低的节点，而不是一次性全部移植，具体执行步骤如下：</para>
+	<orderedlist>
+		<listitem><para>RebalancingServer从NN处获取DataNode信息，判断哪些节点的使用率偏高、哪些节点的使用率偏低，并进行配对处理；</para></listitem>
+		<listitem><para>针对使用率较高的节点，从NN处获取部分block信息进行移植处理；</para></listitem>
+		<listitem>
+			<para>针对每一个要移植的block，选择proxy节点进行数据拷贝，proxy的选取规则如下：</para>
+			<para>(1)首先，如果集群启用了node-group功能，并且block副本所在机器节点与目标节点同属一个NodeGroup，则优先选择该节点作为proxy；</para>
+			<para>(2)其次，如果集群启用了机架感知功能，并且block副本所在机器节点与目标节点同属一个机架，则选择该节点作为proxy；</para>
+			<para>(3)最后，任选一台block副本所在机器作为proxy(前提：该proxy的负载没有达到上限，最多可同时移动5个block)。</para>
+			<para>选取proxy的原因是因为该节点与目标节点更近，可加快数据的拷贝过程；</para>
+		</listitem>
+		<listitem><para>目标节点通过proxy拷贝block副本到本地；</para></listitem>
+		<listitem><para>目标节点通知NN执行降副本操作，降副本操作可能并不会马上执行，而是加入到pending队列，可通过jmx界面查看PendingDeletionBlocks属性来知道有多少要删除的block处于pending状态；</para></listitem>
+		<listitem><para>目标节点通知proxy块拷贝成功；</para></listitem>
+		<listitem><para>proxy将操作结果返回给RebalancingServer。</para></listitem>
+	</orderedlist>
+	<section>
+		<title>相关命令</title>
+		<orderedlist>
+			<listitem>
+				<para>启动balancer进程</para>
+				<para>bin/start-balancer.sh [-threshold &lt;threshold>] [-policy &lt;policy>]</para>
+				<para>threshold为一个阀值(默认为10)，用来计算磁盘使用率偏高的节点；policy为负载策略，联盟模式下可使用blockpool策略，非联盟模式下可使用datanode策略(或不配置)。</para>
+			</listitem>
+			<listitem>
+				<para>停止balancer进程</para>
+				<para>bin/stop-balancer.sh</para>
+			</listitem>
+			<listitem>
+				<para>调整balancer带宽</para>
+				<para>hdfs dfsadmin -setBalancerBandwidth 20971520</para>
+				<para>设置带宽为20m</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

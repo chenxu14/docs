@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用LDAP组映射</title>
+	<section>
+		<title>组件安装</title>
+		<orderedlist>
+			<listitem>
+				<para>首先安装Berkeley DB</para>
+				<para>下载地址：http://download.oracle.com/berkeley-db/db-5.0.32.tar.gz</para>
+				<para>截止文档编写时，OpenLDAP的最新版本为2.4.39，所支持的BerkeleyDB版本为4.4~5.1，这里使用5.0。下载成功后使用如下命令进行编译安装：</para>
+				<programlisting>
+shell > cd path/to/db-5.0.32/build_unix
+shell > ../dist/configure
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>安装OpenLDAP</para>
+				<para>下载地址：http://www.openldap.org/software/download/</para>
+				<para>下载成功后将其解压，依次执行如下步骤：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>首先将LD_LIBRARY_PATH环境变量引向BerkeleyDB的lib</para>
+						<para>export LD_LIBRARY_PATH="path/to/db-5.0.32/build_unix/.libs"</para>
+					</listitem>
+					<listitem>
+						<para>然后执行如下命令进行编译安装</para>
+						<programlisting>
+shell > ./configure CPPFLAGS="-I/usr/local/BerkeleyDB.5.0/include" \
+      > LDFLAGS="-L/usr/local/BerkeleyDB.5.0/lib"
+shell > make depend
+shell > make &amp;&amp; make install
+						</programlisting>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>配置/usr/local/etc/openldap/slapd.conf文件</para>
+				<programlistingco>
+					<programlisting>
+pidfile   /usr/local/var/run/slapd.pid <co id="co.ldap.pid" linkends="co.note.ldap.pid"/>
+argsfile  /usr/local/var/run/slapd.args <co id="co.ldap.args" linkends="co.note.ldap.args"/>
+# include schema definitions
+include   /usr/local/etc/openldap/schema/core.schema <co id="co.ldap.include" linkends="co.note.ldap.include"/>
+include   /usr/local/etc/openldap/schema/cosine.schema
+include   /usr/local/etc/openldap/schema/inetorgperson.schema
+# BDB database definitions
+database  bdb <co id="co.ldap.db.type" linkends="co.note.ldap.db.type"/>
+suffix    "ou=jd" <co id="co.ldap.db.suffix" linkends="co.note.ldap.db.suffix"/>
+rootdn    "cn=admin,ou=jd" <co id="co.ldap.db.user" linkends="co.note.ldap.db.user"/>
+rootpw    admin <co id="co.ldap.db.passwd" linkends="co.note.ldap.db.passwd"/>
+directory /usr/local/var/openldap-data <co id="co.ldap.db.path" linkends="co.note.ldap.db.path"/>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.ldap.pid" arearefs="co.ldap.pid"><para>保存进程id的文件；</para></callout>
+						<callout id="co.note.ldap.args" arearefs="co.ldap.args"><para>该文件存储slapd进程的启用命令；</para></callout>
+						<callout id="co.note.ldap.include" arearefs="co.ldap.include"><para>通过include来引入schema定义，如果schema之间存在依赖关系，则所依赖的schema也需要进行引入，如这里的inetorgperson依赖core和cosine；</para></callout>
+						<callout id="co.note.ldap.db.type" arearefs="co.ldap.db.type"><para>存储数据所使用的数据库类型，这里使用的是BerkeleyDB；</para></callout>
+						<callout id="co.note.ldap.db.suffix" arearefs="co.ldap.db.suffix"><para>相当于是数据库的唯一标识；</para></callout>
+						<callout id="co.note.ldap.db.user" arearefs="co.ldap.db.user"><para>数据库根用户名；</para></callout>
+						<callout id="co.note.ldap.db.passwd" arearefs="co.ldap.db.passwd"><para>数据库根用户密码，可使用密文格式，通过`slappasswd -h {MD5} -s admin`命令生成；</para></callout>
+						<callout id="co.note.ldap.db.path" arearefs="co.ldap.db.path"><para>数据库本地存储路径。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>启动服务</para>
+				<para>/usr/local/libexec/slapd</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>常用操作</title>
+		<orderedlist>
+			<listitem>
+				<para>slappasswd</para>
+				<para>slappasswd用于生成用户密码的密文格式，使用如下：</para>
+				<blockquote><para>slappasswd -h {MD5} -s &lt;user></para></blockquote>
+			</listitem>
+			<listitem>
+				<para>ldapadd</para>
+				<para>ldapadd用于向数据库中新增实体记录，数据实体可使用ldif文件进行封装，示例如下：</para>
+				<tip>数据实体之间通过空行来分离彼此，每条实体相当于数据库表中的一条记录，而每个key:value相当于某个字段的值。除此之外实体记录之间的组织方式类似于目录层级结构，而dn属性相当于实体的路径，用来唯一标识一条实体。</tip>
+				<programlistingco>
+					<programlisting>
+dn: ou=jd <co id="co.ldif.root" linkends="co.note.ldif.root"/>
+objectclass: organizationalUnit <co id="co.ldif.objectclass" linkends="co.note.ldif.objectclass"/>
+ou: jd
+
+dn: ou=people,ou=jd <co id="co.ldif.people" linkends="co.note.ldif.people"/>
+objectclass: organizationalunit
+ou: people
+
+dn: cn=hadp,ou=people,ou=jd <co id="co.ldif.people.hadp" linkends="co.note.ldif.people.hadp"/>
+objectclass: inetOrgPerson
+cn: hadp
+sn: hadp
+uid: hadp
+
+dn: cn=dd_edw,ou=people,ou=jd
+objectclass: inetOrgPerson
+cn: dd_edw
+sn: dd_edw
+uid: dd_edw
+
+dn: cn=admin,ou=people,ou=jd <co id="co.ldif.group.admin" linkends="co.note.ldif.group.admin"/>
+objectclass: groupofnames
+cn: admin
+member: cn=hadp,ou=people,ou=jd <co id="co.ldif.group.member" linkends="co.note.ldif.group.member"/>
+
+dn: cn=user,ou=people,ou=jd
+objectclass: groupofnames
+cn: user
+member: cn=dd_edw,ou=people,ou=jd
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.ldif.root" arearefs="co.ldif.root"><para>根实体路径要与数据库的suffix相同；</para></callout>
+						<callout id="co.note.ldif.objectclass" arearefs="co.ldif.objectclass"><para>每条实体记录可同时声明多个objectclass，声明了具体的objectclass后还需声明该objectclass所必须的属性(如这里的organizationalUnit必须要有ou属性)，objectclass和属性之间的对应关系可参考具体的schema描述，也可通过http://www.zytrax.com/books/ldap/ape界面来查询。</para></callout>
+						<callout id="co.note.ldif.people" arearefs="co.ldif.people"><para>声明people这个组织；</para></callout>
+						<callout id="co.note.ldif.people.hadp" arearefs="co.ldif.people.hadp"><para>声明hadp这个用户，由于其objectclass为inetOrgPerson，因此还需声明cn和sn属性；</para></callout>
+						<callout id="co.note.ldif.group.admin" arearefs="co.ldif.group.admin"><para>声明admin这个用户组，objectclass为groupofnames；</para></callout>
+						<callout id="co.note.ldif.group.member" arearefs="co.ldif.group.member"><para>member属性值为某个具体用户的dn属性值，每个groupofnames可包含多个member实体。</para></callout>
+					</calloutlist>
+				</programlistingco>
+				<para>文件创建成功后，通过如下命令将其导入到数据库中：</para>
+				<blockquote><para>shell > ldapadd -x -D "cn=admin,ou=jd" -W -f users.ldif</para></blockquote>
+				<para>其中-D属性用于定位root用户，-W表示以prompt方式输入密码，-f用于定位ldif文件。</para>
+			</listitem>
+			<listitem>
+				<para>ldapsearch</para>
+				<para>通过ldapsearch来执行数据实体的检索操作，如：</para>
+				<blockquote><para>ldapsearch -x -b 'ou=jd' '(objectclass=groupofnames)'</para></blockquote>
+				<para>表示查询'ou=jd'数据库中所有groupofnames类型的数据实体。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>应用配置</title>
+		<para>在core-site.xml文件中添加如下配置项：</para>
+		<programlistingco>
+			<programlisting>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping&lt;/name> <co id="co.ldap.config.class" linkends="co.note.ldap.config.class"/>
+  &lt;value>org.apache.hadoop.security.LdapGroupsMapping&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.bind.user&lt;/name> <co id="co.ldap.config.user" linkends="co.note.ldap.config.user"/>
+  &lt;value>cn=admin,ou=jd&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.bind.password&lt;/name> <co id="co.ldap.config.passwd" linkends="co.note.ldap.config.passwd"/>
+  &lt;value>admin&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.url&lt;/name> <co id="co.ldap.config.server" linkends="co.note.ldap.config.server"/>
+  &lt;value>ldap://localhost:389/ou=jd&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.base&lt;/name> <co id="co.ldap.config.base" linkends="co.note.ldap.config.base"/>
+  &lt;value>&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.search.filter.user&lt;/name> <co id="co.ldap.config.user.filter" linkends="co.note.ldap.config.user.filter"/>
+  &lt;value>(&amp;amp;(objectclass=inetOrgPerson)(uid={0}))&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.search.filter.group&lt;/name> <co id="co.ldap.config.group.filter" linkends="co.note.ldap.config.group.filter"/>
+  &lt;value>(objectclass=groupOfNames)&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.search.attr.member&lt;/name> <co id="co.ldap.config.member.attr" linkends="co.note.ldap.config.member.attr"/>
+  &lt;value>member&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.group.mapping.ldap.search.attr.group.name&lt;/name> <co id="co.ldap.config.group.name" linkends="co.note.ldap.config.group.name"/>
+  &lt;value>cn&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.ldap.config.class" arearefs="co.ldap.config.class"><para>指定映射类为LdapGroupsMapping；</para></callout>
+				<callout id="co.note.ldap.config.user" arearefs="co.ldap.config.user"><para>数据库的根用户名；</para></callout>
+				<callout id="co.note.ldap.config.passwd" arearefs="co.ldap.config.passwd"><para>数据库的根用户密码；</para></callout>
+				<callout id="co.note.ldap.config.server" arearefs="co.ldap.config.server"><para>LDAPServer的访问路径，后缀为数据库的suffix；</para></callout>
+				<callout id="co.note.ldap.config.base" arearefs="co.ldap.config.base"><para>查询所基于的根路径，如果LDAPServer声明为ldap://localhost:389，则该属性值需要声明成ou=jd；</para></callout>
+				<callout id="co.note.ldap.config.user.filter" arearefs="co.ldap.config.user.filter"><para>该属性用于封装用户实体的查询语句；</para></callout>
+				<callout id="co.note.ldap.config.group.filter" arearefs="co.ldap.config.group.filter"><para>该属性用于封装用户组实体的查询语句；</para></callout>
+				<callout id="co.note.ldap.config.member.attr" arearefs="co.ldap.config.member.attr"><para>group对象中通过该属性来定位member；</para></callout>
+				<callout id="co.note.ldap.config.group.name" arearefs="co.ldap.config.group.name"><para>group对象中通过该属性来定位组名称。</para></callout>
+			</calloutlist>
+		</programlistingco>
+		<para>hadoop启动后可通过hdfs groups命令来校验LDAP功能是否成功集成。</para>
+	</section>
+</section>

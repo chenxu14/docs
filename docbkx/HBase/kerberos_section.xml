@@ -1,0 +1,382 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Kerberos认证</title>
+	<para>kerberos是基于tickets的计算机网络授权协议，通过它允许计算机节点在不安全的网络环境下进行安全的通信(前提：通信的每台机器与KDC时间同步)，Kerberos的核心工作主要依赖于KDC，拿淘宝B2C模式举例，如果Client是消费者，Server是提供商，则KDC充当支付宝的角色，协调两者之间的信赖关系。</para>
+	<section>
+		<title>认证流程</title>
+		<para>Kerberos的认证流程如下图所示(注：这里主要描述了Client与KDC的认证逻辑，Client与Server的认证参考下一章节的应用场景)</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/common/security/kerberos-workflow.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>图释说明：KDC主要由AS、TGS和密钥数据库组成。AS用于校验principal是否存在，TGS用于为principal授权票据，所有的principal和登录密码全部注册到密钥数据库中。</para>
+		<orderedlist>
+			<listitem>
+				<para>客户端通过kinit向KDC申请TGT,将自身的principal发送给AS进行认证。(TGT相当于KDC的使用令牌，Client拥有该令牌后才可与KDC进行交互)</para>
+			</listitem>
+			<listitem>
+				<para>AS查询密钥数据库判断用户的principal是否在数据库中，如果数据库不存在该principal说明用户是非法的，放弃接下来的处理。</para>
+			</listitem>
+			<listitem>
+				<para>通过TGS为principal颁发TGT，同时从密钥数据库中取出Client的登录密码作为密钥对TGT进行外层加密，将加密好的数据发送给Client</para>
+				<tip>
+					<para>
+						TGT是经过双层加密处理的，在里层使用的是<inlinegraphic width='15pt' depth='15pt' fileref="../media/common/security/key2.jpg" format="JPG"/>，加密的信息包括：会话密钥(user-kdc-session)、TGT过期时间等，外层使用的是<inlinegraphic width='15pt' depth='15pt' fileref="../media/common/security/key1.jpg" format="JPG"/>，加密的信息有：TGT内和会话密钥(user-kdc-session)，结构如下图所示
+						<mediaobject>
+							<imageobject>
+								<imagedata fileref="../media/common/security/double-secret.jpg"></imagedata>
+							</imageobject>
+						</mediaobject>
+					</para>
+				</tip>
+			</listitem>
+			<listitem><para>Client收到TGT后使用自身的登录密码对其进行外层的解密，如果解密不成功说明密钥数据库中记录的密码与自身的登录密码不匹配，认证失败。解密成功后得到会话密钥和TGT内，并将TGT保存到本地便于之后的使用</para></listitem>
+			<listitem><para>Client向KDC申请对Server的访问需要传递TGT内给TGS，同时对申请内容使用user-kdc-session进行加密</para></listitem>
+			<listitem>
+				<para>TGS使用自身的密钥<inlinegraphic width='15pt' depth='15pt' fileref="../media/common/security/key2.jpg" format="JPG"/>对TGT内进行解密，从而也得到了user-kdc-session，在通过user-kdc-session对步骤5中的申请信息进行解密，从而得到所申请Server的principal信息。</para>
+				<para>获取到Server的principal后首先判断密钥数据库是否存在该principal，如果不存在说明该Server是不受信任的，放弃授权处理；否则取出server的登录密码，对user-service-ticket进行内层的加密，在使用Client的登录密码进行外层加密。</para>			
+				<tip>
+					<para>user-service-ticket相当于Server的访问令牌，同TGT一样该票据也是经过双层加密处理的，在里层使用的是<inlinegraphic width='15pt' depth='15pt' fileref="../media/common/security/key3.jpg" format="JPG"/>，加密的信息包括：Client与Server的会话密钥、Ticket过期时间等；外层使用的是<inlinegraphic width='15pt' depth='15pt' fileref="../media/common/security/key1.jpg" format="JPG"/>，加密的信息有：内层的user-service-tiket、Client与Server的会话密钥</para>
+				</tip>
+			</listitem>
+			<listitem><para>Client收到双层加密的user-service-tiket后，采用与步骤④和⑤相同的逻辑向Server发送申请</para></listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>安装步骤</title>
+		<orderedlist>
+			<listitem>
+				<para>首先去官方下载Kerberos的最新版本</para>
+				<para>http://web.mit.edu/kerberos/dist/index.html</para>
+			</listitem>
+			<listitem>
+				<para>使用如下命令进行安装</para>
+				<para>解压后进入src目录，依次执行./configure、make和make install</para>
+				<para>或者通过yum源进行安装：yum install krb5-libs krb5-server krb5-workstation</para>
+			</listitem>
+			<listitem>
+				<para>配置/etc/krb5.conf文件(JVM启动时可通过java.security.krb5.conf参数来指定该文件的存放位置，这样多个应用便可采用不同的kerberos配置)</para>
+				<programlistingco>
+					<programlisting>
+[logging] <co id="co.kerberos.logging" linkends="co.note.kerberos.logging"/>
+    default = FILE:/var/log/krb5libs.log
+    kdc = FILE:/var/log/krb5kdc.log
+    admin_server = FILE:/var/log/kadmind.log
+
+[libdefaults]
+    default_realm = HBASE.YOUKU <co id="co.kerberos.realm" linkends="co.note.kerberos.realm"/>
+    dns_lookup_realm = false
+    dns_lookup_kdc = false
+    ticket_lifetime = 24h <co id="co.kerberos.tgt.lifetime" linkends="co.note.kerberos.tgt.lifetime"/>
+    renew_lifetime = 7d <co id="co.kerberos.tgt.max" linkends="co.note.kerberos.tgt.max"/>
+    forwardable = true
+    udp_preference_limit = 1 <co id="co.kerberos.tgt.noudp" linkends="co.note.kerberos.tgt.noudp"/>
+
+[realms]
+    HBASE.YOUKU = {
+        kdc = kdc.hbase.youku <co id="co.kerberos.kdc" linkends="co.note.kerberos.kdc"/>
+        admin_server = kadmind.hbase.youku <co id="co.kerberos.kadmind" linkends="co.note.kerberos.kadmind"/>
+    }
+
+[domain_realm] <co id="co.kerberos.mapping" linkends="co.note.kerberos.mapping"/>
+    .hbase.youku = HBASE.YOUKU
+    hbase.youku = HBASE.YOUKU
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.kerberos.logging" arearefs="co.kerberos.logging"><para>进程运行日志存放目录；</para></callout>
+						<callout id="co.note.kerberos.realm" arearefs="co.kerberos.realm"><para>执行kinit或kadmin相关命令时，如果没有为指定principal指定realm，则默认采用该realm；</para></callout>
+						<callout id="co.note.kerberos.tgt.lifetime" arearefs="co.kerberos.tgt.lifetime"><para>票据授权票据的有效使用时间；</para></callout>
+						<callout id="co.note.kerberos.tgt.max" arearefs="co.kerberos.tgt.max"><para>票据授权票据的最长使用时间；</para></callout>
+						<callout id="co.note.kerberos.tgt.noudp" arearefs="co.kerberos.tgt.noudp"><para>当消息报文的长度大于该阈值时不走UDP通信，直接采用TCP协议进行通信；</para></callout>
+						<callout id="co.note.kerberos.kdc" arearefs="co.kerberos.kdc"><para>kdc进程所在机器节点的hostname；</para></callout>
+						<callout id="co.note.kerberos.kadmind" arearefs="co.kerberos.kadmind"><para>kadmind进程所在机器节点的hostname；</para></callout>
+						<callout id="co.note.kerberos.mapping" arearefs="co.kerberos.mapping"><para>hostname到realm的映射关系。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>配置/usr/local/var/krb5kdc/kdc.conf文件</para>
+				<programlistingco>
+					<programlisting>
+[kdcdefaults]
+    kdc_ports = 88,750 
+
+[realms]
+    HBASE.YOUKU = {
+        kadmind_port = 749 <co id="co.kadmind.port" linkends="co.note.kadmind.port"/>
+        max_life = 12h 0m 0s
+        max_renewable_life = 7d 0h 0m 0s
+        master_key_type = aes256-cts <co id="co.kdc.keytype" linkends="co.note.kdc.keytype"/>
+        supported_enctypes = aes256-cts:normal aes128-cts:normal
+        database_name = /usr/local/var/krb5kdc/principal <co id="co.kdc.db" linkends="co.note.kdc.db"/>
+        key_stash_file = /usr/local/var/krb5kdc/.k5.HBASE.YOUKU <co id="co.kdc.stash" linkends="co.note.kdc.stash"/>
+        acl_file = /usr/local/var/krb5kdc/kadm5.acl <co id="co.kdc.acl" linkends="co.note.kdc.acl"/>
+        admin_keytab=/usr/local/var/krb5kdc/kadm5.keytab
+     }
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.kadmind.port" arearefs="co.kadmind.port"><para>kadmind进程使用端口号；</para></callout>
+						<callout id="co.note.kdc.keytype" arearefs="co.kdc.keytype"><para>采用aes256-cts需要从JDK官方下载UnlimitedJCEPolicyJDK7.zip，并将里面的jar包拷贝到$JAVA_HOME/jre/lib/security目录下，或者直接采用aes128-cts；</para></callout>
+						<callout id="co.note.kdc.db" arearefs="co.kdc.db"><para>kdc数据库文件；</para></callout>
+						<callout id="co.note.kdc.stash" arearefs="co.kdc.stash"><para>通过stash文件可在操作系统重新启动的时候自动重启kdc进程和kadmind进程而无需手工输入认证信息；</para></callout>
+						<callout id="co.note.kdc.acl" arearefs="co.kdc.acl"><para>通过acl文件来配置哪些用户可管理kerberos；</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>使用如下命令创建KDC数据库</para>
+				<para>kdb5_util create -r HBASE.YOUKU -s </para>
+				<para>创建成功后会在/usr/local/var/krb5kdc目录下生成如下4个文件：</para>
+				<para>principal、principal.ok、principal.kadm5和principal.kadm5.lock</para>
+			</listitem>
+			<listitem>
+				<para>配置kerberos管理员用户</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>首先将管理员的principal添加到kadm5.acl配置文件中，如：</para>
+						<blockquote><para>admin/admin@HBASE.YOUKU    *</para></blockquote>
+						<para>表示admin/admin@HBASE.YOUKU 具备所有权限。</para>
+					</listitem>
+					<listitem>
+						<para>然后创建acl配置中对应的principal：</para>
+						<programlisting>
+shell% kadmin.local
+kadmin.local: addprinc admin/admin
+输入密码...
+密码确认...
+						</programlisting>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>启动krb5kdc和kadmind进程</para>
+				<para>shell% krb5kdc</para>
+				<para>shell% kadmind</para>
+			</listitem>
+			<listitem>
+				<para>配置slave kdc</para>
+				<itemizedlist>
+					<listitem>
+						<para>生成每个KDC的host principal</para>
+						<para>addprinc -randkey host/master.host@HBASE.YOUKU</para>
+						<para>addprinc -randkey host/slave.host@HBASE.YOUKU</para>
+					</listitem>
+					<listitem>
+						<para>导出host_principal到各自的/etc/krb5.keytab文件中</para>
+						<para>ktadd host/master.host@HBASE.YOUKU</para>
+						<para>ktadd host/slave.host@HBASE.YOUKU</para>
+					</listitem>
+					<listitem>
+						<para>同步master的如下文件到slave端</para>
+						<blockquote>
+							<para>/etc/krb5.conf</para>
+							<para>/var/kerberos/krb5kdc/kdc.conf</para>
+							<para>/var/kerberos/krb5kdc/kadm5.acl</para>
+							<para>/var/kerberos/krb5kdc/.k5.HBASE.YOUKU</para>
+						</blockquote>
+					</listitem>
+					<listitem>
+						<para>slave端启动kpropd进程</para>
+						<para>首先配置/var/kerberos/krb5kdc/kpropd.acl，将所有KDC的host_principal加入，然后执行`kpropd -S`命令将kpropd进程独立启动。</para>
+					</listitem>
+					<listitem>
+						<para>将master端数据广播给slave</para>
+						<para>首先将master端现有数据进行dump：kdb5_util dump /var/kerberos/krb5kdc/slave_datatrans，然后通过如下命令将数据广播给slave：kprop -f /var/kerberos/krb5kdc/slave_datatrans slave.host</para>
+						<para>数据广播成功后便可在slave端启动krb5kdc进程(以后的广播无需在对krb5kdc进程进行重启)。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<tip><para>kerberos客户端的安装只需要执行前三个步骤即可。</para></tip>
+	</section>
+	<section>
+		<title>常用操作</title>
+		<orderedlist>
+			<listitem>
+				<para>申请指定principal的票据授权票据</para>
+				<para>shell% kinit ${principal}</para>
+				<tip>
+					<para>如果使用的kerberos版本高于1.8.1，并且使用的jdk版本低于1.7，则会出现访问不到TGT的情况(Mechanism level: Failed to find any Kerberos tgt)，此时还需执行kinit -R命令，以便java能够访问到TGT。</para>
+					<para>如果通过`klist -e`查看申请到的票据为aes256类型，而KDC并没有配置该类型，则可通过`kinit -k -t path/to/keytab $principal` 重新生成aes128类型的票据。</para>
+				</tip>
+			</listitem>
+			<listitem>
+				<para>查看已申请到的票据授权票据</para>
+				<para>shell% klist</para>
+			</listitem>
+			<listitem>
+				<para>查看指定keytab中包含的principal</para>
+				<para>shell% klist -e -k -t /path/to/keytab</para>
+			</listitem>
+			<listitem>
+				<para>登录kadmin管理控制台</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>本地登录(在kadmind进程所在机器上登录)</para>
+						<para>shell% kadmin.local</para>
+					</listitem>
+					<listitem>
+						<para>远程登录</para>
+						<para>shell% kadmin</para>
+						<para>可远程登录的前提，当前linux用户具有kerberos管理员用户的TGT(可通过kinit命令申请)。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>kadmin控制台命令</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>listprincs</para>
+						<para>查看所有注册到KDC中的principal</para>
+					</listitem>
+					<listitem>
+						<para>addprinc</para>
+						<para>注册新的principal</para>
+					</listitem>
+					<listitem>
+						<para>delprinc</para>
+						<para>删除指定的principal</para>
+					</listitem>
+					<listitem>
+						<para>modprinc</para>
+						<para>对已有的principal进行修改，比如可通过如下命令修改目标principal所申请票据的有效时间：modprinc -maxlife 3mins &lt;principal></para>
+					</listitem>
+					<listitem>
+						<para>ktadd</para>
+						<para>将指定principal的认证信息添加到本地keytab文件中，keytab文件默认保存在/etc/krb5.keytab目录下，可通过KRB5_KTNAME环境变量进行修改。</para>
+						<para>同时需要注意的是如果该命令在执行过程中没有加-norandkey参数，则命令在执行过程中会修改目标principal的登录密码。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>配置明细</title>
+		<orderedlist>
+			<listitem>
+				<para>hbase-site.xml配置文件</para>
+				<itemizedlist>
+					<listitem>
+						<para>hbase.security.authentication</para>
+						<para>将参数值设置为kerberos，表示启用kerberos认证功能。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.security.authorization</para>
+						<para>将参数值设置为true，表示启用安全机制。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.coprocessor.region.classes</para>
+						<para>通过该配置引入org.apache.hadoop.hbase.security.token.TokenProvider协处理器。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.kerberos.principal</para>
+						<para>声明HMaster的principal(比如：hbase/_HOST@HBASE.YOUKU)，该principal需要事先注册到KDC中，通过kadmin的addprinc命令，具体参考kerberos的常用操作。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.keytab.file</para>
+						<para>保存HMaster认证信息的keytab文件路径，keytab文件可通过kadmin的ktadd命令导出，具体参考kerberos的常用操作。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.kerberos.principal</para>
+						<para>声明RegionServer的principal(比如：hbase/_HOST@HBASE.YOUKU)，同样该principal需要事先注册到KDC中。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.keytab.file</para>
+						<para>保存RegionServer认证信息的keytab文件路径。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.protection</para>
+						<para>服务端与客户端所声明的保护级别必须一致，否则客户端将无法对目标服务端进行访问。</para>
+					</listitem>
+				</itemizedlist>
+				<para>有关security的配置信息最好存放在单独的配置文件中，在通过Xinclude引入到主文件，如：</para>
+				<programlisting>
+在主文件中进行如下配置：
+&lt;configuration xmlns:xi="http://www.w3.org/2001/XInclude">
+    &lt;property...
+    &lt;xi:include href="security.xml"/>
+&lt;/configuration>
+在将security信息写入security.xml
+				</programlisting>
+				<para>这样比较利于在安全模式与非安全模式之间进行切换。另需注意的是在配置过程中所使用的_HOST关键字是一个比较特殊的变量，在匹配principal过程中会自动将其转换为相应机器的hostname(小写)。</para>
+			</listitem>
+			<listitem>
+				<para>$HBASE_HOME/conf/jaas.conf配置文件</para>
+				<para>采用该配置的前提是部署HBase的Zookeeper集群启用了Kerberos认证，这里主要对连接ZK的客户端认证信息进行设置。</para>
+				<programlisting>
+Client {
+   com.sun.security.auth.module.Krb5LoginModule required
+   useKeyTab=true
+   useTicketCache=false
+   keyTab="$PATH_TO_KEYTAB_FILE"
+   principal="hbase/$HOST@$REALM";
+};
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>hbase-env.sh文件中添加以下配置</para>
+				<programlisting>
+export HBASE_OPTS="-Djava.security.auth.login.config=$HBASE_HOME/conf/jaas.conf"
+export HBASE_MANAGES_ZK=false
+export HBASE_MASTER_OPTS="-Djava.security.auth.login.config=$HBASE_HOME/conf/jaas.conf"
+export HBASE_REGIONSERVER_OPTS="-Djava.security.auth.login.config=
+  $HBASE_HOME/conf/jaas.conf"
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>ThriftServer相关的安全配置</para>
+				<para>如果集群开启了ThriftServer进程，还需在hbase-site.xml文件中添加如下配置，以确保客户端通过ThriftServer对集群的访问是安全的。</para>
+				<itemizedlist>
+					<listitem>
+						<para>hbase.thrift.kerberos.principal</para>
+						<para>声明ThriftServer的principal，(比如：hbase/_HOST@HBASE.YOUKU)，该principal需要事先注册到KDC中。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.thrift.keytab.file</para>
+						<para>保存ThriftServer认证信息的keytab文件路径。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.thrift.security.qop</para>
+						<para>可选配置为auth-conf、auth-int和auth。</para>
+					</listitem>
+					<listitem>
+						<para>hadoop.proxyuser.$thrift_principal.hosts</para>
+						<para>配置thrift_principal能够使用代理用户的机器列表(数值为*表示所有机器)。</para>
+					</listitem>
+					<listitem>
+						<para>hadoop.proxyuser.$thrift_principal.groups</para>
+						<para>配置thrift_principal能够使用哪些组内的代理用户(数值为*表示所有用户组)。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>客户端配置相关</para>
+				<para>客户端只需添加如下配置项即可：</para>
+				<itemizedlist>
+					<listitem>
+						<para>hbase.master.kerberos.principal</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.kerberos.principal</para>
+					</listitem>
+					<listitem>
+						<para>hadoop.security.authentication(kerberos)</para>
+					</listitem>
+					<listitem>
+						<para>hbase.security.authentication(kerberos)</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.protection</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

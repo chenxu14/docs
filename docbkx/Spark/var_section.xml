@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>变量类型</title>
+	<section>
+		<title>本地变量</title>
+		<para>基于Spark做应用开发在使用本地变量时有一些要点需要注意：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>传递给作业的变量必须是可序列化的</para></listitem>
+			<listitem>
+				<para>变量赋予作业后，作业中的每个worker会使用一份该变量的拷贝；</para>
+				<para>因此变量值最好是只读的，不要在运行期间发生任何修改，以免造成worker的运行环境不一致。</para>
+			</listitem>
+			<listitem>
+				<para>不要直接使用成员变量，而要使用成员变量的拷贝，拿如下代码片段举例：</para>
+				<programlisting>
+1 class MyRddApp {
+2    val param = 3.14
+3    def work(rdd: RDD[Int]) {
+4        rdd.map(x => x + param).reduce(...)
+5    }
+6 }
+
+第4行会出现问题，因为直接使用了成员变量param，需要修改成如下格式：
+
+1 class MyRddApp {
+2    val param = 3.14
+3    def work(rdd: RDD[Int]) {
+4        val param_ = param
+5        rdd.map(x => x + param_).reduce(...)
+6    }
+7 }
+				</programlisting>
+			</listitem>
+		</itemizedlist>
+	</section>
+	<section>
+		<title>广播变量</title>
+		<para>广播变量通过SparkContext的broadcast方法来创建，示例代码如下：</para>
+		<blockquote>
+			<para>val broadcastVar = sc.broadcast(v)</para>
+		</blockquote>
+		<para>方法的主要作用是将变量v广播给每一个worker，worker收到广播后将其变量值保存在本地，供任务执行时访问(类似于DistibuteCache功能)，这样如果某个变量在多个作业之间同时使用，便可将其作为广播变量发送出去，避免每次作业执行期间变量值的不断拷贝与传递。</para>
+		<para>同本地变量的使用一样，变量值最好是只读状态的，否则可能引发worker运行环境的不一致。</para>
+	</section>
+	<section>
+		<title>累加变量</title>
+		<para>累加变量类似于MapReduce中的Counter功能，其构造方法是通过SparkContext的accumulator方法来实现的：</para>
+		<blockquote>
+			<para>val accum = sc.accumulator(0)</para>
+			<para>sc.parallelize(Array(1, 2, 3, 4)).foreach(x => accum += x)</para>
+		</blockquote>
+		<para>累加变量同样会分发给每一个worker供其执行+=操作，但是其变量值只有在DriverProgram端才能读取，通过其value属性。</para>
+	</section>
+</section>

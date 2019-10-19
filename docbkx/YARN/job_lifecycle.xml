@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Job状态机</title>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->INITED</para>
+			<para>触发事件：JOB_INIT</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para>触发JobHistoryEvent事件，事件类型为JOB_SUBMITTED；</para></listitem>
+				<listitem>
+					<para>判断是否以uber方式部署job，判断标准：</para>
+					<para>(1)mapreduce.job.ubertask.enable参数值为true(默认为false)；</para>
+					<para>(2)map任务数小于等于mapreduce.job.ubertask.maxmaps参数值(默认为9)；</para>
+					<para>(3)reduce任务数小于等于mapreduce.job.ubertask.maxreduces参数值(默认为1)；</para>
+					<para>(4)输入源数据小于mapreduce.job.ubertask.maxbytes参数值(默认为一个block的大小)；</para>
+					<para>(5)TaskContainer内存 &lt;= AMContainer内存；</para>
+					<para>(6)TaskContainer cpu数 &lt;= AMContainer cpu数；</para>
+					<para>(7)map类型不是ChainMapper，reduce类型不是ChainReducer。</para>
+					<para>如果以Uber方式部署，那么系统会尝试：</para>
+					<para>(1)设置mapreduce.job.reduce.slowstart.completedmaps参数值为1，表示所有map执行完成后才执行reduce；</para>
+					<para>(2)设置mapreduce.map.maxattempts和mapreduce.reduce.maxattempts参数值为1，失败后不在尝试重新部署；</para>
+					<para>(3)关闭推测执行功能，将mapreduce.map.speculative和mapreduce.reduce.speculative设置成false。</para>
+					<para>以uber方式部署后，所有Map和Reduce任务全部在AMContainer中顺序执行。</para>
+				</listitem>
+				<listitem><para>创建MapTaskImpl实例，数量等于输入源切片的个数；</para></listitem>
+				<listitem><para>创建ReduceTaskImpl实例，数量等于mapreduce.job.reduces参数值</para></listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>状态转换：INITED-->SETUP</para>
+			<para>触发事件：JOB_START</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para>触发JobHistoryEvent事件，事件类型分别为JOB_INITED和JOB_INFO_CHANGED，将事件信息持久化到文件(参考JobHistoryEventHandler)；</para></listitem>
+				<listitem><para>触发CommitterJobSetupEvent事件处理作业启动前的setup操作(创建job工作目录)；</para></listitem>
+				<listitem><para>setup执行成功后触发JobSetupCompletedEvent事件，使job状态机切换到Running状态。</para></listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>状态转换：SETUP-->RUNNING</para>
+			<para>触发事件：JOB_SETUP_COMPLETED</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para>针对每一个Task开启调度实例，通过触发TaskEventType.T_SCHEDULE事件使Task状态机进行相应处理；</para></listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->RUNNING</para>
+			<para>触发事件：JOB_UPDATED_NODES</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para></para></listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+</section>

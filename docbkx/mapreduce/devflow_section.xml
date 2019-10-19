@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>应用开发</title>
+	<orderedlist>
+		<listitem>
+			<para>定义Mapper</para>
+			<programlistingco>
+				<programlisting>
+import org.apache.hadoop.mapreduce.Mapper;
+public class MyMapper extends Mapper&lt;IntWritable, Text, Text, IntWritable>{<co id="co.mapper.annotation" linkends="co.note.mapper.annotation"/>
+    @Override
+    protected void map(IntWritable key, Text value, Context<co id="co.mapper.param" linkends="co.note.mapper.param"/> context)
+            throws IOException, InterruptedException{
+        //TODO 处理Map任务逻辑
+    }
+}			
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.mapper.annotation" arearefs="co.mapper.annotation" >
+						<para>新API环境下，Map任务主要继承至Mapper类，该类在设计上使用了泛型，4个参数分别为：输入数据的键值对类型和Map任务输出数据的键值对类型。</para>
+					</callout>
+					<callout id="co.note.mapper.param" arearefs="co.mapper.param" ><para>Context用来封装Map任务的上下文环境，可通过它来获取任务的相关信息。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>定义Reducer</para>
+			<programlistingco>
+				<programlisting>
+import org.apache.hadoop.mapreduce.Reducer;
+public class MyReducer extends Reducer&lt;Text, IntWritable, Text, IntWritable>{<co id="co.reduce.annotation" linkends="co.note.reduce.annotation"/>
+	@Override
+    protected void setup(Context context) throws IOException, InterruptedException{
+        Path[] localPaths = context.getLocalCacheFiles(); <co id="co.distribute.cache" linkends="co.note.distribute.cache"/>
+        File localFile = new File(localPaths[0].toString());
+    }
+    @Override
+    protected void reduce(Text key, Iterable&lt;IntWritable> values, Context context)
+    		throws IOException, InterruptedException{
+        //TODO 处理Reduce任务逻辑
+        context.write...;
+    }
+}				
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.reduce.annotation" arearefs="co.reduce.annotation" >
+						<para>Reduce任务主要继承至Reducer类，该类同样使用了泛型，4个参数分别为：Map任务的输出键值对类型和Reduce任务输出键值对类型。</para>
+					</callout>
+					<callout id="co.note.distribute.cache" arearefs="co.distribute.cache" >
+						<para>通过DistributeCache组件获取运行时需要的缓存文件。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>编写主程序</para>
+			<programlistingco>
+				<programlisting>
+import org.apache.hadoop.mapreduce.Job;
+public class Main
+{
+    public static void main(String[] args){
+        try{
+            Job job = Job.getInstance();
+            job.setJarByClass(Main.class);
+            job.setJobName("myJob");
+            job.setMapperClass(MyMapper.class);
+            job.setReducerClass(MyReducer.class);
+            job.setOutputKeyClass(Text.class);<co id="co.reduce.output" linkends="co.note.reduce.output"/>
+            job.setOutputValueClass(IntWritable.class);
+            job.setMapOutputKeyClass(Text.class);<co id="co.map.output" linkends="co.note.map.output"/>
+            job.setMapOutputValueClass(IntWritable.class);
+            job.setCombinerClass(MyReducer.class);<co id="co.map.combiner" linkends="co.note.map.combiner"/>
+            job.setNumReduceTasks(4);<co id="co.reduce.num" linkends="co.note.reduce.num"/>
+            job.setPartitionerClass(HashPartitioner.class);<co id="co.map.partitioner" linkends="co.note.map.partitioner"/>
+            job.addCacheFile(uri);<co id="co.cache.put" linkends="co.note.cache.put"/>
+            FileInputFormat.addInputPath(job, new Path(args[0]));
+            FileOutputFormat.setOutputPath(job, new Path(args[1]));
+            job.submit();
+        }
+        catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+}			
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.reduce.output" arearefs="co.reduce.output" >
+						<para>指定Reduce任务输出键值对类型。</para>
+					</callout>
+					<callout id="co.note.map.output" arearefs="co.map.output" >
+						<para>如果Map任务的输出键值对类型与Reduce任务相同，则setMapOutputKeyClass方法和setMapOutputKeyClass方法可不指定。</para>
+					</callout>
+					<callout id="co.note.map.combiner" arearefs="co.map.combiner" >
+						<para>Map任务的输出数据需要传递给reduce进行汇总处理，当传输数据量较大时会十分消耗带宽资源。通过Combiner函数可以在数据传输之前，采用与Reduce相同的处理逻辑对传输数据进行局部的汇总，在将汇总后的数据传递给Reduce做全局汇总，这样可以大大节省带宽资源。其本质是将Reduce的运算逻辑分散到Map端去处理。</para>
+					</callout>
+					<callout id="co.note.reduce.num" arearefs="co.reduce.num" >
+						<para>指定Reduce任务的个数。</para>
+					</callout>
+					<callout id="co.note.map.partitioner" arearefs="co.map.partitioner" >
+						<para>当通过setNumReduceTasks方法为job指定多个Reduce任务时，需要对map的输出结果进行分区，不同的Reduce来处理不同的分区。</para>
+					</callout>
+					<callout id="co.note.cache.put" arearefs="co.cache.put" >
+						<para>通过DistributeCache组件添加job运行时依赖的文件(注：uri不能指向本地路径，可以是hdfs路径，这样task节点才能找到该文件)。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>编写单元测试</para>
+			<tip>
+				<programlisting>
+单元测试使用apache的MRUnit框架，可通过以下maven依赖来获取
+&lt;dependency>
+    &lt;groupId>org.apache.mrunit&lt;/groupId>
+    &lt;artifactId>mrunit&lt;/artifactId>
+    &lt;version>1.0.0&lt;/version>
+    &lt;classifier>hadoop2&lt;/classifier>
+&lt;/dependency>
+如果hadoop使用的是2.0之前的版本，classifier设置成hadoop1
+				</programlisting>
+			</tip>
+			<para>测试代码如下：</para>
+			<programlistingco>
+				<programlisting>
+public class MRTest
+{
+    MapDriver&lt;IntWritable, Text, Text, IntWritable> mapDriver;
+    ReduceDriver&lt;Text, IntWritable, Text, IntWritable> reduceDriver;
+    @Before
+    public void setUp(){
+        MyMapper mapper=new MyMapper();
+        MyReducer reducer=new MyReducer();
+        mapDriver=MapDriver.newMapDriver(mapper);<co id="co.map.driver" linkends="co.note.map.driver"/>
+        reduceDriver=ReduceDriver.newReduceDriver(reducer);<co id="co.reduce.driver" linkends="co.note.reduce.driver"/>
+    }
+    @Test
+    public void testMapper() throws Exception{
+        mapDriver.withInput(new IntWritable(), new Text())<co id="co.map.input" linkends="co.note.map.input"/>
+            .withOutput(new Text(), new IntWritable())<co id="co.map.expectoutput" linkends="co.note.map.expectoutput"/>
+            .runTest();
+    }
+    public void testReducer() throws Exception{
+        List&lt;IntWritable> values=new ArrayList&lt;IntWritable>();
+        values.add(new IntWritable(1));
+        values.add(new IntWritable(1));
+        reduceDriver.withInput(new Text(), values)<co id="co.reduce.input" linkends="co.note.reduce.input"/>
+            .withOutput(new Text(), new IntWritable(2))<co id="co.reduce.expectoutput" linkends="co.note.reduce.expectoutput"/>
+            .runTest();
+    }
+}				
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.map.driver" arearefs="co.map.driver" >
+						<para>构造MapDriver用于测试Map任务。</para>
+					</callout>
+					<callout id="co.note.reduce.driver" arearefs="co.reduce.driver" >
+						<para>构造ReduceDriver用于测试Reduce任务。</para>
+					</callout>
+					<callout id="co.note.map.input" arearefs="co.map.input" >
+						<para>为Map任务指定输入数据。</para>
+					</callout>
+					<callout id="co.note.map.expectoutput" arearefs="co.map.expectoutput" >
+						<para>为Map任务指定我们期望的输出数据，若实际输出与期望不符，抛出异常。</para>
+					</callout>
+					<callout id="co.note.reduce.input" arearefs="co.reduce.input" >
+						<para>为Reduce任务指定输入数据。</para>
+					</callout>
+					<callout id="co.note.reduce.expectoutput" arearefs="co.reduce.expectoutput" >
+						<para>为Reduce任务指定我们期望的输出数据，若实际输出与期望不符，抛出异常。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+	
+	
+	<para>Consult <citation>AhoSethiUllman96</citation> for more details onabstract syntax tree construction.</para>
+	<bibliolist>
+		<title>参考文献</title>
+		<biblioentry>
+			<abbrev>AhoSethiUllman96</abbrev>
+			<authorgroup>
+				<author>
+					<personname>
+						<firstname>Alfred V.</firstname>
+						<surname>Aho</surname>
+					</personname>
+				</author>
+			</authorgroup>
+			<copyright>
+				<year>1996</year>
+				<holder>Bell Telephone Laboratories, Inc.</holder>
+			</copyright>
+			<editor>
+				<personname>
+					<firstname>James T.</firstname>
+					<surname>DeWolf</surname>
+				</personname>
+			</editor>
+			<biblioid class="isbn">0-201-10088-6</biblioid>
+			<publisher>
+				<publishername>Addison-Wesley Publishing Company</publishername>
+			</publisher>
+			<citetitle>Compilers, Principles, Techniques, and Tools</citetitle>
+		</biblioentry>
+	</bibliolist>
+</section>

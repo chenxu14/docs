@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>YarnClient客户端组件</title>
+	<para>YarnClient作为平台客户端其主要职责是向ResourceManager提交App应用程序，每个App程序的运行环境是通过ApplicationSubmissionContext对象来封装的，包括以下信息：</para>
+	<itemizedlist make='bullet'>
+		<listitem><para>AppId、name、type：程序ID，名称，类型；</para></listitem>
+		<listitem><para>queue：app所提交到的job队列；</para></listitem>
+		<listitem><para>Resource：AMContainer加载需要的内存资源；</para></listitem>
+		<listitem>
+			<para>ContainerLaunchContext：封装AMContainer运行环境，包括：</para>
+			<orderedlist>
+				<listitem>
+					<para>AMContainer加载所需要的文件资源</para>
+					<para>拿MapReduce应用举例，需要的资源包括作业配置文件(job.xml)、封装作业的jar包、输入源切片信息以及DistributeCache信息，这些资源在作业提交时会上传到HDFS里(用户的staging目录)，Container在启动的时候需要将它们下载到本地，这个过程是通过ResourceLocalizationService服务来实现的。</para>
+					<para>job.xml并不是作业最终采用的配置，在被上传到服务端以后，Container加载时会将其与NodeManager端的配置进行整合来形成最终的配置，如果NodeManager的相关属性参数被设置成了final，那么该属性值并不会被job.xml中的配置覆盖掉。</para>
+				</listitem>
+				<listitem>
+					<para>AMContainer启动所需要的环境变量信息，变量包括：</para>
+					<para>(1)CLASSPATH，系统默认的classpath包含以下路径</para>
+					<blockquote>
+						<para>$HADOOP_CONF_DIR</para>
+						<para>$HADOOP_HOME/share/hadoop/common/*</para>
+						<para>$HADOOP_HOME/share/hadoop/common/lib/*	</para>
+						<para>$HADOOP_HOME/share/hadoop/hdfs/*</para>
+						<para>$HADOOP_HOME/share/hadoop/hdfs/lib/*</para>
+						<para>$HADOOP_HOME/share/hadoop/yarn/*</para>
+						<para>$HADOOP_HOME/share/hadoop/yarn/lib/*</para>
+						<para>$HADOOP_HOME/share/hadoop/mapreduce/*</para>
+						<para>$HADOOP_HOME/share/hadoop/mapreduce/lib/*</para>
+						<para>开发人员可通过yarn.application.classpath和mapreduce.application.classpath来修改默认的环境变量配置。</para>
+					</blockquote>
+					<para>(2)用户自定义环境变量信息</para>
+					<blockquote>
+						<para>用户自定义环境变量信息可通过yarn.app.mapreduce.am.admin.user.env和yarn.app.mapreduce.am.env配置参数来指定，比如可通过配置：</para>
+						<para>&lt;property></para>
+						<blockquote>
+							<para>&lt;name>yarn.app.mapreduce.am.command-opts&lt;/name></para>
+							<para>&lt;value>LD_LIBRARY_PATH=$HADOOP_HOME/library&lt;/value></para>
+						</blockquote>
+						<para>&lt;/property></para>
+						<para>来为Container引入LD_LIBRARY_PATH环境变量。</para>
+					</blockquote>
+				</listitem>
+				<listitem>
+					<para>AMContainer的启动命令</para>
+					<para>同样拿MapReduce应用举例，AMContainer的启动命令大致如下：</para>
+					<programlistingco>
+						<programlisting>
+$JAVA_HOME/bin/java 
+-Dlog4j.configuration=container-log4j.properties 
+-Dyarn.app.container.log.dir=${LOG_DIR}/${appId}/${containerId} <co id="co.amcontainer.log" linkends="co.note.amcontainer.log"/>
+-Dyarn.app.container.log.filesize=${LOG_SIZE} <co id="co.amcontainer.log.size" linkends="co.note.amcontainer.log.size"/>
+-Dhadoop.root.logger=${LOG_LEVEL},CLA <co id="co.amcontainer.log.level" linkends="co.note.amcontainer.log.level"/>
+-Djava.net.preferIPv4Stack=true -Dhadoop.metrics.log.level=WARN	<co id="co.amcontainer.admin.opts" linkends="co.note.amcontainer.admin.opts"/>
+-Xmx1024m -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps <co id="co.amcontainer.java.opts" linkends="co.note.amcontainer.java.opts"/>
+org.apache.hadoop.mapreduce.v2.app.MRAppMaster <co id="co.amcontainer.class" linkends="co.note.amcontainer.class"/>
+1>${LOG_DIR}/${appId}/${containerId}/stdout 
+2>${LOG_DIR}/${appId}/${containerId}/stderr 
+						</programlisting>
+						<calloutlist>
+							<callout id="co.note.amcontainer.log" arearefs="co.amcontainer.log" ><para>日志输出目录(LOG_DIR)通过yarn.nodemanager.log-dirs配置参数来指定；</para></callout>
+							<callout id="co.note.amcontainer.log.size" arearefs="co.amcontainer.log.size" ><para>限制日志文件大小通过mapreduce.task.userlog.limit.kb配置参数来指定；</para></callout>
+							<callout id="co.note.amcontainer.log.level" arearefs="co.amcontainer.log.level" ><para>日志级别通过yarn.app.mapreduce.am.log.level配置参数来指定；</para></callout>
+							<callout id="co.note.amcontainer.admin.opts" arearefs="co.amcontainer.admin.opts" ><para>管理参数通过yarn.app.mapreduce.am.admin-command-opts来设置；</para></callout>
+							<callout id="co.note.amcontainer.java.opts" arearefs="co.amcontainer.java.opts" ><para>堆内存及jvm相关参数通过yarn.app.mapreduce.am.command-opts来设置；</para></callout>
+							<callout id="co.note.amcontainer.class" arearefs="co.amcontainer.class" ><para>AMContainer是通过加载MRAppMaster类来启动的。</para></callout>
+						</calloutlist>
+					</programlistingco>
+				</listitem>
+				<listitem>
+					<para>App的访问控制列表</para>
+					<para>可通过mapreduce.job.acl-view-job属性来指定哪些用户可浏览作业信息；还可通过mapreduce.job.acl-modify-job属性来控制哪些用户可杀死该作业。参数生效的前提是集群开启了acl校验功能，即mapreduce.cluster.acls.enabled属性值为true，这几个参数都是在客户端生效的。</para>
+				</listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+	<tip><para>ApplicationSubmissionContext对象的构建可参考YarnRunner的createApplicationSubmissionContext方法来实现。</para></tip>
+</section>

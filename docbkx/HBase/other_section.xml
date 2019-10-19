@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>其他相关</title>
+	<xi:include href="migrate_section.xml"/>
+	<section>
+		<title>自定义负载均衡</title>
+		<para>HBase默认的负载均衡机制存在这样一个弊端：集群中每台物理机器的硬件配置必须是相同或接近的，否则将有可能产生木桶短板效应，因其在执行均衡过程中主要参考Region倾斜度这项纬度，而没有考虑每台物理机器的性能差异。基于此我们可以对负载均衡机制做一些个性化的定制，通过引入cpu纬度来为每台机器分配适当数量的Region。</para>
+		<orderedlist>
+			<listitem>
+				<para>cpu指标收集</para>
+				<para>HBase的一些硬件指标是可以通过对应的metric得到体现的，比如HBase会对ActiveHandler的数量进行统计，而该metric可以间接体现CPU的繁忙程度。</para>
+				<blockquote><para>cpu利用率 = activeHandler / allHandler</para></blockquote>
+				<para>其中allHandler可通过hbase.regionserver.handler.count配置参数进行指定，指定办法可以用物理CPU数乘以相应比例，这样便可对当前机器的cpu利用率进行收集。然而遗憾的是负载均衡操作不能只参考某个时间点上的cpu纬度，需要对整体时间进行抽样来获取其平均的cpu使用情况。为此我们可以向Metrics系统引入一个全新的监控指标ActiveHandlerHis，并将其类型设置为MutableHistogram，然后每隔一段时间将当前RS的activeHandler写入其中(可借助于HBase的ChoreService来实现)，这样便可以统计出最近某个时间段上Handler的平均利用情况(通过其内部所封装的Sample对象)。</para>
+			</listitem>
+			<listitem>
+				<para>cpu指标汇报</para>
+				<para>CPU的指标采集工作是在RS端来完成的，但是负载均衡操作需要在Master端进行，因此RS需要将采集到的指标向Master进行汇报。默认情况下，RS会每隔3秒钟与Master心跳通信一次，通过调用RegionServerStatusService服务的regionServerReport方法，我们可以借助于该方法将采集到的指标一并发送给Master进行处理(代码参考HRegionServer的buildServerLoad方法)，为此需要对通信内容进行重构(修改ClusterStatus.proto，为ServerLoad加入active_handler_ratio字段，并用protobuf重新生成对应的java类)。</para>
+			</listitem>
+			<listitem>
+				<para>基于cpu做负载均衡</para>
+				<para>基于cpu的负载均衡逻辑主要通过继承StochasticLoadBalancer类来实现，但是需要覆盖父类的如下方法：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>needsBalance，判断当前集群是否有必要执行负载均衡操作。</para>
+						<para>在父类实现中主要是判断每台机器所部署的Region数量是否在[average * (1 - slop), average * (1 + slop)]区间内。其中average为每台机器的平均Region数，slop是可上下浮动的一个浮点，默认为0.2，通过hbase.regions.slop参数声明。方法覆盖后不在基于Region数量做考量，而是判断每台机器的cpu使用率是否在[avgLoad * (1 - slop), avgLoad * (1 + slop)]区间内。</para>
+					</listitem>
+					<listitem>
+						<para>setConf，对负载均衡相关的配置进行动态刷新时会调用该方法来初始化相关的均衡策略和成本计算器。</para>
+						<para>在父类中所初始化的均衡策略主要参考Region倾斜度这项纬度，方法覆盖后我们需要实现自己的均衡策略，将cpu作为主要纬度(代码方面可参考CpuBasedRandomGenerator类实现和CpuLoadCandidateGenerator类实现)。计算均衡成本时也不在采用RegionCountSkewCostFunction，而是实现基于cpu的倾斜成本评估(代码方面可参考CpuLoadSkewCostFunction类实现)。</para>
+					</listitem>
+				</itemizedlist>
+				<para>同时还要对BaseLoadBalancer.Cluster类的doAction方法进行重构，以便加入cpu负载相关的计算逻辑，为便于描述声明如下变量：</para>
+				<blockquote>
+					<para>(1)loadSource，源RS的负载；</para>
+					<para>(2)loadTarget，目标RS的负载；</para>
+					<para>(3)numSource，源RS的Region数量：</para>
+					<para>(4)numTarget，目标RS的Region数量。</para>
+				</blockquote>
+				<para>这样，每移动一个Region，源RS的负载降低loadSource/numSource，目标RS的负载增加loadTarget/numTarget。</para>
+			</listitem>
+		</orderedlist>
+		<para>完整的功能补丁可参考：TODO</para>
+	</section>
+	<section>
+		<title>单元测试</title>
+		<para>为了便于模拟集群操作，HBase提供了HBaseTestingUtility工具类，用来封装一些常用的操作函数，具体使用方式可参考如下测试模版。</para>
+		<programlistingco>
+			<programlisting>
+public class TestHBaseClient {
+  private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+  @BeforeClass
+  public static void setUpBeforeClass() throws Exception {
+    TEST_UTIL.startMiniCluster(); <co id="co.junit.startcluster" linkends="co.note.junit.startcluster"/>
+    HTableDescriptor tableDesc = new HTableDescriptor(TableName.valueOf(tableName));
+    tableDesc.addFamily(new HColumnDescriptor(Bytes.toBytes("cf")));
+    TEST_UTIL.createTable(tableDesc, null); <co id="co.junit.ddl" linkends="co.note.junit.ddl"/>
+    Configuration conf = TEST_UTIL.getConfiguration();
+  }
+  @AfterClass
+  public static void tearDownAfterClass() throws Exception {
+    TEST_UTIL.shutdownMiniCluster(); <co id="co.junit.stopcluster" linkends="co.note.junit.stopcluster"/>
+  }
+}
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.junit.startcluster" arearefs="co.junit.startcluster" ><para>类加载之前完成模拟集群的启动。</para></callout>
+				<callout id="co.note.junit.ddl" arearefs="co.junit.ddl" ><para>封装了建表等DDL操作。</para></callout>
+				<callout id="co.note.junit.stopcluster" arearefs="co.junit.stopcluster" ><para>测试运行结束后对模拟集群执行shutdown操作。</para></callout>
+			</calloutlist>
+		</programlistingco>
+		<para>除此之外我们还可以借助于Mockito对象来模拟一些类的操作行为，如果要模拟的类涉及静态方法，还可借助于powermock框架来完成，具体使用方式如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先在pom.xml中添加如下maven依赖库</para>
+				<programlisting>
+&lt;dependency>
+  &lt;groupId>junit&lt;/groupId>
+  &lt;artifactId>junit&lt;/artifactId>
+  &lt;version>4.12&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+&lt;dependency>
+  &lt;groupId>org.mockito&lt;/groupId>
+  &lt;artifactId>mockito-all&lt;/artifactId>
+  &lt;version>1.10.19&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+&lt;dependency>
+  &lt;groupId>org.powermock&lt;/groupId>
+  &lt;artifactId>powermock-module-junit4&lt;/artifactId>
+  &lt;version>1.7.4&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+&lt;dependency>
+  &lt;groupId>org.powermock&lt;/groupId>
+  &lt;artifactId>powermock-api-mockito&lt;/artifactId>
+  &lt;version>1.7.4&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+&lt;dependency>
+  &lt;groupId>org.powermock&lt;/groupId>
+  &lt;artifactId>powermock-core&lt;/artifactId>
+  &lt;version>1.7.4&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+&lt;dependency>
+  &lt;groupId>org.apache.hbase&lt;/groupId>
+  &lt;artifactId>hbase-testing-util&lt;/artifactId>
+  &lt;version>${hbase.version}&lt;/version>
+  &lt;scope>test&lt;/scope>
+&lt;/dependency>
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>编写如下测试类</para>
+				<programlistingco>
+					<programlisting>
+@RunWith(PowerMockRunner.class) <co id="co.mock.runner" linkends="co.note.mock.runner"/>
+@PrepareForTest(HBaseClientImpl.class) <co id="co.mock.prepare" linkends="co.note.mock.prepare"/>
+public class TestHBaseClient {
+  @Before
+  public void setUpBefore() throws Exception {
+    PowerMockito.mockStatic(HBaseClientImpl.class);
+    HBaseClientImpl client = Mockito.mock(HBaseClientImpl.class); <co id="co.mock.mockito" linkends="co.note.mock.mockito"/>
+    when(HBaseClientImpl.getInstance()).thenReturn(client); <co id="co.mock.when" linkends="co.note.mock.when"/>
+  }
+  @Test
+  public void testGetTable() throws IOException {
+    HBaseClientImpl client = HBaseClientImpl.getInstance(); <co id="co.mock.static" linkends="co.note.mock.static"/>
+    Connection conn = Mockito.mock(Connection.class); <co id="co.mock.conn" linkends="co.note.mock.conn"/>
+    when(client.getConnection(Mockito.anyString(), Mockito.anyBoolean())) <co id="co.mock.note" linkends="co.note.mock.note"/>
+        .thenAnswer(new Answer&lt;Connection>() {
+      @Override
+      public Connection answer(InvocationOnMock invocation) throws Throwable {
+        String clusterName = invocation.getArgumentAt(0, String.class);
+        assertEquals("hbase-xr", clusterName);
+        return conn;
+      }
+    });
+    client.getTable("ns:TestTable");
+  }
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.mock.runner" arearefs="co.mock.runner" ><para>通过PowerMockRunner模拟静态类行为。</para></callout>
+						<callout id="co.note.mock.prepare" arearefs="co.mock.prepare" ><para>模拟哪些类的静态行为需要通过PrepareForTest注解声明。</para></callout>
+						<callout id="co.note.mock.mockito" arearefs="co.mock.mockito" ><para>通过Mockito模拟一个目标对象。</para></callout>
+						<callout id="co.note.mock.when" arearefs="co.mock.when" ><para>调用HBaseClientImpl的getInstance静态方法时将模拟对象返回(前提：调用了PowerMockito#mockStatic方法做了静态模拟)。</para></callout>
+						<callout id="co.note.mock.static" arearefs="co.mock.static" ><para>此时会返回setUpBefore函数中模拟出的HBaseClientImpl对象。</para></callout>
+						<callout id="co.note.mock.conn" arearefs="co.mock.conn" ><para>模拟一个Connection对象，并通过下面的when方法来模拟其操作行为。</para></callout>
+						<callout id="co.note.mock.note" arearefs="co.mock.note" ><para>注意when函数所针对的操作对象必须是通过mock或spy模拟出的对象，模拟行为才会生效。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>github使用</title>
+		<orderedlist>
+			<listitem>
+				<para>首先从hbase主工程上面fork出自己的工程</para>
+			</listitem>
+			<listitem>
+				<para>然后将fork出来的工程clone到本地</para>
+				<para>git clone https://github.com/chenxu14/hbase.git</para>
+			</listitem>
+			<listitem>
+				<para>将主工程在本地进行引用，便于后续合并其新增代码</para>
+				<para>git remote add upstream https://github.com/apache/hbase.git</para>	
+			</listitem>
+			<listitem>
+				<para>查看本地已引用的工程信息</para>
+				<para>git remote -v</para>
+			</listitem>
+			<listitem>
+				<para>将主工程的元数据信息fetch到本地</para>
+				<para>git fetch upstream</para>
+			</listitem>
+        	<listitem>
+        		<para>当主工程有变动的时候，合并主工程的分支代码到自己的工程</para>
+        		<para>git merge upstream/master</para>
+        	</listitem>
+        	<listitem>
+        		<para>对自己工程的相关分支进行rebase操作以便于向主工程提交PR</para>
+        	</listitem>
+		</orderedlist>
+	</section>
+</section>

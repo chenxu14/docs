@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>ApplicationMaster组件</title>
+	<section>
+		<title>MRAppMaster服务</title>
+		<para>MRAppMaster服务是通过ContainersLauncher来启动的(参考ContainersLancher)，其作为MapReduce应用的ApplicationMaster主要负责为TaskContainer申请计算资源，并为每个TaskContainer分配计算任务。</para>
+		<para>一、当服务初始化时，执行如下处理：</para>
+		<orderedlist>
+			<listitem><para>初始化AppContext上下文对象；</para></listitem>
+			<listitem>
+				<para>添加子服务完成相关业务，子服务包括：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Dispatcher：事件触发器服务；</para>
+					</listitem>
+					<listitem>
+						<para>Speculator：推测执行服务；</para>
+					</listitem>
+					<listitem>
+						<para>ContainerAllocator：</para>
+					</listitem>
+					<listitem>
+						<para>CommitterEventHandler：</para>
+					</listitem>
+					<listitem>
+						<para>TaskAttemptListener：</para>
+					</listitem>
+					<listitem>
+						<para>JobHistoryEventHandler：</para>
+					</listitem>
+					<listitem>
+						<para>ContainerLauncher：执行TaskContainer加载操作；</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>注册事件处理器，响应事件处理：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>注册JobEventDispatcher用来响应JobEventType事件类型；</para>
+						<para>首先由事件对象获取到Job实例，在将事件转交给Job状态机进行处理。</para>
+					</listitem>
+					<listitem><para>注册TaskEventDispatcher用来响应TaskEventType事件类型；</para></listitem>
+					<listitem><para>注册TaskAttemptEventDispatcher用来响应TaskAttemptEventType事件类型；</para></listitem>
+					<listitem>
+						<para>注册CommitterEventHandler用来响应CommitterEventType事件类型；</para>
+						<para>针对每一个事件开启EventProcessor线程来做响应处理。</para>
+					</listitem>
+					<listitem>
+						<para>注册SpeculatorEventDispatcher用来响应Speculator.EventType事件类型；</para>
+						<para>首先判断系统是否开启了推测执行功能，如果是，将事件转发给Speculator进行处理(参考Speculator)。</para>
+						<tip>推测执行功能默认是开启的，可通过mapreduce.map.speculative参数和mapreduce.reduce.speculative参数来控制是否开启</tip>
+					</listitem>
+					<listitem><para>注册ContainerAllocator用来响应ContainerAllocator.EventType事件类型；</para></listitem>
+					<listitem><para>注册ContainerLauncher用来响应ContainerLauncher.EventType事件类型；</para></listitem>
+					<listitem><para>注册JobHistoryEventHandler用来响应jobhistory.EventType事件类型。</para></listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<para>二、当服务启动时，执行如下处理：</para>
+			<para>首先。对运行错误的AM执行recovery操作</para>
+			<tip>recovery功能默认开启，通过yarn.app.mapreduce.am.job.recovery.enable参数来配置</tip>
+			<para>创建org.apache.hadoop.mapreduce.v2.app.job.Job实例并加入到AppContext上下文环境中；</para>
+			<para>注册JobFinishEventHandler用来响应JobFinishEvent.Type事件类型</para>
+			<para>触发JobHistoryEvent事件，事件类型为AM_STARTED，使JobHistoryEventHandler做相应处理(参考JobHistoryEventHandler)</para>
+			<para>触发JobEventType.JOB_INIT事件，完成Job初始化操作(参考Job状态机)；</para>
+			<para>触发SpeculatorEvent事件，使SpeculatorEventDispatcher做相应处理；</para>
+			<para>启动MRClientProtocol RPC服务响应jobClient请求</para>
+			<para>触发JobEventType.JOB_START事件，开始运行Job实例(参考Job状态机)，</para>
+		<section>
+			<title>ContainerAllocator服务</title>
+			<para>ContainerAllocator服务用于为Task申请Container计算资源，针对作业运行方式的不同，框架声明了多种不同的实现类来做相应的处理：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>如果作业以uber方式运行，使用LocalContainerAllocator；</para></listitem>
+					<listitem><para>如果以非uber方式运行，使用RMContainerAllocator。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+			<para>两种实现类全部继承至RMCommunicator服务，该服务在启动时做如下处理：</para>
+			<orderedlist>
+				<listitem><para>首先通过ClientRMProxy来创建ApplicationMasterService代理服务；</para></listitem>
+				<listitem><para>然后通过代理服务的registerApplicationMaster方法将ApplicationMaster进行注册(参考ApplicationMasterService)；</para></listitem>
+				<listitem>
+					<para>最后开启心跳通信线程，通过心跳逻辑来完成Container计算资源的申请，如图所示：</para>
+					<mediaobject>
+						<imageobject>
+							<imagedata contentdepth="75%" scalefit="1" fileref="../media/yarn/containerAllocator.jpg"></imagedata>
+						</imageobject>
+					</mediaobject>
+				</listitem>
+			</orderedlist>
+			<para>每次心跳过程中，ContainerAllocator会发送如下本地信息到RM端进行处理(处理逻辑是通过ApplicationMasterService服务来封装的)：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>作业执行的进度信息；</para></listitem>
+					<listitem><para>用于申请Container资源的ResourceRequest集合；</para></listitem>
+					<listitem><para>需要释放资源的Container集合；</para></listitem>
+					<listitem><para>黑名单列表。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+			<para>这些信息是如何构建出来的？主要通过ContainerAllocatorEvent事件来驱动。ContainerAllocator服务作为ContainerAllocatorEvent事件的监听者当相关事件触发时会执行如下回调处理：</para>
+			<orderedlist>
+				<listitem>
+					<para>CONTAINER_REQ事件</para>
+					<para>CONTAINER_REQ事件是在TaskAttempt状态机由NEW切换成UNASSIGNED状态时触发的，事件触发后首先由事件对象判断出任务类型，如果是MapTask立刻执行构造ResourceRequest的操作，否则将reduce任务加入到pending队列，等到恰当的时机在进行处理。</para>
+					<para>Reduce任务的调度时机是通过如下方式计算出来的：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>首先已完成的Map任务数/Map任务总数应不小于mapreduce.job.reduce.slowstart.completedmaps配置；</para></listitem>
+						<listitem>
+							<para>其次，如果分配给Map任务的资源总量在使用上出现溢出，则限制用于部署Reduce任务的资源总量/App的总资源量应不大于yarn.app.mapreduce.am.job.reduce.rampup.limit配置；</para>
+							<para>当App的可用资源量不足以部署一个Map任务时，会对Reduce任务执行资源抢占，抢占方法是触发TaskAttemptEvent事件，事件类型为TA_KILL，杀死指定的Reduce任务尝试并回收其所占用的资源来部署需要运行的Map任务。</para>
+							<tip>在App资源总量的计算上，FairScheduler目前存在Bug，其headroom的设置始终为0，导致对Reduce任务的资源抢占非常频繁，详细可参考https://issues.apache.org/jira/browse/YARN-1959</tip>
+						</listitem>
+						<listitem><para>最后分配给Reduce的可用资源量应不小于mapreduce.reduce.memory.mb配置；</para></listitem>
+					</itemizedlist>
+					<para>针对每个要申请的Container，ContainerAllocator会构造出多个ResourceRequest来分别满足不同形式的资源申请(Data-local、Rack-local和Off-switch)，资源调度器在执行资源分配时，优先选择Data-local形式的ResourceRequest进行处理，其次是Rack-local和Off-switch，因此满足Data-local形式的Container会优先返回给ContainerAllocator。</para>
+				</listitem>
+				<listitem>
+					<para>CONTAINER_DEALLOCATE事件</para>
+					<para>CONTAINER_DEALLOCATE事件是在Task执行出错或对其执行Kill操作时触发的</para>
+				</listitem>
+				<listitem>
+					<para>CONTAINER_FAILED事件</para>
+				</listitem>
+			</orderedlist>
+			<para>心跳请求发送后，在RM端会通过ApplicationMasterService服务进行处理，待服务处理完毕后会向ContainerAllocator发送如下响应信息(参考ApplicationMasterService服务)，针对这些响应信息，ContainerAllocator会分别执行如下处理：</para>
+			<orderedlist>
+				<listitem>
+					<para>针对RM端已运行结束的RMContainer</para>
+					<para>如果RMContainer是正常结束退出的，触发TaskAttemptEvent事件，事件类型为TA_CONTAINER_COMPLETED，对NM端相应的Container执行清理操作；</para>
+					<para>如果是非正常退出(如ABORT操作)，触发TaskAttemptEvent事件，事件类型为TA_KILL，开启新的TaskAttempt实例。</para>
+				</listitem>
+				<listitem>
+					<para>针对运行状况发生变动的NM节点</para>
+					<para>如果NM节点由可用变成了不可用，并且其上部署了一些Container正在执行Task任务，则杀死这些Container，然后开启新的TaskAttempt实例在运行正常的NM节点上重新执行。</para>
+				</listitem>
+				<listitem>
+					<para>针对调度器新分配的Container，按照优先级由高到低的顺序依次执行加载操作</para>
+					<para>按照所加载任务种类的不同，Container优先级可划分成3类，分别是：</para>
+					<blockquote>
+						<itemizedlist make='bullet'>
+							<listitem><para>PRIORITY_FAST_FAIL_MAP：之前运行出错的Map任务；</para></listitem>
+							<listitem><para>PRIORITY_MAP：全新的map任务；</para></listitem>
+							<listitem><para>PRIORITY_REDUCE：reduce任务。</para></listitem>
+						</itemizedlist>
+					</blockquote>
+					<para>其中PRIORITY_FAST_FAIL_MAP具有最高的优先级，会优先加载，其次是PRIORITY_REDUCE和PRIORITY_MAP。</para>
+					<para>在Container加载之前，需要对申请它的ResourceRequests执行清理操作来防止Container资源的重复申请。清理办法十分简单，只需定位到指定的ResourceRequests，将其numContainers属性值-1即可，如果-1后值为0，将其从数据结构中移除。</para>
+					<tip>
+						<para>在AM端所有的ResourceRequest对象是通过如下数据结构来存储的：</para>
+						<para>Map&lt;Priority, Map&lt;hostName, Map&lt;Resource, ResourceRequest>>></para>
+						<para>由于具有相同优先级的ResourceRequest其所申请的资源量大小必定相同(不是mapreduce.map.memory.mb就是mapreduce.reduce.memory.mb)，所以最内层的Map完全可以省略，变成如下存储格式：</para>
+						<para>Map&lt;Priority, Map&lt;hostName, ResourceRequest>></para>
+						<para>在调度器端，所有的ResourceRequest对象便是以这种格式来进行存储的。</para>
+					</tip>
+					<para>ResourceRequest成功清理后触发TaskAttemptEvent事件，事件类型为TA_ASSIGNED，开始尝试TaskContainer的加载操作(参考TaskAttempt状态机)。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>JobHistoryEventHandler服务</title>
+			<para>JobHistoryEventHandler服务主要用来序列化JobHistoryEvent事件，将事件信息持久化到${yarn.app.mapreduce.am.staging-dir}/${jobId}/${jobId}_${attemptId}.jhist文件中进行存储，序列化过程是通过avro来实现的，以json形式保存，文件片段如下所示：</para>
+			<programlistingco>
+				<programlisting>
+{
+  "type":"AM_STARTED", <co id="co.eventwriter.type" linkends="co.note.eventwriter.type"/>
+  "event":{ <co id="co.eventwriter.obj" linkends="co.note.eventwriter.obj"/>
+    "org.apache.hadoop.mapreduce.jobhistory.AMStarted":{
+      "applicationAttemptId":"appattempt_1392791047289_0002_000001",
+      "startTime":1392858171813,
+      "containerId":"container_1392791047289_0002_01_000001",
+      "nodeManagerHost":"BJYZH2-HD-TEST-2086.jd.com",
+      "nodeManagerPort":60013,
+      "nodeManagerHttpPort":8042
+    }
+  }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.eventwriter.type" arearefs="co.eventwriter.type" ><para>type用来表示事件类型；</para></callout>
+					<callout id="co.note.eventwriter.obj" arearefs="co.eventwriter.obj" ><para>event用于封装事件对象。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>一、如果事件类型是AM_STARTED</para>
+			<orderedlist>
+				<listitem>
+					<para>创建EventWriter实例用于序列化JobHistoryEvent事件；</para>
+				</listitem>
+				<listitem><para>将作业配置信息写入到${yarn.app.mapreduce.am.staging-dir}/${jobId}/${jobId}_${attemptId}_conf.xml文件中。</para></listitem>
+			</orderedlist>
+			<para>二、当JobSubmittedEvent事件触发时</para>
+		</section>
+		<section>
+			<title>Speculator服务</title>
+		</section>
+		<section>
+			<title>MRClientService服务?</title>
+			<para>作为RPC服务用来响应JobClient请求，包括获取Job运行信息、诊断信息，响应kill命令杀死正在运行的Job</para>
+		</section>
+	</section>
+</section>

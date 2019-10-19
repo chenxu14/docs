@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>paxos算法描述</title>
+	<para>通过应用实例来了解paxos算法工作流程</para>
+	<blockquote>
+		<para>假设现有两个Proposer：Proposer1和Proposer2</para>
+		<para>三个Acceptor：Acceptor1、Acceptor2和Acceptor3</para>
+		<para>一个客户端：Client</para>
+		<para>Client、Proposer1和Proposer2兼职Learner</para>
+	</blockquote>
+	<para>服务集群启动后，Proposer1被选举为Leader，用来投递Client发送过来的请求。当Client发送过来一条请求后，Leader会开启一个新的Paxos算法实例用来处理该请求。</para>
+	<para>首先，Proposer1向Acceptor群组发送prepare请求。假设Acceptor1和Acceptor2接受了Proposer1的请求，而Acceptor3由于网络问题没有接受，则状态图如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/paxos.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>
+		Accpetor1和Acceptor2接受了Proposer1的请求，故在本地记录请求信息(n,v),而Acceptor3没有接受Proposer1的请求，所以PrepareResponse下没有信息.
+		系统运行到这个时候，由于Proposer1得到了大多数Acceptor的响应信息(2/3)，所以它认为自己是被接受的，开始向Acceptor群组发送accept请求。
+	</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/paxos2.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>
+		由于Acceptor1和Acceptor2的PrepareResponse没有记录比n更大的编号，所以他们接受Proposer1的accept请求，并将请求信息记录在本地(n,v).
+		由于Proposer1的accept请求被绝大部分Acceptor所接受(2/3)，所以Paxos算法选定了最后的值v.
+		接下来需要将选定的值通知给Leaner，而我们假设这个时候，Acceptor1、Acceptor2和Proposer1都出现了网络故障.
+	</para>
+	<para>
+		Proposer1出现问题后，Proposer2被选举为新的Leader，投递Client发送过来的请求。这时Client向Proposer2发送了另外一条命令Command2，赋予变量v2。
+		在系统运行正常的情况下，Proposer2做为Learner会知道这是Client发送的第几个请求(通过Paxos算法实例编号)，但由于之前系统运行出现了故障，没有将Proposer1的投递结果通知给Proposer2，
+		因此在接下来的运行中Proposer2所开启的Paxos算法实例编号会与Proposer1最后一个算法实例编号相同。假设Proposer2和Acceptor3的通信是没有异常的，则状态图如图所示：
+	</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/paxos3.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>由于之前Acceptor1和Acceptor2出现的网络故障，导致Proposer2只收到了Acceptor3的响应信息，没有占到Acceptor的绝大多数(1/3)。这时,Proposer2会增加请求编号，继续向Acceptor群组发送p(n+1,v2)请求信息，如此往复。。。</para>
+	<para>当请求编号增长到n2(n2>n)时，假设Acceptor2恢复了通信状态，这个时候会产生如下状态信息：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/paxos4.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>
+		由于n2 > n，所以Acceptor2接受Proposer2的prepare请求，将(n2,v2)放入PrepareResponse。同时由于Acceptor2的AcceptResponse不为空(之前接受过Proposer1的accept请求)，所以会将(n,v)返回给Proposer2，
+		而Acceptor3的AcceptResponse为空，所以只返回确认信息而不包含请求值。这样，Proposer2收到了绝大多数Acceptor的响应信息(2/3)，开始向Acceptor群组发送accept请求：
+	</para>
+	<blockquote>
+		<para>请求编号为n2(因编号n2的prepare请求被Accceptor群组接受)</para>
+		<para>请求值为v(Proposer2所接受的AcceptResponse中，值v对应的请求编号是最大的)</para>
+	</blockquote>
+	<para>产生如下状态图：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/paxos5.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>
+		Acceptor3和Acceptor2的PrepareResponse里没有记录比n2更大的请求编号，所以他们接受了Proposer2的accept请求，将(n2,v)记录到AcceptResponse里。
+		这样，Proposer2便选定了最后的值v，通知给每一个Learner。同时，Proposer2还发现最后选定的值v与最开始请求的值v2并不一样，因此会开启一个新的算法实例(instance)用来投递v2,最终的结果是command按照client提交的顺序依次执行。
+	</para>
+	<tip>
+		<para>为了简化理解，状态图里并没有体现算法实例(instance)的概念，只是存储了请求编号和请求值(n,v)，考虑到算法实例，Acceptor的存储信息是这样的：(iid,n,v)</para>
+		<para>iid表示为算法实例ID(instance id)，比对请求编号n的前提是他们的iid一样。</para>
+	</tip>
+</section>

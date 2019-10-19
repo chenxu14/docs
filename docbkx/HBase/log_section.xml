@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>日志接入kafka</title>
+	<para>问：每台RegionServer管理多少个Region比较合适？</para>
+	<blockquote>
+		<para>答：20~100个之间比较合适.</para>
+		<para>原因如下：</para>
+		<para>1.memstore需要预留2M内存来做为MSLAB，因此过多的Region需要消耗过多的内存；</para>
+		<para>2.RegionServer宕机时，Master重新分配这些Region会有压力；</para>
+		
+	</blockquote>
+</section>

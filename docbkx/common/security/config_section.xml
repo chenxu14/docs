@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>配置明细</title>
+	<para>有关security的配置信息最好存放在单独的配置文件中，在通过Xinclude引入到主文件，如：</para>
+	<programlisting>
+在主文件中进行如下配置：
+&lt;configuration xmlns:xi="http://www.w3.org/2001/XInclude">
+    &lt;property...
+    &lt;xi:include href="security.xml"/>
+&lt;/configuration>
+在将security信息写入security.xml
+	</programlisting>
+	<para>这样比较利于在安全模式与非安全模式之间进行切换。另需注意的是在配置过程中所使用的_HOST关键字是一个比较特殊的变量，在匹配principal过程中会自动将其转换为相应机器的hostname(小写)。</para>
+	<section>
+		<title>hadoop-env.sh文件</title>
+		<orderedlist>
+			<listitem>
+				<para>首先需要设置JSVC_HOME环境变量</para>
+				<blockquote><para>export JSVC_HOME=/path/to/jsvc</para></blockquote>
+				<tip>jsvc的安装可参考http://commons.apache.org/proper/commons-daemon/jsvc.html，下载souce后，进入src/native/unix目录，依次执行support/buildconf.sh、./configure和make即可。</tip>
+			</listitem>
+			<listitem>
+				<para>然后设置HADOOP_SECURE_DN_USER环境变量值为namenode进程的启动用户</para>
+				<blockquote><para>export HADOOP_SECURE_DN_USER=hdfs</para></blockquote>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>core-site.xml文件</title>
+		<programlistingco>
+			<programlisting>
+&lt;property>
+  &lt;name>hadoop.security.authentication&lt;/name> <co id="co.security.auth" linkends="co.note.security.auth"/>
+  &lt;value>kerberos&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.authorization&lt;/name>
+  &lt;value>true&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>hadoop.security.auth_to_local&lt;/name> <co id="co.security.auth_to_local" linkends="co.note.security.auth_to_local"/>
+  &lt;value>RULE:[1:$1] RULE:[2:$1]&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.security.auth" arearefs="co.security.auth"><para>启用kerberos安全认证；</para></callout>
+				<callout id="co.note.security.auth_to_local" arearefs="co.security.auth_to_local"><para>将principal转换成本地user的语法，具体可参考kerberos的auth_to_local配置项；</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>hdfs-site.xml文件</title>
+		<programlistingco>
+			<programlisting>
+&lt;property>
+  &lt;name>dfs.block.access.token.enable&lt;/name> <co id="co.security.blocktoken" linkends="co.note.security.blocktoken"/>
+  &lt;value>true&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.permissions.superusergroup&lt;/name> <co id="co.security.superuser.group" linkends="co.note.security.superuser.group"/>
+  &lt;value>hadoop&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.kerberos.principal&lt;/name> <co id="co.security.nn.principal" linkends="co.note.security.nn.principal"/>
+  &lt;value>nn/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.keytab.file&lt;/name> <co id="co.security.nn.keytab" linkends="co.note.security.nn.keytab"/>
+  &lt;value>/path/to/keytab/nn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.secondary.kerberos.principal&lt;/name> <co id="co.security.sn.principal" linkends="co.note.security.sn.principal"/>
+  &lt;value>sn/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.secondary.keytab.file&lt;/name> <co id="co.security.sn.keytab" linkends="co.note.security.sn.keytab"/>
+  &lt;value>/path/to/keytab/sn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.datanode.kerberos.principal&lt;/name> <co id="co.security.dn.principal" linkends="co.note.security.dn.principal"/>
+  &lt;value>dn/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.datanode.keytab.file&lt;/name> <co id="co.security.dn.keytab" linkends="co.note.security.dn.keytab"/>
+  &lt;value>/path/to/keytab/dn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.web.authentication.kerberos.principal&lt;/name> <co id="co.security.webhdfs.principal" linkends="co.note.security.webhdfs.principal"/>
+  &lt;value>webhdfs/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.web.authentication.kerberos.keytab&lt;/name> <co id="co.security.webhdfs.keytab" linkends="co.note.security.webhdfs.keytab"/>
+  &lt;value>/path/to/keytab/nn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.datanode.address&lt;/name> <co id="co.security.dn.address" linkends="co.note.security.dn.address"/>
+  &lt;value>0.0.0.0:1004&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.datanode.http.address&lt;/name> <co id="co.security.dn.http" linkends="co.note.security.dn.http"/>
+  &lt;value>0.0.0.0:1006&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.journalnode.keytab.file&lt;/name> <co id="co.security.journal.keytab" linkends="co.note.security.journal.keytab"/>
+  &lt;value>/path/to/keytab/hdfs.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.journalnode.kerberos.principal&lt;/name> <co id="co.security.journal.principal" linkends="co.note.security.journal.principal"/>
+  &lt;value>journal/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.journalnode.kerberos.internal.spnego.principal&lt;/name> <co id="co.security.spnego.principal" linkends="co.note.security.spnego.principal"/>
+  &lt;value>HTTP/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.cluster.administrators&lt;/name> <co id="co.security.cluster.admin" linkends="co.note.security.cluster.admin"/>
+  &lt;value>admin&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.security.blocktoken" arearefs="co.security.blocktoken"><para>开启BlockToken认证；</para></callout>
+				<callout id="co.note.security.superuser.group" arearefs="co.security.superuser.group"><para>设置管理员用户组，假如hadoop的部署启用了3个用户(分别为hdfs、mapred和yarn用来部署不同的进程)，则需要将这3个用户添加到同一用户组中，并将该组设置为管理员用户组；</para></callout>
+				<callout id="co.note.security.nn.principal" arearefs="co.security.nn.principal"><para>NameNode Server的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.nn.keytab" arearefs="co.security.nn.keytab"><para>NameNode principal所在的keytab文件(通过kadmin命令来管理)；</para></callout>
+				<callout id="co.note.security.sn.principal" arearefs="co.security.sn.principal"><para>SecNameNode Server的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.sn.keytab" arearefs="co.security.sn.keytab"><para>SecNameNode principal所在的keytab文件；</para></callout>
+				<callout id="co.note.security.dn.principal" arearefs="co.security.dn.principal"><para>DataNode Server的principal，需要事先注册到KDC中，需要额外注意的是这里的dn用户需要具备SuperUser权限(即所在用户组为$dfs.permissions.superusergroup)，否则DN与NN无法进行通信；</para></callout>
+				<callout id="co.note.security.dn.keytab" arearefs="co.security.dn.keytab"><para>DataNode principal所在的keytab文件；</para></callout>
+				<callout id="co.note.security.webhdfs.principal" arearefs="co.security.webhdfs.principal"><para>WebHDFS组件的principal，需要事先注册到KDC中(host为namenode所在机器的host)；</para></callout>
+				<callout id="co.note.security.webhdfs.keytab" arearefs="co.security.webhdfs.keytab"><para>WebHDFS principal所在的keytab文件。</para></callout>
+				<callout id="co.note.security.dn.address" arearefs="co.security.dn.address"><para>datanode的RPC访问端口，端口值要小于1023，否则抛出异常提示信息：Cannot start secure datanode with unprivileged ports；</para></callout>
+				<callout id="co.note.security.dn.http" arearefs="co.security.dn.http"><para>datanode的http访问端口，同样端口值要小于1023；</para></callout>
+				<callout id="co.note.security.journal.keytab" arearefs="co.security.journal.keytab"><para>JournalNode principal所在的keytab文件；</para></callout>
+				<callout id="co.note.security.journal.principal" arearefs="co.security.journal.principal"><para>JournalNode的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.spnego.principal" arearefs="co.security.spnego.principal"><para>该principal必须以HTTP开头否则NN无法与JournalNode通信；</para></callout>
+				<callout id="co.note.security.cluster.admin" arearefs="co.security.cluster.admin"><para>该参数指定的用户可执行热切操作。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>yarn-site.xml文件</title>
+		<programlistingco>
+			<programlisting>
+&lt;property>
+  &lt;name>yarn.resourcemanager.principal&lt;/name> <co id="co.security.rm.principal" linkends="co.note.security.rm.principal"/>
+  &lt;value>rm/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.resourcemanager.keytab&lt;/name> <co id="co.security.rm.keytab" linkends="co.note.security.rm.keytab"/>
+  &lt;value>/path/to/keytab/yarn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.web-proxy.principal&lt;/name> <co id="co.security.webapp.principal" linkends="co.note.security.webapp.principal"/>
+  &lt;value>webapp/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.web-proxy.keytab&lt;/name> <co id="co.security.webapp.keytab" linkends="co.note.security.webapp.keytab"/>
+  &lt;value>/path/to/keytab/yarn.keytab&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.principal&lt;/name> <co id="co.security.nm.principal" linkends="co.note.security.nm.principal"/>
+  &lt;value>nm/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.keytab&lt;/name> <co id="co.security.nm.keytab" linkends="co.note.security.nm.keytab"/>
+  &lt;value>/path/to/keytab/yarn.keytab&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.security.rm.principal" arearefs="co.security.rm.principal"><para>ResourceManager的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.rm.keytab" arearefs="co.security.rm.keytab"><para>ResourceManager principal所在的keytab文件(通过kadmin命令来管理)；</para></callout>
+				<callout id="co.note.security.webapp.principal" arearefs="co.security.webapp.principal"><para>WebAppProxy的principal(HOSTNAME与rm相同)，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.webapp.keytab" arearefs="co.security.webapp.keytab"><para>WebAppProxy principal所在的keytab文件；</para></callout>
+				<callout id="co.note.security.nm.principal" arearefs="co.security.nm.principal"><para>NodeManager的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.nm.keytab" arearefs="co.security.nm.keytab"><para>NodeManager principal所在的keytab文件；</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>map-site.xml文件</title>
+		<programlistingco>
+			<programlisting>
+&lt;property>
+   &lt;name>mapreduce.jobhistory.principal&lt;/name> <co id="co.security.jhs.principal" linkends="co.note.security.jhs.principal"/>
+   &lt;value>jhs/_HOST@JD.COM&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>mapreduce.jobhistory.keytab&lt;/name> <co id="co.security.jhs.keytab" linkends="co.note.security.jhs.keytab"/>
+   &lt;value>/path/to/keytab/mapred.keytab&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.security.jhs.principal" arearefs="co.security.jhs.principal"><para>JobHistoryServer的principal，需要事先注册到KDC中；</para></callout>
+				<callout id="co.note.security.jhs.keytab" arearefs="co.security.jhs.keytab"><para>JobHistoryServer principal所在的keytab文件(通过kadmin命令来管理)；</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

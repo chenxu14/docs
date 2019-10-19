@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>基于QJM实现HA</title>
+	<para>老版本的hadoop在使用中一直存在单点故障的问题，一旦namenode宕机，整个集群将无法使用。为此，hadoop从2.0版本起开始对namenode实现容灾功能，常用的实现方案有两种：分别是基于NFS和QJM，这里主要使用第二种方案。</para>
+	<para>QJM是Quorum Journal Manager的缩写，其实现机制有点类似于zookeeper的原子广播，通过paxos算法来实现操作日志的水平扩充存储，部署结构见下图：</para>
+	<figure id='qjm.deploy'>
+		<title>QJM部署结构</title>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/qjm-deploy.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+	</figure>
+	<para>与传统部署方式相比，主要有以下区别</para>
+	<orderedlist>
+		<listitem>
+			<para>集群中存在两个NameNode节点</para>
+			<para>其中一台处于Active状态，用来处理Client的交互请求；另外一台处于Standby状态，用来做故障转移备份。DateNode节点需要和所有的NameNode保持心跳通信的逻辑，以便任意一台NameNode能够获取每一个Block的location信息。</para>
+			<para>StandBy节点是通过EditLog来保持与Active状态同步的，Active节点定期将操作日志写入JournalNode(时间通过dfs.ha.log-roll.period配置参数来控制，默认为2分钟)，StandBy节点定期取出这些EditLog并同步数据到自身内存(时间通过dfs.ha.tail-edits.period来控制，默认为1分钟)，以便与Active保持状态一致。</para>
+			<para>同时StandBy节点还充当secondaryNameNode的角色，会定期产生新的数据快照，供Active节点执行checkpoint操作，checkpoint频率通过两个参数来设置：</para>
+			<blockquote>
+				<para>dfs.namenode.checkpoint.period：每隔一定周期执行一次(默认为1个小时)；</para>
+				<para>dfs.namenode.checkpoint.txns：事务量累计达到一定规模时开始执行。</para>
+			</blockquote>
+			<para>需要注意的是如果集群的元数据量比较大，或者Active与Standby的传输带宽存在瓶颈，那么有可能出现数据传输超时的情况。出现该状况以后checkpoin的执行频率会非常频繁，因为没有正确统计上一次checkpoint的执行时间(详细可参考StandbyCheckpointer的执行逻辑)，可通过调高dfs.image.transfer.timeout参数值来避免该情况的发生。</para>
+		</listitem>
+		<listitem>
+			<para>集群新增了很多JournalNode节点用来存储EditLog</para>
+			<para>由元数据存储结构了解到NameNode采用“数据快照”加“操作日志”的方式来持久化元数据。而基于新模式部署后，日志文件除了要在本地存储外还需要在JournalNode端进行存储。</para>
+			<!--  
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/hdfs/metadata-deploy.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			-->
+			<para>操作日志是StandBy节点向Active同步数据的关键，一旦日志文件丢失由于无法同步数据StandBy节点将失去价值。为此集群需要提供多个JournalNode节点来防止单点故障的出现。</para>
+			<para>当写操作到达时，Active节点负责向JournalNode广播操作记录，模式上类似于Zookeeper的原子广播机制：第一阶段同步日志数据；第二阶段更新内存。具体步骤如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>首先将写操作记录发送给每一个JournalNode节点</para></listitem>
+				<listitem><para>JournalNode收到操作记录以后，同步到EditLog，然后向NameNode发送反馈。</para></listitem>
+				<listitem><para>NameNode收到绝大多数JournalNode发送过来的反馈信息后，开始将数据写入内存。</para></listitem>
+			</itemizedlist>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>自动故障转移</title>
+		<para>自动故障转移功能主要依赖ZKFC进程，实际应用中ZKFC进程要和NameNode进程部署在一台机器上，如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/zkfc.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>ZKFC进程主要有以下功能职责：</para>
+		<orderedlist>
+			<listitem><para>监控NameNode进程的运行状态(通过HealthMonitor线程)；</para></listitem>
+			<listitem><para>与Zookeeper建立Session，创建Active锁文件和BreadCrumb面包屑文件(指定failover时需要执行Fencing的机器)；</para></listitem>
+			<listitem>
+				<para>基于Zookeeper的进程锁机制实现Active选举功能，示意图如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/leader-election.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem><para>ZKFC先于ZKFC2与Zookeeper建立连接，创建ActiveStandbyElectorLock文件(Ephemeral类型)和ActiveBreadCrumb文件(Persistence类型)，并将自己所管理的NN切换成Active状态；</para></listitem>
+					<listitem><para>ZKFC2在尝试与Zookeeper建立连接时，发现ActiveStandbyElectorLock文件已经存在，将自己所管理的NN切换成Standby状态，同时对ActiveStandbyElectorLock文件进行监听；</para></listitem>
+					<listitem><para>当ZKFC进程所在机器宕机时，其与Zookeeper的连接session将关闭，ActiveStandbyElectorLock文件将会消失(由于该文件是Ephemeral类型)，这时ZKFC2进程便会得到通知，开始尝试Active抢占(再次创建ActiveStandbyElectorLock文件)，并隔离之前的ActiveNN(通过ActiveBreadCrumb文件定位到之前的ActiveNN，然后杀死其进程)。</para></listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>DFSZKFailoverController服务</title>
+		<para>当执行hadoop-daemon.sh start zkfc命令时，其实是执行了DFSZKFailoverController类的main方法，服务启动的时候做了如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>实例化ActiveStandbyElector对象，用来管理与ZooKeeper的连接session，实用方法如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>joinElection：加入Active选举，通过Zookeeper的进程锁机制。</para>
+						<para>如果锁文件成功抢占，执行fencing隔离杀死之前的ActiveNN(前提：原ActiveNN可通过ActiveBreadCrumb文件定位到)，然后更新ActiveBreadCrumb文件，将数据内容引向自己，最后将自己管理的NN切换到Active状态。</para>
+						<para>如果锁文件已经存在，监听锁文件的相关事件，并将自己管理的NN切换成StandBy状态。</para>
+					</listitem>
+					<listitem>
+						<para>quitElection：退出Active选举，关闭与ZooKeeper的连接session，并将自己管理的NN切换到INIT状态。如果启用了fencing功能(通过方法参数指定)，并且退出选举前自己所管理的NN处于Active状态，则新选举出的ActiveNN将会杀死原ActiveNN来防止脑裂。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>开启HealthMonitor线程，负责监控本地NameNode的运行状态</para>
+				<para>监控状态有5种，分别是：</para>
+				<blockquote>
+					<para>INITIALIZING：HealthMonitor正在启动，还没有与NN建立连接；</para>
+					<para>SERVICE_NOT_RESPONDING：用于检测NN运行状态的RPC请求超时；</para>
+					<para>SERVICE_HEALTHY：NN运转良好；</para>
+					<para>SERVICE_UNHEALTHY：NN出现健康问题；</para>
+					<para>HEALTH_MONITOR_FAILED：由于异常导致监控失败。</para>
+				</blockquote>
+				<para>当监控状态发生改变时，触发HealthCallbacks回调函数进行处理：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>如果监控状态变成了SERVICE_HEALTHY，调用ActiveStandbyElector类的joinElection方法进行处理；</para></listitem>
+					<listitem><para>如果监控状态变成了INITIALIZING、SERVICE_UNHEALTHY或SERVICE_NOT_RESPONDING，调用ActiveStandbyElector类的quitElection方法进行处理(关闭ZooKeeper连接、执行热切、杀死自己)，这也经常是NN无故死掉的原因之一，比如在NN长时间执行GC操作时，进程便会被阻塞，HealthMonitor对NN的监控便会处于SERVICE_NOT_RESPONDING状态，从而引发一系列热切和隔离操作。</para></listitem>
+				</itemizedlist>
+				<para>执行健康状态检测期间，如果元数据正在执行checkpoint操作，那么standby节点有可能出现健康检测超时的情况，因为在执行Fsimage与Editlog合并的时候，HealthMonitor线程将处于阻塞状态。为此hadoop从2.4.0版本起，开始对该BUG进行修复，详细参考https://issues.apache.org/jira/browse/HDFS-5064，除此之外还可通过ha.health-monitor.rpc-timeout.ms参数来延长健康检测的超时时间(默认为45秒)。</para>
+			</listitem>
+			<listitem>
+				<para>实例化ZKFCRpcServer对象，用来为客户端提供RPC服务。</para>
+				<para>当执行hdfs haadmin -failover nn1 nn2命令时会使用到该服务，具体逻辑如下：</para>
+				<para>(1)首先在nn2所在机器上执行ZKFCRpcServer服务的gracefulFailover方法，方法执行以下校验：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先判断用户是否具有权限执行该操作(dfs.cluster.administrators控制)；</para></listitem>
+					<listitem><para>其次判断nn2是否处于健康状态(SERVICE_HEALTHY)；</para></listitem>
+					<listitem><para>最后判断nn2是否已经处于Active状态，如果是那便没有必要执行热切。</para></listitem>
+				</itemizedlist>
+				<para>(2)以上校验通过后，在nn1所在机器上执行ZKFCRpcServer服务的cedeActive方法，让其放弃自己的Active位置，方法逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先同样判断用户是否具备权限执行该操作，权限校验通过后远程调用nn1对外声明的NameNodeRpcServer服务，通过其transitionToStandby方法将nn1切换成standby状态。</para></listitem>
+					<listitem><para>在切换过程中无论成功与否nn1都会暂时放弃接下来的Active选举(通过ActiveStandbyElector的quitElection方法)，在等待一段时间之后才会重新加入，以便为nn2执行Active抢占预留时间。不同的差别在于如果nn1的状态转换失败或者执行RPC请求的响应超时，则nn2在抢占成功以后会杀死nn1来防止脑列。因此在执行热切操作时要防止RPC请求超时的情况发生，以避免不必要的热切错误。等待nn1进入Standby的超时时间可通过ha.failover-controller.graceful-fence.rpc-timeout.ms参数来设置，默认为5秒，如果nn1负载较大可适当提高该值。</para></listitem>
+				</itemizedlist>
+				<tip>默认情况下nn1会休眠2倍的ha.failover-controller.graceful-fence.rpc-timeout.ms时间来等待新Active的选举出现，其值最好小于ha.failover-controller.new-active.rpc-timeout.ms即nn2的抢占超时时间，这样在nn2抢占失败后关闭与Zookeeper的连接session时，nn1便可以马上得到通知进行处理。</tip>
+				<para>(3)在nn1与Zookkeeper失去连接的这段时间内，nn2会得到锁文件删除事件，开始执行joinElection方法进行Active抢占，具体的抢占逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先读取ActiveBreadCrumb文件内容，查看其所封装的信息是否为nn2，如果不是触发fencing功能来杀死nn1(步骤2中如果nn1没能成功切换至Standby便会触发该功能)；</para></listitem>
+					<listitem><para>将自身的nn信息写入ActiveBreadCrumb文件中；</para></listitem>
+					<listitem>
+						<para>远程调用nn2对外声明的NameNodeRpcServer服务，通过其transitionToActive方法将nn2切换成Active状态。</para>
+						<para>transitionToActive方法在执行过程中有两项操作比较耗时，1是加载尚未同步的EditLog到内存，以便与nn1保持相同的数据状态；2是执行BlockManager的processMisReplicatedBlocks方法来标记每一个block，将其划分到不同的状态队列中(PendingReplication、UnderReplicate等)。如果集群的block规模较大则该方法会执行很久，造成RPC请求超时的情况发生，可通过设置ha.failover-controller.new-active.rpc-timeout.ms参数来加大超时时间(默认为60秒)。</para>
+					</listitem>
+				</itemizedlist>
+				<tip>
+					<para>如果nn2没有成功进入到Active状态，或在执行状态转化操作时RPC请求超时，则其会放弃与zookeeper的连接session并休眠1秒来等待nn1执行Active抢占，待nn1抢占成功后由于ActiveBreadCrumb文件内容已引向nn2，所以nn1会执行fencing来杀死nn2。</para>
+					<para>由以上情况可知当ha.failover-controller.graceful-fence.rpctimeout.ms超时时，原Active会宕掉；而当ha.failover-controller.new-active.rpctimeout.ms超时时，原Standby会宕掉，这便是failover操作时nn无故死掉的原因。</para>
+				</tip>
+				<para>(4)在nn2执行Active抢占的这段时间内，主线程会进入循环等待状态直至新ActiveNN的产生出现。最长等待时间为2倍的ha.failover-controller.graceful-fence.rpc-timeout.ms加上60秒，其值最好要长于ha.failover-controller.new-active.rpctimeout.ms即nn2的抢占超时时间，否则主线程会抛出异常，如果ha.failover-controller.new-active.rpctimeout.ms的值为3分钟，则ha.failover-controller.graceful-fence.rpc-timeout.ms为1分20秒比较合适，既满足了该条件也确保了nn1等待nn2的抢占时间低于nn2的抢占超时时间(步骤2中的参考)。</para>
+				<para>(5)nn2抢占成功后通知nn1重新建立与Zookeeper的连接session，并监听锁文件的存在。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>请求路由逻辑</title>
+		<para>经过HA的方式部署之后，Client只能向ActiveNN发送服务请求，这就需要客户端在发送请求的时候进行校验，看哪一台NN处于Active状态，整个请求的路由逻辑如下图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/req-routing.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>如图所示，每个请求的路由逻辑是通过双层代理服务来实现的，TopProxy、ServiceProxy和Service实现了共同的服务接口，其中：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>Service代表服务端对外提供的具体服务；</para></listitem>
+			<listitem><para>ServiceProxy是与Service进行RPC通信的代理服务，在非HA模式下，客户端直接通过ServiceProxy来访问目标Service；</para></listitem>
+			<listitem><para>TopProxy是最顶层的代理服务，该代理服务通过NameNodeProxies的createProxy方法来创建，提供了ServiceProxy的路由功能，路由选择逻辑是通过RetryInvocationHandler类来实现的。</para></listitem>
+		</itemizedlist>
+		<para>RetryInvocationHandler作为TopProxy代理服务的拦截器，起到Service路由功能：</para>
+		<para>(1)首先调用FailoverProxyProvider的getProxy方法返回其中一个ServiceProxy；</para>
+		<para>(2)如果该ServiceProxy执行失败，执行FailoverProxyProvider的performFailover方法，切换到另一个ServiceProxy进行处理。</para>
+		<para>ServiceProxy执行失败的原因可能有以下几种：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>与之进行RPC通信的Service所在机器出现宕机，这时候会触发NN热切功能。</para></listitem>
+			<listitem><para>与之进行RPC通信的Service所在机器并不是ActiveNN，Service在执行过程中，会首先通过FSNamesystem类的checkOperation方法进行判断，如果是写操作，且当前的NN处于Standby状态，则会抛出StandbyException异常。</para></listitem>
+		</itemizedlist>
+		<tip>目前FailoverProxyProvider的默认实现类为ConfiguredFailoverProxyProvider，其getProxy方法逻辑并不十分完善(返回的服务代理有可能不是ActiveNN提供的)，可进行相应的优化处理，只选择ActiveNN对外提供的ServiceProxy。</tip>
+	</section>
+	<section>	
+		<title>JournalNode服务</title>
+		<para>当执行hadoop-daemon.sh start journalnode命令时，其实是执行了JournalNode类的main方法，服务启动的时候做了如下处理：</para>
+			<para>检查当前用户对dfs.journalnode.edits.dir目录是否具有读、写和执行权限；</para>
+			<para>启动JournalNodeRpcServer服务用来与QuorumJournalManager进行通信</para>
+	</section>
+</section>

@@ -1,0 +1,325 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>集群监控</title>
+	<section>
+		<title>常用metrics信息</title>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=RegionServer,sub=WAL</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>rollRequest</entry><entry>HLog回滚请求数，如果写入操作频繁，或者sync经常失败，会造成该metric值偏高。</entry></row>
+					<row><entry>SyncTime_99th_percentile</entry><entry>WAL的P99同步时延，可通过该metric值来反映HDFS的处理压力。如果sync超时会将当前HLog回滚。</entry></row>
+					<row><entry>SyncTime_num_ops</entry><entry>统计sync请求数，以此来反映写请求压力。</entry></row>
+					<row><entry>appendCount</entry><entry>append请求数，以此来反映写请求压力。</entry></row>
+					<row><entry>slowAppendCount</entry><entry>有延迟的Append操作数。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=RegionServer,sub=Server</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>regionCount</entry><entry>当前RegionServer所部署的Region数量。</entry></row>
+					<row><entry>hlogFileCount</entry><entry>当前RegionServer所写入的HLog数量。</entry></row>
+					<row><entry>memStoreSize</entry><entry>所有Region占用的Memstore总大小，大小达到一定阈值将触发flush操作。</entry></row>
+					<row><entry>percentFilesLocal</entry><entry>HFile数据本地性的百分比，如果值偏低可执行balance操作。</entry></row>
+					<row><entry>splitQueueLength</entry><entry>Region拆分队列的长度，可通过该metric值来统计Region的拆分频率。</entry></row>
+					<row><entry>compactionQueueLength</entry><entry>Region整理队列的长度，可通过该metric值来统计Region的整理频率。</entry></row>
+					<row><entry>flushQueueLength</entry><entry>Region冲洗队列的长度，可通过该metric值来统计Region的flush频率。</entry></row>
+					<row><entry>blockCacheCountHitPercent</entry><entry>BlockCache命中比率。</entry></row>
+					<row><entry>blockedRequestCount</entry><entry>当前被阻塞的请求数。</entry></row>
+					<row><entry>slowDeleteCount</entry><entry>有延迟的delete操作数。</entry></row>
+					<row><entry>slowGetCount</entry><entry>有延迟的get操作数。</entry></row>
+					<row><entry>slowPutCount</entry><entry>有延迟的put操作数。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=Master,sub=Server</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>numRegionServers</entry><entry>目前存活的RegionServer数。</entry></row>
+					<row><entry>numDeadRegionServers</entry><entry>目前死亡的RegionServer数。</entry></row>
+					<row><entry>tag.zookeeperQuorum</entry><entry>所采用的Zookeeper集群地址，监控ZK节点的宕机情况。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=*,sub=IPC</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>queueSize</entry><entry>当前请求队列的大小，可通过该参数值来反映Server的负载情况。</entry></row>
+					<row><entry>numActiveHandler</entry><entry>目前正在工作的Handler数。</entry></row>
+					<row><entry>numOpenConnections</entry><entry>客户端链接数。</entry></row>
+					<row><entry>ProcessCallTime_99th_percentile</entry><entry>P99处理请求时延，衡量目标Server的处理压力。</entry></row>
+					<row><entry>QueueCallTime_99th_percentile</entry><entry>P99请求排队时间，衡量目标Server的处理压力。</entry></row>
+					<row><entry>sentBytes</entry><entry>向客户端发送的字节数，如果get请求较多，该metrics值会比较高。</entry></row>
+					<row><entry>receivedBytes</entry><entry>从客户端接受的字节数，如果put请求较多，该metrics值会比较高。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=Master,sub=FileSystem</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>SplitTime_num_ops</entry><entry>触发HLog拆分的次数，当有RegionServer宕机时会对其上部署的HLog进行拆分。</entry></row>
+					<row><entry>SplitTime_99th_percentile</entry><entry>HLog拆分的P99时延。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=Master,sub=AssignmentManger</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>ritCount</entry><entry>状态正在切换的Region数量，多发生在RegionServer宕机，Region合并、拆分等操作情景下。</entry></row>
+					<row><entry>BulkAssign_max</entry><entry>每次批量分配操作的最长用时。</entry></row>
+					<row><entry>Assign_max</entry><entry>单一分配每个Region的最长用时。</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=RegionServer,sub=Replication</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>source.sizeOfHFileRefsQueue</entry><entry>bulkloadReplication源集群积压的HFile数量</entry></row>
+					<row><entry>source.sizeOfLogQueue</entry><entry>源集群积压的待同步HLog数量</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=RegionServer,sub=TableLatencies</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>*_appendTime_99th_percentile</entry><entry>目标表格append操作的P99时延</entry></row>
+					<row><entry>*_deleteTime_99th_percentile</entry><entry>目标表格删除操作的P99时延迟</entry></row>
+					<row><entry>*_getTime_99th_percentile</entry><entry>目标表格get操作的P99时延迟</entry></row>
+					<row><entry>*_incrementTime_99th_percentile</entry><entry>目标表格increment操作的P99时延迟</entry></row>
+					<row><entry>*_putTime_99th_percentile</entry><entry>目标表格put操作的P99时延迟</entry></row>
+					<row><entry>*_scanTime_99th_percentile</entry><entry>目标表格scan操作的P99时延迟</entry></row>
+					<row><entry>*_scanSize_99th_percentile</entry><entry>目标表格scan操作返回的数据量大小</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<table frame='all'>
+			<title>Hadoop:service=HBase,name=RegionServer,sub=Tables</title>
+			<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+				<colspec colname='c1' colwidth="16.5em"/>
+				<colspec colname='c2'/>
+				<thead>
+					<row><entry>metrics名称</entry><entry>metric描述</entry></row>
+				</thead>
+				<tbody>
+					<row><entry>*_memstoreSize</entry><entry>目标表格当前所占用的memstore大小</entry></row>
+					<row><entry>*_storeFileSize</entry><entry>目标表格当前的Storefile数据量大小</entry></row>
+					<row><entry>*_tableSize</entry><entry>目标表格当前的数据总量(包括Storefile和Memstore)</entry></row>
+					<row><entry>*_cpRequestCount</entry><entry>针对目标表格的协处理器请求数</entry></row>
+					<row><entry>*_readRequestCount</entry><entry>针对目标表格的读请求数</entry></row>
+					<row><entry>*_writeRequestCount</entry><entry>针对目标表格的写请求数</entry></row>
+					<row><entry>*_totalRequestCount</entry><entry>目标表格的总请求量</entry></row>
+				</tbody>
+			</tgroup>
+		</table>
+		<para>表粒度监控是从1.3.0版本之后开始引入的特性，相关的补丁及优化jira可参考HBASE-19285，HBASE-18374，HBASE-15671，HBASE-15518，HBASE-17017，HBASE-15376。</para>
+	</section>
+	<section>
+		<title>个性化定制</title>
+		<para>TODO</para>
+		<section>
+			<title>表格流量信息</title>
+			<para>目前为止HBase只是针对RegionServer做了流量统计功能，然而并没有细化到具体的表格，在某些应用场景下我们可能希望了解某些表格的输入/输出大小，为此可做相应定制。</para>
+			<para>输入流量主要用于统计客户端向目标表格写入数据的总大小。针对每个写请求操作，服务端会将其封装成Call对象，然后传递至CallRunner中进行处理，因此，在目标请求被响应之前，可以对Call对象进行拦截，通过解析其size属性来获取此次操作的输入量大小，并与已有流量进行合并，从而统计出目标表格的输入量总大小。</para>
+			<para>输出流量主要用于统计客户端查询表格所返回的输出数据总大小。由RPC通信机制了解到，服务端所返回的计算结果是通过Response报文来进行封装的(分别包括：ResponseHeader、Result和CellBlock)，因此在报文返回之前，可对其信息量大小进行统计，从而获取此次操作的输出数据量。</para>
+			<para>处理过程大致如下：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先获取写操作对应的目标表格，主要通过解析Call对象的param属性来实现。</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>如果param为MutateRequest、GetRequest。</para>
+							<para>直接调用其getRegion方法来获取目标Region，进而获取Region对应的表格。</para>
+						</listitem>
+						<listitem>
+							<para>如果param为MultiRequest。</para>
+							<para>从其封装的RegionAction集合中任选一个元素，并调用其getRegion方法来获取目标Region。</para>
+						</listitem>
+						<listitem>
+							<para>如果param为ScanRequest。</para>
+							<para>该情况比较特殊，需要首先获取scannerId对应的Scanner，在从Scanner中获取目标Table。为此，需要修改Client.proto通信协议，引入getRegionFromScanner通信方法：</para>
+							<programlisting>
+message GetRegionFromScannerRequest {
+    required string scannerId = 1;
+}
+
+message GetRegionFromScannerResponse {
+    required string regionName = 1;
+}
+
+service ClientService {
+    ...
+    rpc GetRegionFromScanner(GetRegionFromScannerRequest)
+        returns(GetRegionFromScannerResponse);
+    ...
+}
+							</programlisting>
+							<para>新的通信方法引入后，便可通过访问Call对象所封装的BlockingService实例来对getRegionFromScanner方法进行引用，因其在类结构上实现了ClientService服务接口，大致调用如下：</para>
+							<blockquote><para>call.service.callBlockingMethod(methodDesc, controller, param)</para></blockquote>
+							<para>方法执行后便可获取查询操作对应的目标Region，进而获取到Region对应的表格。</para>
+							<tip>ClientService的服务端实现为RSRpcServices，其getRegionFromScanner方法主要是对getScanner方法进行引用，来获取scannerId对应的Scanner，在通过Scanner的getRegionInfo来获取目标Region信息。</tip>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>获取此次操作的输入流量/输出流量。</para>
+					<para>输入流量可通过读取Call对象的size属性值来进行获取，输出流量会在目标Call执行完成之后进行统计，具体实现可参考RpcServer.Call类的setResponse方法。</para>
+				</listitem>
+				<listitem>
+					<para>汇总输入流量/输出流量。</para>
+					<para>汇总后的信息可通过写入Metric进行保存，具体做法是先获取rpc对应MetricsSource。</para>
+					<blockquote><para>rpcServer.getMetrics().getMetricsSource();</para></blockquote>
+					<para>然后通过DynamicMetricsRegistry来动态的新增metric。</para>
+					<blockquote>
+						<para>DynamicMetricsRegistry registry = metricsSource.getMetricsRegistry();</para>
+						<para>registry.getLongCounter(tableName, 0L).incr(call.size);</para>
+					</blockquote>
+				</listitem>
+			</orderedlist>
+			<para>详细实现可参考：TODO</para>
+		</section>
+		<section>
+			<title>Stripe信息</title>
+			<para>StripeCompaction功能启用后，还无法通过监控系统来查看有关Region的如下信息：</para>
+			<blockquote>
+				<para>(1)目标Region中每个Store被划分成了多少个Stripe；</para>
+				<para>(2)每个Stripe内部包含了多少个StoreFile文件。</para>
+			</blockquote>
+			<para>为了增加集群管理的透明度，非常有必要引入相关的metric，为此可做如下定制。</para>
+			<orderedlist>
+				<listitem>
+					<para>将State类从StripeStoreFileManager类中独立出来，供其他类调用使用。</para>
+					<para>独立后的类名重构为StripeState。</para>
+				</listitem>
+				<listitem>
+					<para>为Store接口引入getStripes方法用于获取目标Store所拥有的Stripe集合。</para>
+					<para>方法声明为：StripeState getStripes()</para>
+				</listitem>
+				<listitem>
+					<para>执行以下两类操作时，构造StripeState对象实例，并通过调用HStore的setStripes方法来与目标Store进行绑定。</para>
+					<itemizedlist>
+						<listitem>
+							<para>StoreFiles加载操作。</para>
+							<para>加载过程可参考StripeStoreFileManager类的loadFiles方法，如果StoreFile含有Stripe相关的元数据信息，将其加入对应的Stripe集合，否则将其放入level-0区域。并根据这些Stripe信息来构建StripeState对象，在与目标Store进行绑定。</para>
+						</listitem>
+						<listitem>
+							<para>Stripe划分及拆分操作。</para>
+							<para>成功执行划分/拆分操作以后，会去调用StripeStoreFileManager类的createNewState方法，可将方法的返回结果与目标Store进行绑定。</para>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>根据StripeState来构造stripeInfo信息，并将其写入Metrics。</para>
+					<para>有关Region的metric信息主要是通过MetricsRegionSourceImpl来构建的，MetricsSource会周期性的执行其snapshot方法来获取新生成的MetricsRecord记录，并将其put到Metrics系统中去，因此可在snapshot方法中将stripeInfo集成进去。</para>
+					<para>stripeInfo信息主要通过解析StripeState来构建，每条stripeInfo的显示格式如下：&lt;columnFamily>_level_0,&lt;storeFilesNum>;&lt;columnFamily>_stripe_&lt;index>,&lt;storeFilesNum>...</para>
+					<para>stripeInfo写入Metric之后，便可通过访问http://&lt;RegionServerHost>:&lt;port>/jmx来查看相关的Metrics信息，界面显示大致如下：</para>
+					<programlisting>
+"name" : "Hadoop:service=HBase,name=RegionServer,sub=Regions",
+"modelerType" : "RegionServer,sub=Regions",
+"tag.Namespace_hbase_table_meta_region_1588230740_metric_stripeInfo" :
+    "info_level_0,0;info_stripe_0,2;",
+"tag.Namespace_default_table_t_contacts_region_1728753378_metric_stripeInfo" :
+    "cf_level_0,1;",
+"tag.Namespace_hbase_table_acl_region_6b9408_metric_stripeInfo" :
+    "l_level_0,0;l_stripe_0,2;",
+"tag.Namespace_hbase_table_namespace_region_8f8c87037_metric_stripeInfo" :
+    "info_level_0,0;info_stripe_0,1;",
+					</programlisting>
+				</listitem>
+			</orderedlist>
+			<para>具体实现可参考https://issues.apache.org/jira/browse/HBASE-15659</para>
+		</section>
+		<section>
+			<title>线程池容量信息</title>
+			<para>RS在启动过程中会开启如下线程池实例：</para>
+			<blockquote>
+				<orderedlist>
+					<listitem><para>RS_OPEN_REGION - 用于加载用户表格的Region；</para></listitem>
+					<listitem><para>RS_OPEN_META - 用于加载meta表格的Region；</para></listitem>
+					<listitem><para>RS_OPEN_PRIORITY_REGION；</para></listitem>
+					<listitem><para>RS_CLOSE_REGION - 用于关闭用户表格的Region；</para></listitem>
+					<listitem><para>RS_CLOSE_META - 用于关闭meta表格的Region；</para></listitem>
+					<listitem><para>RS_PARALLEL_SEEK - 用于定位HFile到指定的偏移量；</para></listitem>
+					<listitem><para>RS_LOG_REPLAY_OPS - 用于执行HLog回放；</para></listitem>
+					<listitem><para>RS_COMPACTED_FILES_DISCHARGER；</para></listitem>
+					<listitem><para>RS_REGION_REPLICA_FLUSH_OPS。</para></listitem>
+				</orderedlist>
+			</blockquote>
+			<para>然而每个线程池的容量上限却很难做出合理的预估，太多了会浪费资源，太少了并发度又不够。因此很有必要对每个线程池实例的运行状态做定期统计，结合统计数据来设置出合适的值，同时也便于及时发现当前系统的瓶颈所在。</para>
+			<para>针对定时任务的处理，HBase声明了ScheduledChore抽象类和ChoreService服务，我们只需实现自己的ScheduledChore，然后将其注入到ChoreService中即可(通过调用其scheduleChore方法)。介于此，有关定时统计线程池状态的任务是通过ThreadPoolMetricChore类来封装的(类的详细实现可参考TODO)，该类继承至ScheduledChore抽象类，在chore方法中会去调用ExecutorService服务的getAllExecutorStatuses方法来获取所有线程池实例的运行信息，包括：当前线程池中有多少个线程在运行，又有多少线程处于等待队列中。获取到这些信息之后便可通过DynamicMetricsRegistry将其注入到Metrics系统中去，以便于第三方工具去做定期抓取，从而对每个线程池的运行状态做到监控。</para>
+			<para>该功能完整的补丁可参考：TODO</para>
+		</section>
+		<section>
+			<title>响应延迟计数</title>
+			<para>针对服务端响应过慢的一些操作，HBase会输出如下类似的提示信息：</para>
+			<programlisting>
+ipc.RpcServer: (responseTooSlow): {"processingtimems":45858, "call":"Scan(org.apache.
+hadoop.hbase.protobuf.generated.ClientProtos$ScanRequest)","client":"10.100.45.35:34241",
+"starttimems":1476269645100, "queuetimems":0, "class":"HRegionServer", "responsesize":13,
+"method":"Scan"}
+			</programlisting>
+			<para>然而并没有对响应延迟的操作进行计数处理，为了便于系统监控的实时性(不用每次去查询日志文件)，非常有必要将该参数指标集成到Metrics系统中去，以便于实时感知系统的健康状况，并分析出系统繁忙的时间点。为此可作如下定制：</para>
+			<para>服务端在响应客户端的请求操作时主要是执行RpcServer的call方法来对目标RPC服务进行调用。有关响应是否延迟的判断也是在该方法中进行的，如果目标RPC服务的处理用时大于10秒(可通过hbase.ipc.warn.response.time参数进行指定)，则打印responseTooSlow日志。介于此，我们可以在Metrics中声明一个新的Counter计数，在系统打印responseTooSlow日志之前，对该Counter进行加1操作。在通过第三方的统计工具(Ganglia)对该Metric进行收集和分析，将响应有延迟的操作实时呈现。</para>
+			<para>该功能的完整补丁可参考：TODO</para>
+		</section>
+		<section>
+			<title>jvm停顿计数</title>
+			<para>RS响应过慢的原因有很多，其中原因之一有可能是JVM因fullGc或YGC时间过长而产生了停顿，由堆内存监控章节了解到，HBase提供了JvmPauseMonitor用来实时监测JVM的的暂停情况，因此，我们便可以借助于该工具来对jvm的暂停次数进行统计，并将其集成到Metrics系统中去，在系统响应过慢的时候在通过该指标来确定是否为JVM的gc出了问题。</para>
+			<para>定制方式比较简单，主要是重构JvmPauseMonitor.Monitor线程的run方法，当gc的暂停时间大于jvm.pause.info-threshold.ms参数阈值时调用MetricsRegionServerSource的incrJvmPause方法对目标Counter计数进行加1。</para>
+			<para>该功能的完整补丁可参考：TODO</para>
+		</section>
+	</section>
+</section>

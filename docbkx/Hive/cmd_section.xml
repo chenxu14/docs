@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Hive命令</title>
+	<table frame='all'>
+		<title>常用命令</title>
+		<tgroup cols='3' align='left' colsep='1' rowsep='1'>
+			<colspec colname='c1' colwidth="19em"/>
+			<colspec colname='c2'/>
+			<colspec colname='c3' colwidth="7em"/>
+			<thead>
+				<row><entry>命令</entry><entry>描述</entry><entry>示例</entry></row>
+			</thead>
+			<tbody>
+				<row><entry namest="c1" nameend="c3" align="left">交互模式下可用命令</entry></row>
+				<row><entry>$HIVE_HOME/bin/hive</entry><entry>进入交互模式</entry><entry></entry></row>
+				<row><entry>quit/exit</entry><entry>退出交互模式</entry><entry></entry></row>
+				<row><entry>set &lt;key>=&lt;value></entry><entry>设置参数值(只针对当前session有效)</entry><entry></entry></row>
+				<row><entry>! &lt;command></entry><entry>执行linux shell命令</entry><entry>!ls;</entry></row>
+				<row><entry>dfs &lt;dfs command></entry><entry>执行dfs命令</entry><entry>dfs ls /;</entry></row>
+				<row><entry>add FILE|JAR|ARCHIVE &lt;filepath></entry><entry>上传filepath到Distribute Cache</entry><entry></entry></row>
+				<row><entry>list FILES|JARS|ARCHIVES</entry><entry>查看Distribute Cache中的资源文件</entry><entry></entry></row>
+				<row><entry>delete FILE|JAR|ARCHIVE &lt;filepath></entry><entry>删除Distribute Cache中的资源文件</entry><entry></entry></row>
+				<row><entry namest="c1" nameend="c3" align="left">非交互模式常用命令</entry></row>
+				<row><entry>$HIVE_HOME/bin/hive -f file.sql</entry><entry>执行sql脚本</entry><entry></entry></row>
+				<row><entry>$HIVE_HOME/bin/hive -e 'select count(*) from test'</entry><entry>执行sql语句</entry><entry></entry></row>
+			</tbody>
+		</tgroup>
+	</table>
+</section>

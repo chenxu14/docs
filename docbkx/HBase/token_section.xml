@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Token认证</title>
+	<para>基于kerberos的访问认证虽已足够安全，但是如果任何请求都基于kerberos来认证会给KDC的处理带来极大压力。尤其像mapreduce这样的批处理作业，如果Task数量比较多，并且每个Task都需要kerberos来证明自己的身份那么认证操作将会成为很大的瓶颈(初步测试KDC能处理的认证请求大概300/s)。为此，Hadoop引入了Token的认证机制，客户端获取到目标Server分发的Token之后，便可以绕过KDC直接基于该Token来与目标Server进行通信，从而降低了KDC的处理压力。同时还可对Token执行序列化操作，以便与其它进程共享使用。比如在MR作业中，客户端可以将获取到的Token传递至map和reduce端，这样map和reduce的任务进程便可以基于该Token来访问HBase而不用在走kerberos认证。</para>
+	<section>
+		<title>存储格式</title>
+		<para>从客户端的角度来看Token大致包含以下几个方面的信息：</para>
+		<orderedlist>
+			<listitem>
+				<para>TokenIdentifier = {ownerID, renewerID, issueDate, maxDate, ...}</para>
+				<para>封装令牌的基本信息,例如:所有者、修改者、生成日期、过期时间等。</para>
+			</listitem>
+			<listitem>
+				<para>TokenPassword = HMAC-SHA1(masterKey, TokenIdentifier)</para>
+				<para>相当于令牌的使用密钥,在Client与Server进行信息交互的时候,使用该密钥对信息进行加密。</para>
+			</listitem>
+			<listitem>
+				<para>TokenRenewer令牌修改对象</para>
+				<para>Token是有过期时间的(默认为24小时),在使用期结束后,有些令牌的使用寿命是可以延长的(如DelegationToken)。办法是通过该令牌修改对象向Server发送申请,延长令牌的有效期(最多为7天)。由于令牌的有效期记录在Server端,并且只在Server端进行校验,所以Client端的过期令牌不需做任何修改依然可以使用,这也是DelegationToken优于Kerberos ServiceTicket的原因之一,延长令牌使用时间容易。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>认证流程</title>
+		<para>Token认证是以SASL的方式进行的，采用的认证机制为Digest-MD5，认证流程大致如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/token-workflow.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>流程描述：</para>
+		<orderedlist>
+			<listitem>
+				<para>能够获取目标Server访问Token的前提是Client端已经通过了kerberos认证，否则服务端将拒绝发放Token给客户端。</para>
+			</listitem>
+			<listitem>
+				<para>客户端获取到目标Server的访问Token之后，便可直接基于该Token来与目标Server进行安全通信，从而绕过KDC，降低KDC的处理压力。</para>
+			</listitem>
+			<listitem>
+				<para>基于Token的认证过程Server端会首先对Client端进行一些询问，用以判断客户端的访问Token是否有效。</para>
+			</listitem>
+			<listitem>
+				<para>Client接受询问,并将自己的TokenID连同认证信息发送给Server,同时对认证信息做了签名处理(dr-md5-hash),采用的密钥为TokenPassword(参考Token存储格式)。</para>
+			</listitem>
+			<listitem>
+				<para>Server端存储着masterKey,通过加密算法可生成TokenID对应的TokenPassword,然后使用该TokenPassword对Client发送过来的认证信息做签名处理,如果签名信息与Client发送过来的签名相同则认证通过;否则说明Client端的TokenPassword有可能是伪造的,认证失败。</para>
+			</listitem>
+			<listitem>
+				<para> 7、8 Client采用相同的方式对Server进行认证。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>实现细节</title>
+		<para>TODO</para>
+	</section>
+	<section>
+		<title>使用样例</title>
+		<para>TODO Spark &amp; Mapreduce</para>
+	</section>
+</section>

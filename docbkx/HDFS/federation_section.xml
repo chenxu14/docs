@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Federation联盟</title>
+	<para>Federation相当于为集群指定了水平切片的功能，其核心思想与关系数据库的水平切片类似，都是将数据整体拆分成多个切片单元来进行处理。部署结构见下图：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/hdfs/federation.gif"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>其中，每个Namespace和它所管理的BlockPool构成一个切片单元，称之为NamespaceVolume。集群由多个NamespaceVolume构成，且彼此之间相互独立，互不影响使用，此外还可针对不同的Namespace来做访问隔离。</para>
+	<para>这种部署方式的好处在于：</para>
+	<orderedlist>
+		<listitem><para>实现了Namespace水平扩充的功能，这种扩充在集群非常庞大的时候十分有用；</para></listitem>
+		<listitem><para>增加系统访问的吞吐量，多个namenode并行处理；</para></listitem>
+		<listitem><para>多用户使用隔离。</para></listitem>
+	</orderedlist>
+	<section>
+		<title>配置示例</title>
+		<programlistingco>
+			<programlisting>
+一、hdfs-site.xml文件配置
+&lt;configuration>
+  &lt;property>
+    &lt;name>dfs.nameservices&lt;/name><co id="co.dfs.nameservices" linkends="co.note.dfs.nameservices"/>
+    &lt;value>ns1,ns2&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.rpc-address.ns1&lt;/name><co id="co.rpc.address" linkends="co.note.rpc.address"/>
+    &lt;value>nn-host1:rpc-port&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.http-address.ns1&lt;/name><co id="co.http.address" linkends="co.note.http.address"/>
+    &lt;value>nn-host1:http-port&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.secondaryhttp-address.ns1&lt;/name>
+    &lt;value>snn-host1:http-port&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.rpc-address.ns2&lt;/name>
+    &lt;value>nn-host2:rpc-port&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.http-address.ns2&lt;/name>
+    &lt;value>nn-host2:http-port&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>dfs.namenode.secondaryhttp-address.ns2&lt;/name><co id="co.secondaryhttp.address" linkends="co.note.secondaryhttp.address"/>
+    &lt;value>snn-host2:http-port&lt;/value>
+  &lt;/property>
+  .... Other common configuration ...
+&lt;/configuration>
+
+二、core-site.xml文件配置
+&lt;configuration xmlns:xi="http://www.w3.org/2001/XInclude">
+  &lt;xi:include href="cmt.xml"/>
+  &lt;property>
+    &lt;name>fs.defaultFS&lt;/name>
+    &lt;value>viewfs://cmt&lt;/value><co id="co.viewfs" linkends="co.note.viewfs"/>
+  &lt;/property>
+  .... Other common configuration ...
+&lt;/configuration>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.dfs.nameservices" arearefs="co.dfs.nameservices" ><para>所有nameservice服务的名称(用逗号分隔)；</para></callout>
+				<callout id="co.note.rpc.address" arearefs="co.rpc.address" ><para>ns1的namenode访问地址(rpc方式)；</para></callout>
+				<callout id="co.note.http.address" arearefs="co.http.address" ><para>ns1的namenode访问地址(http方式)；</para></callout>
+				<callout id="co.note.secondaryhttp.address" arearefs="co.secondaryhttp.address" ><para>ns2的secondnamenode访问地址(http方式)；</para></callout>
+				<callout id="co.note.viewfs" arearefs="co.viewfs" >
+					<para>viewfs实现了文件挂载逻辑，挂载信息配置在cmt.xml文件中，配置示例如下：</para>
+					<para>&lt;property></para>
+					<blockquote>
+     					<para>&lt;name>fs.viewfs.mounttable.cmt.link./tmp&lt;/name></para>
+     					<para>&lt;value>hdfs://ns1/tmp&lt;/value></para>
+     				</blockquote>
+  					<para>&lt;/property></para>
+				</callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

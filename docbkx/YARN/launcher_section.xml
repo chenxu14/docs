@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>ContainersLauncher服务</title>
+	<para>ContainersLauncher服务主要负责Container在NM端的加载、关闭及清理工作，其工作过程是通过响应ContainersLauncherEvent事件来进行处理的。</para>
+	<section>
+		<title>Container加载</title>
+		<para>当LAUNCH_CONTAINER事件触发时，ContainersLauncher开始对目标Container执行加载操作，在执行加载之前，需要首先构建ContainerLaunchContext对象来封装Container的加载环境，该对象是在Client端和AM端进行构建的，然后通过RPC引用序列化传递至当NM端，当LAUNCH_CONTAINER事件触发时，对其执行如下回调处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先构造Container运行所需要的环境变量信息，变量包括：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>$HADOOP_TOKEN_FILE_LOCATION：Container令牌存放为止，用于安全通信；</para>
+					</listitem>
+					<listitem>
+						<para>$CONTAINER_ID：Container唯一标识；</para>
+					</listitem>
+					<listitem>
+						<para>$NM_PORT：NodeManager通信端口；</para>
+					</listitem>
+					<listitem>
+						<para>$NM_HOST：NodeManager的hostname；</para>
+					</listitem>
+					<listitem>
+						<para>$NM_HTTP_PORT：NodeManager的web访问端口；</para>
+					</listitem>
+					<listitem>
+						<para>$NM_HTTP_PORT：NodeManager的web访问端口；</para>
+					</listitem>
+					<listitem>
+						<para>$LOCAL_DIRS：Container所在App的工作目录；</para>
+					</listitem>
+					<listitem>
+						<para>$LOG_DIRS：Container日志存放目录；</para>
+					</listitem>
+					<listitem>
+						<para>$USER：App提交用户；</para>
+					</listitem>
+					<listitem>
+						<para>$LOGNAME：变量值等同于$USER；</para>
+					</listitem>
+					<listitem>
+						<para>$LOGNAME：用户主目录，通过yarn.nodemanager.user-home-dir参数来设置，默认为/home/；</para>
+					</listitem>
+					<listitem>
+						<para>$PWD：Container工作目录；</para>
+					</listitem>
+					<listitem>
+						<para>$HADOOP_CONF_DIR：Hadoop配置文件存放路径；</para>
+					</listitem>
+					<listitem>
+						<para>$JVM_PID：JVM进程Id号；</para>
+					</listitem>
+					<listitem>
+						<para>$JAVA_HOME：java主目录；</para>
+					</listitem>
+					<listitem>
+						<para>$HADOOP_COMMON_HOME：hadoop common主目录；</para>
+					</listitem>
+					<listitem>
+						<para>$HADOOP_HDFS_HOME：hadoop hdfs主目录；</para>
+					</listitem>
+					<listitem>
+						<para>$HADOOP_YARN_HOME：hadoop yarn主目录；</para>
+					</listitem>
+					<listitem>
+						<para>$MALLOC_ARENA_MAX：变量值在$HADOOP_HOME/libexec/hadoop-config.sh文件中设置；</para>
+					</listitem>
+				</itemizedlist>
+				<para>除以上变量信息外，还包括构造ContainerLaunchContext时所设置的环境变量信息及yarn.nodemanager.admin-env配置。</para>
+			</listitem>
+			<listitem>
+				<para>然后将环境变量信息及Container启动脚本写入如下shell文件中：</para>
+				<para>${yarn.nodemanager.local-dirs}/nmPrivate/${appId}/${containerId}/launch_container.sh</para>
+				<para>Container的启动命令是通过ContainerLaunchContext对象来封装的，不同类型的Container其启动脚本也不一样，具体的启动命令可参考YarnClient客户端组件和TaskAttempt状态机。</para>
+				<tip>App运行结束后会对launch_container.sh文件执行清理操作，为了便于调试，可通过设置yarn.nodemanager.delete.debug-delay-sec参数来延迟launch_container.sh的清理时间，从而可以在有限的时间内查询到launch_container.sh文件内容。</tip>
+			</listitem>
+			<listitem><para>接着触发CONTAINER_LAUNCHED事件，将Container的运行状态切换成Running状态，状态转变过程中会触发ContainerStartMonitoringEvent事件，使ContainersMonitor开始做监控处理(参考ContainersMonitor服务)。</para></listitem>
+			<listitem>
+				<para>最后执行launch_container.sh脚本来完成Container加载操作，执行逻辑是通过ContainerExecutor类的launchContainer方法来封装的，逻辑如下：</para>
+				<para>(1)首先将launch_container.sh脚本拷贝到Container的工作目录下：</para>
+				<para>${yarn.nodemanager.local-dirs}/usercache/${user}/appcache/${appId}/${containerId}/</para>
+				<para>(2)然后创建default_container_executor.sh用于执行launch_container.sh，脚本内容大致如下：</para>
+				<programlisting>
+#!/bin/bash
+echo $$ > ${LOCAL_DIR}/nmPrivate/${containerId}.pid.tmp
+/bin/mv -f ${LOCAL_DIR}/nmPrivate/${containerId}.pid.tmp 
+   ${LOCAL_DIR}/nmPrivate/${containerId}.pid
+exec setsid /bin/bash -c 
+  "${LOCAL_DIR}/usercache/${user}/appcache/${appId}/${containerId}/launch_container.sh"
+					
+				</programlisting>
+				<para>由于ContainerExecutor类的launchContainer方法是阻塞式的，因此只有当脚本执行结束时方法才会退出，主线程才会继续接下来的处理。</para>
+			</listitem>
+			<listitem><para>触发CONTAINER_EXITED_WITH_SUCCESS事件，使NMContainer状态机进行相应的处理。</para></listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Container清理</title>
+		<para>Container清理操作是通过触发CLEANUP_CONTAINER事件来实现的(对NMContainer执行KILL操作时会触发该事件)，事件触发后会去执行ContainerLaunch类的cleanupContainer方法来进行相关处理，处理内容大致如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先将Container的kill状态保存至NMStateStore中进行存储，通过调用NMStateStoreService类的storeContainerKilled方法。</para>
+			</listitem>
+			<listitem>
+				<para>然后将目标Container标记为deactivate</para>
+				<para>通过调用ContainerExecutor的deactivateContainer方法将Container进程对应的pid文件从ContainerExecutor的pidFiles集合中移除。</para>
+			</listitem>
+			<listitem>
+				<para>杀死目标Container进程，如果其已经加载。</para>
+				<para>执行kill操作之前首先判断yarn.nodemanager.sleep-delay-before-sigkill.ms参数阈值是否大于0(默认值为250毫秒)，如果大于0，首先执行kill -15操作等待其自然结束，如果250毫秒之后进程依然没有退出，在执行kill -9操作来强制将其退出。需要注意的是在hadoop-2.6.0及之前的版本中，对Container的这种延迟kill操作存在比较严重的BUG，有可能产生进程误杀的现象(详细参考YARN-3678)。</para>
+			</listitem>
+			<listitem>
+				<para>删除Container进程所对应的pid文件。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

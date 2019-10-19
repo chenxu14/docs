@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Token认证</title>
+	<para>
+		Token的认证是通过SASL的方式进行的，采用的认证机制为Digest-MD5
+	</para>
+	<section>
+		<title>认证流程</title>
+		<para>Token的认证流程如下图所示</para>
+		<figure id='token.authentication'>
+			<title>Token认证流程</title>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../../media/common/security/token-workflow.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+		</figure>
+		<para>流程说明：</para>
+		<orderedlist>
+			<listitem>
+				<para>能获取DelegationToken的前提是Client通过了Kerberos认证。</para>
+			</listitem>
+			<listitem>
+				<para>Client用获取到的Token连接Server。</para>
+			</listitem>
+			<listitem><para>Server对Client进行询问，以判断Client能否认证通过</para></listitem>
+			<listitem><para>Client接受询问，并将自己的TokenID连同认证信息发送给Server，同时对认证信息做了签名处理(dr-md5-hash),采用的密钥为TokenPassword(参考Token存储格式)</para></listitem>
+			<listitem><para>Server端存储着masterKey，通过加密算法可生成TokenID对应的TokenPassword，然后使用该TokenPassword对Client发送过来的认证信息做签名处理，如果签名信息与Client发送过来的签名相同则认证通过；否则说明Client端的TokenPassword有可能是伪造的，认证失败。</para></listitem>
+			<listitem><para>7、8：Client采用相同的方式对Server进行认证</para></listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Token格式</title>
+		<para>从客户端的角度来看Token大致包含以下几个方面的信息：</para>
+		<orderedlist>
+			<listitem>
+				<para>TokenIdentifier = {ownerID, renewerID, issueDate, maxDate, ...}</para>
+				<para>封装令牌的基本信息，例如：所有者、修改者、生成日期、过期时间等</para>
+			</listitem>
+			<listitem>
+				<para>TokenPassword = HMAC-SHA1(masterKey, TokenIdentifier)</para>
+				<para>相当于令牌的使用密钥，在Client与Server进行信息交互的时候，使用该密钥对信息进行加密</para>
+			</listitem>
+			<listitem>
+				<para>TokenRenewer令牌修改对象</para>
+				<para>Token是有过期时间的(默认为24小时)，在使用期结束后，有些令牌的使用寿命是可以延长的(如DelegationToken)。办法是通过该令牌修改对象向Server发送申请，延长令牌的有效期(最多为7天)。由于令牌的有效期记录在Server端，并且只在Server端进行校验，所以Client端的过期令牌不需做任何修改依然可以使用，这也是DelegationToken优于Kerberos ServiceTicket的原因之一，延长令牌使用时间容易。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Token种类</title>
+		<para>根据应用场景的不同，Token主要包含以下几种类型</para>
+		<glosslist>
+			<glossentry>
+				<glossterm>Block Access Token</glossterm>
+				<glossdef><para>Client通过该令牌可以访问DateNode。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>NameNode Delegation Token</glossterm>
+				<glossdef><para>Task任务通过该令牌可以访问HDFS数据。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>ResourceManager Delegation Token</glossterm>
+				<glossdef><para>Task任务通过该令牌向ResourceManager提交job(开启子MapReduce应用)。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>Application Token</glossterm>
+				<glossdef><para>ApplicationMaster通过该令牌向ResourceManager申请Container。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>Container Token</glossterm>
+				<glossdef><para>ApplicationMaster通过该令牌来管理Container的生命周期(启动/停止Container)。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>Localizer Token</glossterm>
+				<glossdef><para>ContainerLocalizer使用该令牌与NodeManager交互。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>MapReduce Client Token</glossterm>
+				<glossdef><para>JobClient通过该令牌访问ApplicationMaster。</para></glossdef>
+			</glossentry>
+			<glossentry>
+				<glossterm>MapReduce Job Token</glossterm>
+				<glossdef><para>Container通过该令牌与ApplicationMaster进行交互。</para></glossdef>
+			</glossentry>
+		</glosslist>
+	</section>
+</section>

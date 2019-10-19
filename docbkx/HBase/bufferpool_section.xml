@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
+         xmlns:xi="http://www.w3.org/2001/XInclude"
+         xmlns:ns5="http://www.w3.org/2000/svg"
+         xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+         xmlns:ns3="http://www.w3.org/1999/xhtml"
+         xmlns:db="http://docbook.org/ns/docbook">
+	<title>CellBlock池化管理</title>
+	<para>无论是客户端还是服务端都需要有对CellBlock报文执行序列化的操作，服务端主要体现在返回response信息给客户端的过程(代码参考ServerCall#setResponse方法)，而客户端体现在发送request信息到服务端的过程(代码参考RpcClientImpl#writeRequest)。服务端的序列化处理是基于ByteBuffAllocator来处理的(HBASE-21879提供的内存池管理工具)，而针对客户端组件还没有提供类似的池化管理机制，为此我们可以引入netty内存池对其进行管理。</para>
+	<tip>社区在2.0版本提供了异步RPC功能，并基于netty对客户端代码做了相应重构，因此异步客户端已基于netty内存池对CellBlock做了序列化管理(HBASE-21879)，但是同步客户端依然要申请临时内存(代码可参考BlockingRpcConnection#writeRequest方法)。</tip>
+	<para>核心补丁代码逻辑如下：</para>
+	<programlistingco>
+		<programlisting>
++++ org/apache/hadoop/hbase/ipc/IPCUtil.java
+-  private void encodeCellsTo(ByteBufferOutputStream bbos, CellScanner cellScanner...
++  private void encodeCellsTo(OutputStream os, CellScanner cellScanner, Codec codec,
+       CompressionCodec compressor) throws IOException {
+-    OutputStream os = bbos;
+     Compressor poolCompressor = null;
+     ...
+   }
+   ...
++  public ByteBufOutputStream buildCellBlockStream(Codec codec,
++      CompressionCodec compressor, CellScanner cellScanner) throws IOException {
++    if (cellScanner == null) {
++      return null;
++    }
++    if (codec == null) {
++      throw new CellScannerButNoCodecException();
++    }
++    ByteBuf bb = PooledByteBufAllocator.DEFAULT.buffer(65536); // 64kb
++    ByteBufOutputStream bbos = new ByteBufOutputStream(bb);
++    encodeCellsTo(bbos, cellScanner, codec, compressor);
++    if (bb.readableBytes() == 0) {
++      bb.release();
++      return null;
++    }
++    return bbos;
++  }
++
++  public static int write(final OutputStream dos, final Message header,
++      final Message param, final ByteBuf cellBlock) throws IOException {
++    int totalSize = IPCUtil.getTotalSizeWhenWrittenDelimited(header, param);
++    if (cellBlock != null) {
++      totalSize += cellBlock.readableBytes();
++    }
++    return write(dos, header, param, cellBlock, totalSize);
++  }
++
++  private static int write(final OutputStream dos, final Message header,
++      final Message param, final ByteBuf cellBlock, final int totalSize)
++      throws IOException {
++    // I confirmed toBytes does same as DataOutputStream#writeInt.
++    dos.write(Bytes.toBytes(totalSize));
++    // This allocates a buffer that is the size of the message internally.
++    header.writeDelimitedTo(dos);
++    if (param != null) {
++      param.writeDelimitedTo(dos);
++    }
++    if (cellBlock != null) {
++      cellBlock.readBytes(dos, cellBlock.readableBytes());
++    }
++    dos.flush();
++    return totalSize;
++  }
+   ...
++++ org/apache/hadoop/hbase/ipc/RpcClientImpl.java
+   private void writeRequest(Call call, final int priority, Span span) throws IOException {
+     ...
+     builder.setRequestParam(call.param != null);
+-    ByteBuffer cellBlock = ipcUtil.buildCellBlock(this.codec, this.compressor, call.cells);
+-    if (cellBlock != null) {
+-      CellBlockMeta.Builder cellBlockBuilder = CellBlockMeta.newBuilder();
+-      cellBlockBuilder.setLength(cellBlock.limit());
+-      builder.setCellBlockMeta(cellBlockBuilder.build());
+-    }
++    ByteBuf cellBlock = null;
++    try {
++      ByteBufOutputStream cellBlockStream = ipcUtil.buildCellBlockStream(this.codec,
++          this.compressor, call.cells);
++      if (cellBlockStream != null) {
++        cellBlock = cellBlockStream.buffer();
++        CellBlockMeta.Builder cellBlockBuilder = CellBlockMeta.newBuilder();
++        cellBlockBuilder.setLength(cellBlock.readableBytes());
++        builder.setCellBlockMeta(cellBlockBuilder.build());
++      }
+      ...
++   } finally {
++     if (cellBlock != null) {
++       cellBlock.release();
++     }
++   }
+  }
+		</programlisting>
+	</programlistingco>
+</section>

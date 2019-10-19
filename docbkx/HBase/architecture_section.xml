@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>体系结构</title>
+	<xi:include href="bigtable_section.xml" />
+	<!-- 
+	<xi:include href="hbase_section.xml" />
+	 -->
+	<section>
+		<title>HFile存储结构</title>
+		<xi:include href="hfile_v1_section.xml"/>
+		<xi:include href="hfile_v2_section.xml"/>
+	</section>
+	<xi:include href="hlog_section.xml" />
+	<section>
+		<title>组织结构</title>
+		<programlisting>
+Table  (HBase表格)
+  |__ Region  (表格由多个Region组成)
+        |__ Store  (Region中每个ColumnFamily对应一个Store，而Store由一个MemStore和多个StoreFile组成)
+             |__MemStore  (MemStore表示Region内存中的数据)
+             |__StoreFile  (StoreFile表示Region磁盘上的数据，存储格式为HFile)
+                   |__Block  (StoreFile是分块存储的)				
+		</programlisting>
+	</section>
+</section>

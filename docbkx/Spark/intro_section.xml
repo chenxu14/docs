@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Spark介绍</title>
+	<para>Spark框架是由伯克利大学AMP实验室研制的一个项目，它的主要设计思想围绕着Resilient-Distributed-Datasets(弹性分布式数据集，简称RDD)来展开，其作为RDD声明的实现主要解决了以下MapReduce计算模型的不足之处：</para>
+	<orderedlist>
+		<listitem>
+			<para>计算结果不能重用或重用效率低下</para>
+			<para>如果两个作业JobA和JobB，它们的输入源相同，Map逻辑也相同，而只是Reduce逻辑不一样，那么依然需要为每一个Job执行Map计算逻辑，而不能将已有Job的Map输出拿来重用。</para>
+		</listitem>
+		<listitem>
+			<para>计算模型过于单一</para>
+			<para>对数据的处理只涉及Map和Reduce两个阶段，如果业务逻辑复杂会使得每个阶段的计算逻辑过于臃肿。</para>
+		</listitem>
+	</orderedlist>
+	<xi:include href="rdd_section.xml" />
+	<xi:include href="var_section.xml" />
+	<xi:include href="actor_section.xml" />
+	<xi:include href="scheduler_section.xml" />
+	<xi:include href="comp_section.xml" />
+</section>

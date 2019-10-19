@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude"
+    xmlns:ns5="http://www.w3.org/2000/svg"
+    xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+    xmlns:ns3="http://www.w3.org/1999/xhtml"
+    xmlns:db="http://docbook.org/ns/docbook">
+    <title>重要补丁梳理</title>
+    <section>
+        <title>HBASE-13082 Coarsen StoreScanner locks to RegionScanner</title>
+        <para>在StoreScanner的内部声明了一把折返锁用来同步HFile列表的读取一致性，每当执行以下操作时需要对锁资源进行抢占：</para>
+        <blockquote><para>peek、close、seek、next、reseek和updateReaders。</para></blockquote>
+        <para>其中updateReaders用来对待检索的HFile列表执行更新操作，在补丁启用前每当有flush或compaction触发时都需要调用该方法来对目标HFile列表进行更新。而seek、next和reseek主要是对列表中的HFile进行检索，如果检索之前发现HFile列表发生了变动则需要重新构建KeyValueHeap来封装待检索文件集(代码逻辑参考StoreScanner类的checkReseek方法)。由于KeyValueHeap的构建需要对其内部的HFIle列表进行重新的seek和排序(代码逻辑参考resetScannerStack方法)，因此会牺牲一部分性能。</para>
+        <para>补丁启用后的处理逻辑如下：</para>
+        <itemizedlist make='bullet'>
+            <listitem>
+                <para>如果待检索的HFile列表发生变动是由于flush操作引起，处理逻辑与之前类似。</para>
+                <para>写入方面：抢占flush锁，更新HFile列表，释放flush锁。</para>
+                <para>读取方面：抢占flush锁，重新构建HFile列表对应的Scanner集合，释放flush锁。</para>
+                <para>虽然同样需要加锁来保证读写一致，但是锁的作用范围大大降低了，只是在重新构建Scanner时进行加锁而不是针对整个方法进行加锁。</para>
+            </listitem>
+            <listitem>
+                <para>如果HFile列表的变动是由于触发了Compaction操作引起的，处理逻辑将发生如下变动。</para>
+                <para>假设Store下面有3个HFile文件(A、B和C)，在构造ScannerA对Store进行数据检索时如果A、B和C参与了整理操作，并且整理后生成了新的文件D。则补丁会进行如下处理(代码逻辑可参考StoreFileManager类的addCompactionResults方法)。</para>
+                <orderedlist>
+                    <listitem>
+                        <para>首先对整理前的3个文件(A、B和C)进行标记，将其Reader流标记成compactedAway状态。这样当有新的ScanerB构建时，不在对该状态的HFile进行读取。</para>
+                    </listitem>
+                    <listitem>
+                        <para>然后针对新生成的文件D，无需在调用updateReaders方法来将其加入ScannerA的待检索文件集。</para>
+                        <para>因为A、B和C三个文件依然在ScannerA的待检索文件列表里，ScanerA依然对其保有引用关系直至ScannerA被关闭为止。ScanerA只需检索这3个文件依然能够保证数据的正确性，从而避免了KeyValueHeap的重新构建以及锁同步带来的开销。</para>
+                        <para>ScanerA关闭的时候中会针对每个文件对应的StoreFileScanner触发close操作，close过程中并不是将文件的Reader流关闭，而是对其执行decrementRefCount操作，这样通过Reader的refCount属性便可得知当前有多少Scanner在对目标HFile进行读取。</para>
+                    </listitem>
+                </orderedlist>
+                <para>对Reader执行compactedAway标记以及设置refCount属性主要是为了便于后期对已整理的文件进行清理和归档，补丁功能启用后针对已整理文件的清理操作是异步进行的，而不像之前整理结束后直接归档(代码参考HStore类的completeCompaction方法)。</para>
+                <para>RegionServer在启动过程中会开启CompactedHFilesDischarger线程来周期性的检测当前处于online状态的Region是否有整理完成的HFile需要清理(代码逻辑参考HStore的closeAndArchiveCompactedFiles方法)。如果状态显示目标HFile对应的Reader流处于compactedAway状态，并且refCount值为0(没有Scanner在对其引用)则直接将该Reader流进行关闭，并对该HFile进行归档。另外如果对Region执行了下线操作(比如Region拆分以后需要对父Region进行下线，Region合并以后需要对子Region进行下线)，同样会对已整理的文件进行归档和清理而不是等待后台线程去做这些事情(代码逻辑参考HStore的close方法)。</para>
+            </listitem>
+        </itemizedlist>
+        <tip>
+          <para>补丁移除了HStore.bulkLoadHFile方法中有关notifyChangedReadersObservers的执行操作，因此在Scan过程中如果有新的HFile通过bulkhead方式导入该Scanner是看不到的，需要构建新的StoreScanner才可以。</para>
+          <para>另外该补丁存在一个比较重大缺陷，为此HBase已在1.3.0版本中进行了修复，详细可参考HBASE-16964。</para>
+        </tip>
+    </section>
+</section>

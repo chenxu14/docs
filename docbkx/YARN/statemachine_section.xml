@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>状态机模式</title>
+	<para>状态机模式可理解成一个有向状态图，通过触发一系列事件来使当前操作对象达到目标状态值。因此在设计状态机时通常要考虑如下四要素：</para>
+	<blockquote>
+		<orderedlist>
+			<listitem>OPERATE 操作对象；</listitem>
+			<listitem>STATE 操作对象的状态枚举；</listitem>
+			<listitem>EVENT 触发的事件；</listitem>
+			<listitem>EVENTTYPE 事件类型枚举。</listitem>
+		</orderedlist>
+	</blockquote>
+	<para>以系统部署为例，状态图如下图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="50%" width="50%" fileref="../media/yarn/state-map.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>操作对象为系统APP，初始状态为New，表示新建了一个系统。</para>
+	<para>状态枚举包括：New、Deploy、Failed、Running、Stop和Removed。</para>
+	<para>事件类型包括：部署、启动、移除和停止。</para>
+	<para>系统通过触发不同的事件来进入相应的状态。</para>
+	<para>状态机除了可以通过状态图来呈现之外，还可以通过状态转移表来描述，拿上面的状态图为例，对应的状态转移表如下：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/yarn/state-table.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>通过状态转移表的方式可更直观的将数据结构化，因为针对表格我们可以使用Map来封装。</para>
+	<blockquote>
+		<para>Map&lt;STATE,Map&lt;EVENTTYPE,Transition>> stateMachineTable;</para>
+	</blockquote>
+	<para>其中STATE表示起始状态，Transition表示起始状态到其他状态的过渡线(eg:New→Deploy)。这样，当EventType事件触发时，可通过遍历该Map找到对应的Transition。然而只是这样并不能解决问题，拿上面的状态图来讲Deploy状态经过启动事件后可到达的目标状态并不是确定的(可能是Failed，也可能是Running)，也就是说通过遍历Map会返回两个Transition。为此，Hadoop对外声明了MultipleInternalArc类用来将EventType相同的Transition封装到一起(很像组合模式)当成一个Transition来看待，同时还为Transition声明了钩子函数(执行状态切换时所对应的业务操作)，通过钩子函数的返回值来确定最后的目标状态。
+	</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/yarn/state-transition.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>Hadoop针对状态机声明了org.apache.hadoop.yarn.state.StateMachine接口用来处理状态切换，接口包含两个方法：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem><para>getCurrentStarte：获取当前状态.</para></listitem>
+			<listitem><para>doTransition(eventType,event)：执行跳转.</para></listitem>
+		</itemizedlist>
+	</blockquote>
+	<para>同时还声明了org.apache.hadoop.yarn.state.StateMachineFactory状态机工厂，通过其make方法返回状态机实例。在状态机工厂中声明了大量的addTransition重载方法用于构建stateMachineTable，</para>
+	<xi:include href="app_lifecycle.xml" />
+	<xi:include href="appAttemp_lifecycle.xml" />
+	<xi:include href="container_lifecycle.xml" />
+	<xi:include href="node_lifecycle.xml" />
+	<xi:include href="nmapp_lifecycle.xml" />
+	<xi:include href="nmcontainer_lifecycle.xml" />
+	<xi:include href="localizedres_lifecycle.xml" />
+</section>

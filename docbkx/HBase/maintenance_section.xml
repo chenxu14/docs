@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>工具脚本</title>
+	<section>
+		<title>hbck修复工具</title>
+		<para>TODO</para>
+		<para>hbase org.jruby.Main region_status.rb</para>
+		<para>echo list | ./bin/hbase shell</para>
+		<para>alter 'testtable',{METADATA => {COMPACTION_ENABLED => 'false'}}</para>
+		<para>alter 'testtable', {METADATA => {'SPLIT_POLICY' => 'org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy'}}</para>
+		<para>create 'usertable', 'info', {SPLITS => (1..n_splits).map {|i| "#{i/10}#{i%10}"}}</para>
+		<para>Long类型与ASCii转换</para>
+		<para>Bytes.toStringBinary(Bytes.toBytes(-8185993821389975935l))</para>
+		<para>Bytes.toLong(Bytes.toBytesBinary("\\x8Ee\\x81\\xFD\\x9E\\x82\\x0E\\x81"))</para>
+		<para>HBase默认保存3个版本的时间戳数据，查询所有版本的数据记录可通过如下语句</para>
+		<para>scan 'TestTable',{STARTROW=>'test001',RAW=>true,VERSIONS=>3,LIMIT=>10}</para>
+	</section>
+	<section>
+		<title>Region迁移工具</title>
+		<para>HBase提供了region_mover.rb脚本用来处理Region的迁移操作，使用方法大致如下(执行前最好先关闭balancer以及split特性，如果HBase启用了HBASE-15128)：</para>
+		<orderedlist>
+			<listitem>
+				<para>将目标RegionServer上的所有Region迁移到其它RegionServer上。</para>
+				<programlistingco>
+					<programlisting>
+hbase org.jruby.Main region_mover.rb 
+  -f /path/to/regions.list <co id="co.move.file" linkends="co.note.move.file"/>
+  -x /path/to/host.list <co id="co.move.exclued" linkends="co.note.move.exclued"/>
+  -m 1 <co id="co.move.thread" linkends="co.note.move.thread"/>
+  unload
+  $targetHost:$port <co id="co.move.target" linkends="co.note.move.target"/>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.move.file" arearefs="co.move.file" ><para>将被迁移的Region存储到该文件中以便执行reback操作。</para></callout>
+						<callout id="co.note.move.exclued" arearefs="co.move.exclued" ><para>通过该配置项指定哪些RegionServer节点不在Region的迁移范围之内，目标文件每行代表一个节点，存储格式为host:port。</para></callout>
+						<callout id="co.note.move.thread" arearefs="co.move.thread" ><para>执行迁移操作的并发线程数。</para></callout>
+						<callout id="co.note.move.target" arearefs="co.move.target" ><para>对哪个RegionServer节点上的Region进行迁移。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>将目标文件所记录的Region迁移到对应的RegionServer节点上。</para>
+				<programlistingco>
+					<programlisting>
+hbase org.jruby.Main region_mover.rb 
+  -f /path/to/regions.list <co id="co.load.regions" linkends="co.note.load.regions"/>
+  load 
+  $targetHost:$port <co id="co.load.target" linkends="co.note.load.target"/>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.load.regions" arearefs="co.load.regions" ><para>存储要迁移Region的文件，一般由unload操作生成。</para></callout>
+						<callout id="co.note.load.target" arearefs="co.load.target" ><para>将Region迁移到哪台RegionServer上。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

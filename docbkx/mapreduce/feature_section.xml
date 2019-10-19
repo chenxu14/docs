@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>功能Feature</title>
+	<section>
+		<title>计数器</title>
+		<para>计数器的价值主要在于可以让开发人员以全局的视角来审查job的执行情况，及时做出错误诊断并进行相应处理。Hadoop预定义了很多计数器用来统计与job相关的执行信息，这些计数器大体上可划分成三组，如下所示：</para>
+		
+	</section>
+	<section>
+		<title>Distribute Cache</title>
+		<para>Task在运行期间可能需要额外的第三方资源来执行相关任务，这些资源可能是一些参数配置文件，用来决定任务的执行行为，也可能是一些任务依赖jar，MR应用中，这些资源统一通过DistributeCache来管理。</para>
+		<para>在新API环境下，DistributeCache组件并没有直接暴露给开发人员来使用，而是通过Job的相关方法来间接调用：</para>
+		<para>addCacheFile(URI uri)：添加任务运行依赖的资源文件；</para>
+		<para>setCacheFiles(URI[] files)：设置任务运行依赖的资源文件集合；</para>
+		<para>addCacheArchive(URI uri)：添加任务运行依赖的归档文件；</para>
+		<para>setCacheArchives(URI[] archives)：设置任务运行依赖的归档文件集合；</para>
+		<para>addFileToClassPath(Path file)：将资源文件添加到Task运行环境变量下面；</para>
+		<para>addArchiveToClassPath(Path archive)：将归档文件添加到Task运行环境变量下面；</para>
+		<para>createSymlink()：执行该方法后可像访问本地文件一样来访问DistributeCache中的文件。</para>
+		<tip>
+			<para>以上方法中方法参数只能引向分布式文件系统(如HDFS)，而不能是本地文件，因为Job不处理本地文件上传操作，这样Task节点便访问不到这些文件。</para>
+			<para>DistributeCache除了可以通过Job-API来设置外还可通过hadoop命令参数来指定，参数包括：-files、-archives和-libjars，分别代表资源文件、归档文件和依赖jar。</para>
+		</tip>
+		<para>DistributeCache指定后，可通过JobContext来获取，常用方法有：</para>
+		<para>public Path[] getLocalCacheFiles()：获取缓存的资源文件集合；</para>
+		<para>public Path[] getLocalCacheArchives()：获取缓存的归档文件集合；</para>
+		<para>public Path[] getFileClassPaths()：获取添加到环境变量下的资源文件集合；</para>
+		<para>public Path[] getArchiveClassPaths()：获取添加到环境变量下的归档文件集合；</para>
+	</section>
+</section>

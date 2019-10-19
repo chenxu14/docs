@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Actor模型</title>
+	<section>
+		<title>BlockManagerMasterActor</title>
+		<para>收到相关消息时进行如下回调处理：</para>
+		
+		<para>1.消息类型：RegisterBlockManager</para>
+		<para>传递参数：</para>
+			<para>blockManagerId：</para>
+			<para>maxMemSize：</para>
+			<para>slaveActor：</para>
+		<para>回调处理：</para>
+			<para>根据消息参数构造BlockManagerInfo并注册到Master容器中</para>
+	</section>
+	<section>
+		<title></title>
+	</section>
+</section>

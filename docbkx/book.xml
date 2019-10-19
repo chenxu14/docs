@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<book version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<bookinfo>
+    	<title>Hadoop</title>
+    	<author>
+      		<firstname>陈</firstname>
+      		<surname>旭</surname>
+      		<affiliation>
+        		<address><email>444080606@qq.com</email></address>
+      		</affiliation>
+    	</author>
+    	<copyright>
+      		<year>2013</year>
+      		<holder role="mailto:444080606@qq.com">陈旭</holder>
+    	</copyright>
+    	<releaseinfo>444080606@qq.com</releaseinfo>
+  	</bookinfo>
+	<chapter>
+		<title>common组件</title>
+		<xi:include href="common/rpc_section.xml" />
+		<xi:include href="common/metric_section.xml" />
+		<xi:include href="common/security_section.xml" />
+		<xi:include href="common/io_section.xml" />
+		<xi:include href="common/dev_section.xml" />
+	</chapter>
+	<chapter>
+		<title>HDFS组件</title>
+		<xi:include href="HDFS/architecture_section.xml" />
+		<xi:include href="HDFS/feature_section.xml" />
+		<xi:include href="HDFS/dev_section.xml" />
+	</chapter>
+	<!-- 
+	<chapter>
+		<title>YARN框架</title>
+		<xi:include href="YARN/source_section.xml" />
+		<xi:include href="YARN/component_section.xml" />
+		<xi:include href="YARN/feture_section.xml" />
+		<xi:include href="YARN/function_section.xml" />
+		<xi:include href="YARN/dev_section.xml" />
+	</chapter>
+	 -->
+	<chapter>
+		<title>MapReduce应用</title>
+		<xi:include href="mapreduce/intro_section.xml" />
+		<xi:include href="mapreduce/shuffle_section.xml" />
+		<xi:include href="mapreduce/yarn_section.xml" />
+	</chapter>
+	<chapter>
+		<title>Spark应用</title>
+		<xi:include href="Spark/intro_section.xml" />
+		<xi:include href="Spark/function_section.xml" />
+		<xi:include href="Spark/yarn_section.xml" />
+		<xi:include href="Spark/streaming_section.xml" />
+		<xi:include href="Spark/dev_section.xml" />
+	</chapter>
+	<!-- 
+	<chapter>
+		<title>HBase框架</title>
+		<xi:include href="HBase/architecture_section.xml" />
+		<xi:include href="HBase/function_section.xml" />
+		<xi:include href="HBase/feature_section.xml" />
+		<xi:include href="HBase/dev_section.xml" />
+	</chapter>
+	 -->
+	<chapter>
+		<title>Zookeeper框架</title>
+		<xi:include href="zookeeper/algorithm_section.xml" />
+		<xi:include href="zookeeper/mechanism_section.xml" />
+		<xi:include href="zookeeper/dev_section.xml" />
+	</chapter>
+	<chapter>
+		<title>Kafka框架</title>
+		<xi:include href="kafka/dev_section.xml" />
+	</chapter>
+	<chapter>
+		<title>Hive框架</title>
+		<xi:include href="Hive/intro_section.xml" />
+		<xi:include href="Hive/model_section.xml" />
+		<xi:include href="Hive/service_section.xml" />
+		<xi:include href="Hive/grammar_section.xml" />
+		<xi:include href="Hive/cmd_section.xml" />
+		<xi:include href="Hive/config_section.xml" />
+		<xi:include href="Hive/principle_section.xml" />
+		<xi:include href="Hive/function_section.xml" />
+	</chapter>
+</book>

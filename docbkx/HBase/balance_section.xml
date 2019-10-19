@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>负载均衡</title>
+	<para>Balance的执行过程是通过MasterRpcService的balance方法来触发的，默认情况下HMaster的后台线程(BalancerChore)会每隔300秒执行一次该方法(通过hbase.balancer.period参数)，客户端也可通过如下命令来强制执行：</para>
+	<blockquote><para>hbase_shell> balancer</para></blockquote>
+	<para>方法执行后，会首先在逻辑上进行判断，看当前集群是否满足以下约束条件，从而决定Balance操作是否开启：</para>
+	<orderedlist>
+		<listitem><para>HMaster已经启动并完成初始化操作；</para></listitem>
+		<listitem>
+			<para>集群开启了Balance功能，可通过如下命令开启或关闭</para>
+			<para>hbase_shell> balance_switch true | false</para>
+		</listitem>
+		<listitem><para>集群中没有Region正在进行状态切换，也即之前运行的Balance都已执行完成；</para></listitem>
+		<listitem><para>集群所有存活的RegionServer都运转良好，没有向死亡状态过度。</para></listitem>
+	</orderedlist>
+	<para>满足以上约束条件之后Balancer开始制定执行方案，在0.96版本之前，Balance方案的制定是通过SimpleLoadBalancer类来封装的，而在之后的版本中默认采用StochasticLoadBalancer来实现。</para>
+	<para>StochasticLoadBalancer较比SimpleLoadBalancer提供了更加全面的负载均衡策略，其在计算负载成本时会综合考虑多方面的因素，而不仅仅是基于Region分配的均匀程度来做考量。具体采用哪种实现方案可通过hbase.master.loadbalancer.class参数进行声明，如果是StochasticLoadBalancer，其工作流程大致如下：</para>
+	<para>首先将物理集群的运行状态映射到虚拟集群，然后在虚拟集群上尝试一些Region迁移动作，看这样操作是否会降低集群的负载成本，如果成本没有降低，在将集群恢复到之前的运行状态，否则将虚拟集群的当前状态进行保存。</para>
+	<para>按照上面的操作逻辑对虚拟集群进行反复迭代，直至满足以下约束条件为止：</para>
+	<orderedlist>
+		<listitem>
+			<para>迭代次数达到了以下两个数值中的最小值</para>
+			<para>(1)hbase.master.balancer.stochastic.maxSteps参数值</para>
+			<para>(2)hbase.master.balancer.stochastic.stepsPerRegion * Region数 * RegionServer数</para>
+		</listitem>
+		<listitem><para>迭代总时间达到了hbase.master.balancer.stochastic.maxRunningTime参数值。</para></listitem>
+	</orderedlist>
+	<para>当满足以上任意条件时，均衡器将退出迭代，并根据当前虚拟集群的运行状态来制定最终的负载均衡方案(通过比较其与物理集群的状态差异)。</para>
+	<para>在每次迭代过程中，均衡器主要完成以下两方面的业务逻辑，分别是：为此次迭代选择均衡策略(选择哪个Region做迁移)、对所选择的均衡策略进行成本评估。</para>
+	<orderedlist>
+		<listitem>
+			<para>为每次迭代选择均衡策略</para>
+			<para>均衡策略的制定是通过CandidateGenerator类来封装的，StochasticLoadBalancer对外声明了四种不同的实现类来分别对应以下每一项策略。</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>RandomCandidateGenerator</para>
+					<para>在集群中随机挑选两台RegionServer(RS-a和RS-b)，假设RS-a部署的Region数量大于RS-b，则在RS-a中随机挑选一个Region，将其移动到RS-b，或与RS-b中的其他Region进行交换，执行交换与迁移的比例各占50%。</para>
+				</listitem>
+				<listitem>
+					<para>LoadCandidateGenerator</para>
+					<para>挑选出集群中部署Region数量最多和最少的两台RegionServer(RS-max和RS-min)，在RS-max中随机挑选一个Region，将其移动到RS-min，或与RS-min中的其他Region进行交换，执行交换与迁移的比例同样各占50%。</para>
+				</listitem>
+				<listitem>
+					<para>LocalityBasedCandidateGenerator</para>
+					<para>首先随机挑选一台RegionServer(RS-a)，然后在该RegionServer上随机挑选一个Region，查找除了当前RegionServer，将Region部署到哪台机器上能够最大程度的满足数据本地性要求，并将其作为目标RegionServer(RS-b)，在参照RandomCandidateGenerator的逻辑，将目标Region迁移或交换到RS-b上。</para>
+				</listitem>
+				<listitem>
+					<para>RegionReplicaRackCandidateGenerator</para>
+					<para>如果Region的有些副本与主Region出现在同一个Host或Rack里，从这些副本中随机挑选一个，并迁移或交换到不同的Host/Rack中(迁移与交换的执行比例为1:9)。</para>
+					<para>如果不存在这样的Region，则采用RandomCandidateGenerator做均衡操作。</para>
+				</listitem>
+			</itemizedlist>
+			<para>针对已有的4种均衡策略，StochasticLoadBalancer在每次迭代过程中会随机挑选一种来进行应用。</para>
+		</listitem>
+		<listitem>
+			<para>对所选择的策略进行成本评估</para>
+			<para>有关负载成本的计算主要参考以下几个方面的纬度，并且每项纬度都有自己的权重值：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>Region分配的均匀程度，对应的权重值为500</para>
+					<para>最坏情况：所有Region都分配到同一个RegionServer上；</para>
+					<para>最好情况：每个RegionServer分配数量均等的Region。</para>
+				</listitem>
+				<listitem>
+					<para>需要移动的Region个数，对应的权重值为100</para>
+					<para>最坏情况：需要移动的Region个数为max(集群总Region数 * 1/4, 600)；</para>
+					<para>最好情况：没有Region需要移动。</para>
+					<tip>数值1/4通过hbase.master.balancer.stochastic.maxMovePercent参数来指定；而数值600可通过hbase.master.balancer.stochastic.maxMoveRegions参数来指定(目前存在BUG，参数没有生效)。</tip>
+				</listitem>
+				<listitem>
+					<para>Region数据本地化的程度，对应的权重值为25</para>
+					<para>最坏情况：所有Region都没有满足数据本地性需求；</para>
+					<para>最好情况：所有Region都最大程度的满足了数据本地性需求。</para>
+					<tip>Region数据存放在哪些DataNode上可通过RegionLocationFinder类来查找，其internalGetTopBlockLocation方法返回的DataNode集合是按照Region数据的存储大小来排序的，即排在首位的DataNode所存储的Region数据最多，能够最大程度的满足Region数据本地性的需求。</tip>
+				</listitem>
+				<listitem>
+					<para>表格数据的分散程度，对应的权重值为35</para>
+					<para>最坏情况：所有表格数据都存储在同一个RegionServer上；</para>
+					<para>最好情况：所有表格数据都均匀分散到每一个RegionServer上。</para>
+				</listitem>
+				<listitem>
+					<para>Region副本的host分布情况，对应的权重值为100000</para>
+					<para>最坏情况：针对每个Region，它的所有副本都部署在同一台host机器上；</para>
+					<para>最好情况：每个Region的所有副本都部署在不同的host机器上。</para>
+				</listitem>
+				<listitem>
+					<para>Region副本的rack分布情况，对应的权重值为10000</para>
+					<para>最坏情况：针对每个Region，它的所有副本都部署在同一机架上；</para>
+					<para>最好情况：每个Region的所有副本都部署在不同的机架上。</para>
+				</listitem>
+				<listitem>
+					<para>针对每个RegionServer的读请求分布情况，对应的权重值为5</para>
+					<para>最坏情况：客户端所有的读请求操作都路由到同一台RegionServer上；</para>
+					<para>最好情况：客户端的读请求操作均匀分散到每台RegionServer上。</para>
+				</listitem>
+				<listitem>
+					<para>针对每个RegionServer的写请求分布情况，对应的权重值为5</para>
+					<para>最坏情况：客户端所有的写请求操作都路由到同一台RegionServer上；</para>
+					<para>最好情况：客户端的写请求操作均匀分散到每台RegionServer上。</para>
+				</listitem>
+				<listitem>
+					<para>每台RegionServer的memStore使用情况，对应的权重值为5</para>
+					<para>最坏情况：单个RegionServer的memStore过大，而其他RegionServer的memStore使用量为0；</para>
+					<para>最好情况：每个RegionServer的memStore大小均等。</para>
+				</listitem>
+				<listitem>
+					<para>每台RegionServer的数据量分布情况，对应的权重值为5</para>
+					<para>最坏情况：单个RegionServer管理的数据量过大，其他RegionServer管理的数据量为0；</para>
+					<para>最好情况：每台RegionServer所管理的数据总量均等。</para>
+				</listitem>
+			</itemizedlist>
+			<para>StochasticLoadBalancer针对每项纬度都声明了CostFunction实现类用于计算该纬度对应的成本，在将成本值乘以权重，并将所有纬度的计算结果相加便可计算出此次迭代的最终成本。</para>
+		</listitem>
+	</orderedlist>
+	<para>最终的均衡方案制定好以后，将其传递给AssignmentManager进行处理，通过它来完成Region物理层面的迁移。</para>
+	<section>
+		<title>配置参数</title>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>有关负载均衡操作的配置参数如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>hbase.master.loadbalancer.class</para>
+						<para>采用的LoadBalancer实现类，默认为org.apache.hadoop.hbase.master.balancer.StochasticLoadBalancer。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.loadbalance.bytable</para>
+						<para>负载均衡操作是针对表级别来做还是针对RegionServer级别来做，默认为false，表示针对RegionServer级别。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.balancer.tablesOnMaster</para>
+						<para>通过该参数来指定将哪些表格的region部署在HMaster上(参考HBASE-10923)。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.balancer.period</para>
+						<para>balance操作的执行周期，默认为300秒。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.balancer.max.balancing</para>
+						<para>Balance的执行过程不能超过该时间阀值(不包括制定均衡计划的时间)，默认与hbase.balancer.period参数值相同，即不能大于Balance的执行周期。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regions.slop</para>
+						<para>默认值为0.2，通过该参数来判断是否有必要对目标集群执行负载均衡操作，判断逻辑如下：</para>
+						<para>首先计算出平均每台机器应部署多少个Region</para>
+						<blockquote><para>average = numRegions/numServers</para></blockquote>
+						<para>然后看每台机器所部署的Region数是否在如下区间范围内：</para>
+						<blockquote><para>[floor(average * (1 - slop)), ceil(average * (1 + slop))]</para></blockquote>
+						<para>如果是则认为集群没有必要执行负载均衡操作。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>stochastic负载均衡器的相关配置如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.maxMoveRegions</para>
+						<para>每次均衡操作最多移动多少个Region，默认值为600。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.stepsPerRegion</para>
+						<para>用于计算均衡方案的迭代次数，默认值为800。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.maxSteps</para>
+						<para>用于指定均衡方案的最大迭代次数，默认值为1000000。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.maxRunningTime</para>
+						<para>用于指定均衡方案的最长制定时间，默认值为30秒。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.regionCountCost</para>
+						<para>在计算负载成本时，针对Region分配均匀程度的权重值，默认值为500。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.moveCost</para>
+						<para>在计算负载成本时，针对Region移动数量的权重值，默认为100。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.localityCost</para>
+						<para>在计算负载成本时，针对Region数据本地化程度的权重值，默认值为25。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.tableSkewCost</para>
+						<para>在计算负载成本时，针对表格数据分散程度的权重值，默认值为35。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.regionReplicaHostCostKey</para>
+						<para>在计算负载成本时，针对Region副本host分布情况的权重值，默认值为100000。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.regionReplicaRackCostKey</para>
+						<para>在计算负载成本时，针对Region副本rack分布情况的权重值，默认值为10000。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.readRequestCost</para>
+						<para>在计算负载成本时，针对RegionServer读请求分布情况的权重值，默认值为5。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.writeRequestCost</para>
+						<para>在计算负载成本时，针对RegionServer写请求分布情况的权重值，默认值为5。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.memstoreSizeCost</para>
+						<para>在计算负载成本时，针对RegionServer中memStore使用情况的权重值，默认值为5。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.master.balancer.stochastic.storefileSizeCost</para>
+						<para>在计算负载成本时，针对RegionServer数据量分布情况的权重值，默认值为5。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+		</itemizedlist>
+	</section>
+	<section>
+		<title>性能调优</title>
+		<orderedlist>
+			<listitem>
+				<para>修改分组维度的负载均衡策略，将表粒度改成RS粒度</para>
+				<para>集群启用rsgroup特性之后，可通过balance_rsgoup操作来对指定的分组执行负载均衡，但是均衡策略却是以表粒度来进行的，如果表格数量非常庞大，则需要耗费很长时间来构建每一个表格的均衡计划。因此可以将操作粒度调整为RS级别，以此来降低balanceCluster的执行次数，使均衡操作能够尽早触发。</para>
+				<para>核心的代码补丁逻辑如下：</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/rsgroup/RSGroupAdminServer.java
+  public boolean balanceRSGroup(String groupName) throws IOException {
+    ...
+-   //We balance per group instead of per table
+-   List&lt;RegionPlan> plans = new ArrayList&lt;>();
+-   for(Map.Entry&lt;TableName, Map&lt;ServerName, List&lt;RegionInfo>>> tableMap:
+-       getRSGroupAssignmentsByTable(groupName).entrySet()) {
+-     LOG.info("Creating partial plan for table " + tableMap.getKey() + ": "
+-         + tableMap.getValue());
+-     List&lt;RegionPlan> partialPlans = balancer.balanceCluster(tableMap.getValue()); <co id="co.balancer.table" linkends="co.note.balancer.table"/>
+-     LOG.info("Partial plan for table " + tableMap.getKey() + ": " + partialPlans);
+-     if (partialPlans != null) {
+-       plans.addAll(partialPlans);
+-     }
+-   }
++   // We balance per group instead of per table
++   List&lt;RegionPlan> plans = balancer.balanceCluster(getAssignmentsByGroup(groupName)); <co id="co.balancer.rs" linkends="co.note.balancer.rs"/>
+    long startTime = System.currentTimeMillis();
+    ...
+  }
+  ...
+-  private Map&lt;TableName, Map&lt;ServerName, List&lt;RegionInfo>>>
+-      getRSGroupAssignmentsByTable(String groupName) throws IOException {
+-    Map&lt;TableName, Map&lt;ServerName, List&lt;RegionInfo>>> result = Maps.newHashMap();
++  private Map&lt;ServerName, List&lt;RegionInfo>> getAssignmentsByGroup(String groupName)
++      throws IOException {
++    Map&lt;ServerName, List&lt;RegionInfo>> result = Maps.newHashMap();
+     RSGroupInfo rsGroupInfo = getRSGroupInfo(groupName);
+-    Map&lt;TableName, Map&lt;ServerName, List&lt;RegionInfo>>> assignments = Maps.newHashMap();
+-    for(Map.Entry&lt;RegionInfo, ServerName> entry:
+-        master.getAssignmentManager().getRegionStates()
+-        .getRegionAssignments().entrySet()) {
+-      TableName currTable = entry.getKey().getTable();
+-      ServerName currServer = entry.getValue();
+-      RegionInfo currRegion = entry.getKey();
+-      if (rsGroupInfo.getTables().contains(currTable)) {
+-        assignments.putIfAbsent(currTable, new HashMap&lt;>());
+-        assignments.get(currTable).putIfAbsent(currServer, new ArrayList&lt;>());
+-        assignments.get(currTable).get(currServer).add(currRegion);
+-      }
+-    }
+-
+-    Map&lt;ServerName, List&lt;RegionInfo>> serverMap = Maps.newHashMap();
++    Set&lt;Address> groupServers = rsGroupInfo.getServers();
++    RegionStates states = master.getAssignmentManager().getRegionStates();
+     for(ServerName serverName: master.getServerManager().getOnlineServers().keySet()) {
+-      if(rsGroupInfo.getServers().contains(serverName.getAddress())) {
+-        serverMap.put(serverName, Collections.emptyList());
+-      }
+-    }
+-
+-    // add all tables that are members of the group
+-    for(TableName tableName : rsGroupInfo.getTables()) {
+-      if (assignments.containsKey(tableName)) {
+-        result.put(tableName, new HashMap&lt;>());
+-        result.get(tableName).putAll(serverMap);
+-        result.get(tableName).putAll(assignments.get(tableName));
+-        LOG.debug("Adding assignments for " + tableName + ": " +
+-            assignments.get(tableName));
++      if(groupServers.contains(serverName.getAddress())) { // belong to our group
++        List&lt;RegionInfo> regions = new ArrayList&lt;RegionInfo>();
++        regions.addAll(states.getServerNode(serverName).getRegionInfoList());
++        result.put(serverName, regions);
+       }
+     }
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.balancer.table" arearefs="co.balancer.table"><para>针对每一个表格都需要执行一遍balanceCluster来构建该表格的均衡计划，而balanceCluster操作非常耗时；</para></callout>
+						<callout id="co.note.balancer.rs" arearefs="co.balancer.rs"><para>将表粒度的均衡计划调整成RS粒度。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>手动触发balancer逻辑时忽略比较耗时的成本计算逻辑，只考虑Region倾斜度</para>
+				<para>HBase负载均衡器原生自带了很多与成本相关的功能计算函数，其中有很多函数是以当前每个Region的负载情况来做考量的(比如读写请求数，memstore大小等等)。如果集群的Region数量非常庞大，则需要耗费很长的时间来统计这些Region的均衡成本。因此，在一些特定的应用场景下(比如手动执行balance_rsgroup命令来触发balance逻辑)，我们可以先临时禁用掉这些与Region负载相关的成本计算函数，而只考虑Region倾斜度，以便Region在各RS之间能够做到快速均衡，待Region数量均衡以后在重新启用这些被忽略的函数。</para>
+				<para>核心的代码补丁逻辑如下：</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/master/balancer/StochasticLoadBalancer.java
+  private CostFunction[] costFunctions;
++ private CostFunction[] simpleFunctions;
+  ...
+  public synchronized void setConf(Configuration conf) {
+    ...
+    costFunctions = new CostFunction[]{
+    ...
++   simpleFunctions = new CostFunction[] { <co id="co.balancer.costignore" linkends="co.note.balancer.costignore"/>
++     new RegionCountSkewCostFunction(conf, groupSuffix),
++     new PrimaryRegionCountSkewCostFunction(conf, groupSuffix),
++     new MoveCostFunction(conf, groupSuffix),
++     regionReplicaHostCostFunction,
++     regionReplicaRackCostFunction
++   };
+    ...
+  }
+  ...
+  public synchronized List&lt;RegionPlan> balanceCluster(Map&lt;ServerName,
+      List&lt;HRegionInfo>> clusterState, boolean mandatory) {
+    ...
+    long startTime = EnvironmentEdgeManager.currentTime();
+-   initCosts(cluster);
++   initCosts(cluster, mandatory);
+    ...
+-   double currentCost = computeCost(cluster, Double.MAX_VALUE);
++   double currentCost = computeCost(cluster, Double.MAX_VALUE, mandatory); <co id="co.balancer.mandatory" linkends="co.note.balancer.mandatory"/>
+    LOG.info("start StochasticLoadBalancer.balancer, initCost="
+        + currentCost + ", functionCost="
+-       + functionCost());
++       + functionCost(mandatory));
+    ...
+    for (step = 0; step &lt; computedMaxSteps; step++) {
+      int generatorIdx = RANDOM.nextInt(candidateGenerators.length);
+-     CandidateGenerator p = candidateGenerators[generatorIdx];
++     CandidateGenerator p = mandatory ? loadCandidateGenerator
++         : candidateGenerators[generatorIdx]; <co id="co.balancer.candidate" linkends="co.note.balancer.candidate"/>
+      ...
+      cluster.doAction(action);
+-     updateCostsWithAction(cluster, action);
++     updateCostsWithAction(cluster, action, mandatory);
+-     newCost = computeCost(cluster, currentCost);
++     newCost = computeCost(cluster, currentCost, mandatory);
+      if (newCost &lt; currentCost) {
+        ...
+-       updateCostsWithAction(cluster, undoAction);
++       updateCostsWithAction(cluster, undoAction, mandatory);
+      }
+    ...
+  }
+  ...
+- protected double computeCost(Cluster cluster, double previousCost) {
++ protected double computeCost(Cluster cluster,double previousCost,boolean mandatory){
+    double total = 0;
+-   for (CostFunction c:costFunctions) {
++   for (CostFunction c : mandatory ? simpleFunctions : costFunctions) {
+      if (c.getMultiplier() &lt;= 0) {
+  ...
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.balancer.costignore" arearefs="co.balancer.costignore"><para>封装最基本的成本计算函数，与Region负载不相关的；</para></callout>
+						<callout id="co.note.balancer.mandatory" arearefs="co.balancer.mandatory"><para>执行成本计算时需要做如下考量，如果负载均衡操作是手动触发的(即mandatory为true)，忽略与Region负载相关的成本计算逻辑；</para></callout>
+						<callout id="co.note.balancer.candidate" arearefs="co.balancer.candidate"><para>如果负载均衡操作是手动触发的，只通过LoadCandidateGenerator进行Region筛选(挑选出集群中部署Region数量最多和最少的两台RegionServer进行Region迁移)。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

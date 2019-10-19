@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>HLog存储格式</title>
+	<para>在HBase中，HLog负责存储每个HStore的写操作记录，这样当RegionServer宕机时，可根据这些写操作记录来还原出历史数据，从而防止了memstore丢失数据的情况发生。每个HLog是由多个HLog.Entry实体构成的，其存储结构大致如下：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/hlog-architecture.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>其中每个HLog.Entry实体由两部分组成，分别是HLogKey和WALEdit，HLogKey封装了如下数据信息：</para>
+	<itemizedlist make='bullet'>
+		<listitem><para>encodedRegionName：编码后的Region名称；</para></listitem>
+		<listitem><para>tablename：表格名称；</para></listitem>
+		<listitem><para>logSeqNum：记录编号，HLog.Entry在HLog中的唯一标识，按操作先后顺序增长；</para></listitem>
+		<listitem><para>writeTime：数据写入时间；</para></listitem>
+		<listitem><para>clusterIds：进行replication备份的集群id。</para></listitem>
+	</itemizedlist>
+	<para>而WALEdit由多个KeyValue实体构成，每个KeyValue实体封装了表格的单元格信息。</para>
+	<section>
+			<title>HLog压缩</title>
+			<para>HLog的压缩功能是通过hbase.regionserver.wal.enablecompression参数来开启的(默认为false)，其压缩过程采用字典压缩算法进行实现，原理如下：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/hlog-compress.png"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>由于'this','is'和'test'在字典中都存在，因此压缩数据直接使用它们在字典中的索引(1、2和3)，以此来降低数据的存储容量(由于索引为short类型而非string，这样会占用更少的字节数)；而如果有些词汇不存在于字典中(比如a)，则直接将其内容输出至压缩数据并加入字典，这样等到下次遇到该词汇时便可直接使用该词汇对应的索引作为输出。</para>
+			<para>字典容量并不是无限扩充的，可通过指定初始容量来限制其大小，然后采用LRU算法来保存最新最近使用的词汇(字典是呈链表结构存储的，最近最新使用的数据保存至头部，久不使用的数据保存至尾部)。</para>
+			<para>HLog共对外声明了5个字典集合，统一封装至CompressionContext对象中，每个字典的作用及初始容量如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>regionDict：存储Region名称的字典，初始容量32767；</para></listitem>
+				<listitem><para>tableDict：存储表格名称的字典，初始容量32767；</para></listitem>
+				<listitem><para>familyDict：存储列簇名称的字典，初始容量127；</para></listitem>
+				<listitem><para>qualifierDict：存储column名称的字典，初始容量127；</para></listitem>
+				<listitem><para>rowDict：存储rowkey名称的字典，初始容量32767。</para></listitem>
+			</itemizedlist>
+			<para>按照每个字典容量为32767来计算，假设每个词汇最大为100字节，则字典数据在最坏的情况下会占用32767 * 5 * 100 = ~16MB内存。</para>
+			<para>每个字典的存储是通过LRU算法来实现的，实现类为LRUDictionary，其内部封装了BidirectionalLRUMap数据结构来维护每一个字典的词汇信息，声明方法如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>addEntry添加新词汇</para>
+					<para>首先判断字典容量是否溢出，若没溢出直接添加词汇到字典集合的首部，否则先删除字典尾部的词汇然后在添加。</para>
+				</listitem>
+				<listitem>
+					<para>findEntry查找某个单词的索引值</para>
+					<para>如果词汇在字典中存在，返回其索引值，否则返回-1，然后将该词汇加入到字典。</para>
+				</listitem>
+				<listitem>
+					<para>getEntry获取指定索引对应的词汇。</para>
+				</listitem>
+			</itemizedlist>
+	</section>
+	
+	<section>
+		<title>HLog读写</title>
+		<para>早期的HLog是使用SequenceFile进行持久化存储的，为此HLogKey实现了WritableComparable接口，而WALEdit实现了Writable接口，可分别通过其对外声明的write和readFields方法来完成信息实体的序列化和反序列化操作。然而从0.95版本之后，HBase改变了这一实现，默认采用protobuf作为HLogKey的序列化和反序列化工具，而针对WALEdit实体使用hbase.regionserver.wal.codec进行编码及解码操作。</para>
+		<orderedlist>
+			<listitem>
+				<para>HLogKey的序列化存储</para>
+				<para>消息内容使用WALKey进行封装，具体的protocol定义如下：</para>
+				<programlisting>
+message WALKey {
+   required bytes encoded_region_name = 1;
+   required bytes table_name = 2;
+   required uint64 log_sequence_number = 3;
+   required uint64 write_time = 4;
+   /*
+   This parameter is deprecated in favor of clusters which 
+   contains the list of clusters that have consumed the change.
+   It is retained so that the log created by earlier releases (0.94) 
+   can be read by the newer releases.
+   */
+   optional UUID cluster_id = 5 [deprecated=true];
+
+   repeated FamilyScope scopes = 6;
+   optional uint32 following_kv_count = 7;
+
+   /*
+   This field contains the list of clusters that have
+   consumed the change
+   */
+   repeated UUID cluster_ids = 8;
+
+   optional uint64 nonceGroup = 9;
+   optional uint64 nonce = 10;
+}		
+				</programlisting>
+				<para>可通过HLogKey对外声明的readFieldsFromPb方法从protobuf消息中解析出HLogKey数据，还可通过getBuilder方法获取WALKey.Builder实例，以便由HLogKey信息构造出WALKey实体，在通过其writeDelimitedTo方法将信息写入到输出流。数据在读取和写入的过程中可采用字典压缩方法进行数据压缩(参考HLog压缩)，默认的压缩器为BaosAndCompressor，解压缩器为ByteStringUncompressor，两个对象全部声明在WALCellCodec实例中。</para>
+			</listitem>
+			<listitem>
+				<para>WALEdit的序列化存储</para>
+				<para>hbase对外声明了hbase.regionserver.wal.codec属性用来设置WALEdit的编码器及解码器，默认的实现类为org.apache.hadoop.hbase.regionserver.wal.WALCellCodec。在启用hbase.regionserver.wal.enablecompression的情况下，默认采用CompressedKvEncoder作为编码器，CompressedKvDecoder作为解码器，编码逻辑如下：</para>
+				<para>对WALEdit中的每一个KeyValue执行如下编码操作：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先写入key值的长度，然后写入value值的长度；</para></listitem>
+					<listitem>
+						<para>然后采用字典压缩的办法分别写入rowkey、columnFamily和column信息，具体写入流程如下：</para>
+						<para>首先通过相应的字典来判断要写入的数据在字典中是否存在(通过LRUDictionary的findEntry方法)，若存在直接写入数据在字典中的索引；</para>
+						<para>否则首先写入-1(表示该数据在字典中并不存在)，然后在写入数据的长度，最后写入数据内容。</para>
+					</listitem>
+					<listitem><para>写入数据的生成时间和Tag信息。</para></listitem>
+				</itemizedlist>
+				<para>解码逻辑如下：</para>
+				<para>按照WALEdit中的每一个KeyValue的编码逻辑依次反向执行解码操作。</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先读取出key值的长度和value值的长度；</para></listitem>
+					<listitem>
+						<para>采用字典解压缩方法从输入流中读取出rowkey、columnFamily和column信息，具体方法如下：</para>
+						<para>首先读取索引信息，如果索引不为-1表示要读取的数据在字典中已经存在，直接从字典中取出该索引对应的单词；</para>
+						<para>否则直接从输入流中读取数据，再将读取出的数据加入字典，这样字典集合随着数据的解压缩操作逐步构建，最终一定与执行数据压缩时的字典相同。</para>
+					</listitem>
+					<listitem><para>读取时间戳及Tag信息。</para></listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>写入细节</title>
+			<para>HLog数据写入可划分成两个阶段：</para>
+			<blockquote>
+				<para>第一阶段：通过执行目标WAL的append方法将日志记录写入HDFS缓冲区。</para>
+				<para>第二阶段：通过执行目标WAL的sync方法来flush缓冲区中的数据到磁盘文件。</para>
+			</blockquote>
+			<para>在0.98版本之前，两个阶段放在同一个线程中进行处理，不好的一点是如果HBase的写操作非常频繁将会产生大量的sync操作，而sync操作非常耗时。因此在0.98版之后，append和sync分别采用不同的线程来分别进行处理(异步方式)。针对每一个sync请求，服务端并不会马上立刻执行，而是先将其缓存下来，待sync请求达到一个批次，在统一处理，以此来降低sync的执行频率，从而提升HLog的写入效率(详细参考HBASE-8755)。</para>
+			<para>在异步实现方式中主要采用了RingBuffer消息队列，通过它来存储每一个sync和append请求。与传统队列(如BlockingQueue)不同的地方是，RingBuffer采用环形结构进行存储，当队列写满之后将会进入下一个轮回，以此来覆盖掉以前的旧数据。同时，RingBuffer还支持对目标消息的批处理功能(代码参考com.lmax.disruptor.BatchEventProcessor线程的实现)，其会周期性的执行SequenceBarrier的waitFor方法来获取当前批次的大小(每个批次所包含的消息数量由当时的并发程度来决定)，然后将当前批次的每个消息分别发送给每一个EventHandler(消费者)进行处理，并通过endOfBatch参数来标识目标消息是否为当前批次的最后一条。批量sync的功能便可借助于该特性来实现(代码逻辑可参考RingBufferEventHandler类的实现，其对外实现了RingBuffer的EventHandler接口)。</para>
+			<para>RingBufferEventHandler在整个日志写入的过程中充当消费者的角色，负责消费RingBuffer队列中的内容，当有消息到达时，首先判断出消息类型(代码逻辑参考其onEvent方法)，然后根据不同的类型进行针对性处理。</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>如果是append消息，从消息内容中解析出FSWALEntry实例，然后通过ProtobufLogWriter类的append方法将其写入HDFS缓冲区。</para></listitem>
+				<listitem>
+					<para>如果是sync消息，从消息内容中解析出SyncFuture实体，并将其赋予syncFutures集合，同时判断HLog是否已经达到sync操作的触发阈值。</para>
+					<para>(1)目标消息是当前批次中的最后一条消息(即onEvent方法中endOfBatch参数值为true)。</para>
+					<para>(2)执行sync操作的Handler数量已达hbase.regionserver.handler.count参数阈值。</para>
+					<tip>Handler线程执行sync操作以后将会进入阻塞状态，待sync处理结束后才将其唤醒(代码逻辑参考FSHLog类的publishSyncThenBlockOnCompletion方法)，因此，为了防止所有的Handler全部阻塞需进行条件2中的判断。</tip>
+					<para>如果没有则将其缓存下来，待条件满足后在进行统一处理，否则开始执行如下操作：</para>
+					<orderedlist>
+						<listitem>
+							<para>将当前缓存的所有SyncFuture实体赋予SyncRunner线程(通过调用其offer方法)，以便其执行sync操作。</para>
+							<para>SyncRunner线程是在构造RingBufferEventHandler时启动的，数量通过hbase.regionserver.hlog.syncer.count参数控制，线程启动后RingBufferEventHandler会基于round-robin的方式来依次调用每一个SyncRunner，来处理目标SyncFuture集合。</para>
+							<tip>SyncFuture是参考java.util.concurrent.Future来设计的，Handler执行sync操作以后会返回该对象来等待sync执行结束(通过调用其get方法)，一旦sync操作执行完成，SyncRunner会通知每一个已注册的SyncFuture(通过调用其done方法)，以便唤醒其所在的Handler线程。</tip>
+							<para>SyncRunner接受到SyncFuture集合以后，开始执行sync处理(通过调用ProtobufLogWriter类的sync方法)，无论成功与否都会对当前批次的所有SyncFuture进行通知，以便唤醒其所在的Handler线程。如果sync执行失败HBase会开启新的HLog进行数据写入，并将以前的HLog关闭掉(代码逻辑参考requestLogRoll方法)。</para>
+						</listitem>
+						<listitem>
+							<para>等待sync操作执行结束</para>
+							<para>在SyncRunner执行sync的过程中，RingBufferEventHandler将会处于等待状态，直至sync运行结束(无论成功还是失败)，并且所有的SyncFuture都被唤醒，然后开始进入下一个批次的处理(代码逻辑参考attainSafePoint方法)。</para>
+							<tip>在1.2版本之前，attainSafePoint方法存在BUG，由于在while循环中没有加入isOutstandingSyncs判断，导致RingBufferEventHandler线程卡住(当有sync执行失败的时候)，从而造成append和sync消息无法消费的情况，级联造成FlushHandler线程阻塞，使后台不断打印“requesting flush for region”日志，详细参考HBASE-14317</tip>
+						</listitem>
+					</orderedlist>
+				</listitem>
+			</itemizedlist>
+		</section>
+		<section>
+			<title>扇出写入</title>
+		</section>
+		<section>
+			<title>慢节点bypass方案</title>
+			<para>WAL的写入效率直接关系到HBase的写吞吐能力，如果集群出现了DN慢节点则有可能导致服务整体写入效率低下并造成客户端访问大量延迟。因此有必要引入DN慢节点bypass机制，以便在执行WAL写入操作时绕过这些慢节点的选取。慢节点的发现机制可通过缩短WAL的sync时间来解决，当sync执行超时失败时会触发WAL的回滚操作，回滚过程中便可将之前写入pipeline所包含的DN屏蔽掉，这样NN在执行新的选块操作时便可以绕过这些有问题的DN，从而避免单个慢节点拖慢整体写入进度的情况发生。</para>
+			<para>核心的补丁修复逻辑如下：</para>
+			<programlistingco>
+				<programlisting>
++++ org/apache/hadoop/hbase/io/asyncfs/FanOutOneBlockAsyncDFSOutput.java
+   FanOutOneBlockAsyncDFSOutput(Configuration conf, FSUtils fsUtils ...
+     ...
+     this.state = State.STREAMING;
+-    setupReceiver(conf.getInt(DFS_CLIENT_SOCKET_TIMEOUT_KEY, READ_TIMEOUT));
++    setupReceiver(conf.getInt(AbstractFSWAL.WAL_SYNC_TIMEOUT_MS, <co id="co.bypass.timeout" linkends="co.note.bypass.timeout"/>
++        AbstractFSWAL.DEFAULT_WAL_SYNC_TIMEOUT_MS));
+   }
+
++++ org/apache/hadoop/hbase/regionserver/LogRoller.java
+ public class LogRoller extends HasThread implements Closeable {
+   ...
+-  private final ConcurrentHashMap&lt;WAL, Boolean> walNeedsRoll = new ConcurrentHashMap&lt;>();
++  private final ConcurrentHashMap&lt;WAL, Pair&lt;Boolean,Boolean>> walNeedsRoll =
++      new ConcurrentHashMap&lt;WAL, Pair&lt;Boolean, Boolean>>();
+   ...
+   public void addWAL(final WAL wal) {
+-    if (null == walNeedsRoll.putIfAbsent(wal, Boolean.FALSE)) {
++    if (null == walNeedsRoll.putIfAbsent(wal,
++        new Pair&lt;Boolean,Boolean>(Boolean.FALSE, Boolean.FALSE))) {
+       wal.registerWALActionsListener(new WALActionsListener() {
+         @Override
+-        public void logRollRequested(boolean lowReplicas) {
+-          walNeedsRoll.put(wal, Boolean.TRUE);
++        public void logRollRequested(boolean lowReplicas, boolean syncFaild) { <co id="co.bypass.rollreq" linkends="co.note.bypass.rollreq"/>
++          Pair&lt;Boolean,Boolean> walInfo = walNeedsRoll.get(wal);
++          walInfo.setFirst(Boolean.TRUE);
++          if (syncFaild) {
++            walInfo.setSecond(Boolean.TRUE);
++          }
+     ...
+   }
+   ...
+   public void run() {
+     ...
+     rollLock.lock(); // FindBugs UL_UNRELEASED_LOCK_EXCEPTION_PATH
+     try {
+       this.lastrolltime = now;
+-      for (Iterator&lt;Entry&lt;WAL, Boolean>> iter = walNeedsRoll.entrySet().iterator(); iter
+-          .hasNext();) {
++      for (Iterator&lt;Entry&lt;WAL, Pair&lt;Boolean,Boolean>>> iter =
++          walNeedsRoll.entrySet().iterator(); iter.hasNext();) {
+-        Entry&lt;WAL, Boolean> entry = iter.next();
++        Entry&lt;WAL, Pair&lt;Boolean,Boolean>> entry = iter.next();
+         final WAL wal = entry.getKey();
++        Pair&lt;Boolean, Boolean> walInfo = entry.getValue();
++        boolean syncFailed = walInfo.getSecond().booleanValue();
+         // Force the roll if the logroll.period is elapsed or if a roll was requested.
+         // The returned value is an array of actual region names.
+         try {
+-          final byte[][] regionsToFlush =
+-              wal.rollWriter(periodic || entry.getValue().booleanValue());
+-          walNeedsRoll.put(wal, Boolean.FALSE);
++          final byte[][] regionsToFlush = wal.rollWriter(periodic ||
++              walInfo.getFirst().booleanValue() || syncFailed, syncFailed); <co id="co.bypass.syncfail" linkends="co.note.bypass.syncfail"/>
++          walInfo.setFirst(Boolean.FALSE);
+           if (regionsToFlush != null) {
+     ...
+   }
+
+
++++ org/apache/hadoop/hbase/regionserver/wal/AbstractFSWAL.java
+   @Override
+-  public byte[][] rollWriter(boolean force) throws FailedLogCloseException, IOException {
++  public byte[][] rollWriter(boolean force, boolean syncFailed)
++      throws FailedLogCloseException, IOException {
+     ...
+     if (!force &amp;&amp; this.writer != null &amp;&amp; this.numEntries.get() &lt;= 0) {
++    if (!force &amp;&amp; !syncFailed &amp;&amp; (this.writer != null &amp;&amp; this.numEntries.get() &lt;= 0)) {
+       ...
+     try (TraceScope scope = TraceUtil.createTrace("FSHLog.rollWriter")) {
+       ...
+-      W nextWriter = this.createWriterInstance(newPath);
++      W nextWriter = this.createWriterInstance(newPath, syncFailed ? oldPath : null); <co id="co.bypass.oldpath" linkends="co.note.bypass.oldpath"/>
+       ...
+     }
+
++++ org/apache/hadoop/hbase/io/asyncfs/FanOutOneBlockAsyncDFSOutputHelper.java
+   private static List&lt;Future&lt;Channel>> connectToDataNodes(Configuration conf...
+     ...
+-    int timeoutMs = conf.getInt(DFS_CLIENT_SOCKET_TIMEOUT_KEY, READ_TIMEOUT);
++    int timeoutMs = conf.getInt(AbstractFSWAL.WAL_SYNC_TIMEOUT_MS, <co id="co.bypass.connect2dn" linkends="co.note.bypass.connect2dn"/>
++        AbstractFSWAL.DEFAULT_WAL_SYNC_TIMEOUT_MS);
+     ...
+   }
+   ...
+-  private static FanOutOneBlockAsyncDFSOutput createOutput(
+-      DistributedFileSystem dfs, String src,
++  private static FanOutOneBlockAsyncDFSOutput createOutput(
++      DistributedFileSystem dfs, String src, Path oldPath,
+     ...
+     DatanodeInfo[] excludesNodes = EMPTY_DN_ARRAY;
++    if (oldPath != null) { <co id="co.bypass.slowdn" linkends="co.note.bypass.slowdn"/>
++      String oldPathStr = oldPath.toUri().getPath();
++      long len = namenode.getFileInfo(oldPathStr).getLen();
++      for(LocatedBlock block : namenode.getBlockLocations(oldPathStr,
++          Math.max(0, len - 1), len).getLocatedBlocks()) {
++        for(DatanodeInfo dn : block.getLocations()) {
++          excludesNodes = ArrayUtils.add(excludesNodes, dn);
++        }
++      }
++    }
+     ...
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.bypass.timeout" arearefs="co.bypass.timeout"><para>引入新的配置项用来决定WAL#sync操作的超时时间；</para></callout>
+					<callout id="co.note.bypass.rollreq" arearefs="co.bypass.rollreq"><para>修改WALActionsListener#logRollRequested接口方法，引入syncFaild参数用来标识回滚操作是否因sync失败引起；</para></callout>
+					<callout id="co.note.bypass.syncfail" arearefs="co.bypass.syncfail"><para>执行WAL回滚操作并通过syncFailed来标识回滚是否由sync失败引起，以便AbstractFSWAL进行接下来的处理；</para></callout>
+					<callout id="co.note.bypass.oldpath" arearefs="co.bypass.oldpath"><para>如果sync操作执行失败将WAL的当前路径传递给createWriterInstance，以便执行WAL回滚操作时根据该路径来判断有问题的DN；</para></callout>
+					<callout id="co.note.bypass.connect2dn" arearefs="co.bypass.connect2dn"><para>在连接DN向目标块写数据的时候同样采用新的配置项来决定目标操作的超时时间；</para></callout>
+					<callout id="co.note.bypass.slowdn" arearefs="co.bypass.slowdn"><para>将之前sync失败的Block所在DN加入到excludesNodes集合，以便WAL回滚过程中，NN执行选块逻辑时绕过这些DN(只针对当前WAL有效)。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>完整的补丁内容可参考：https://github.com/apache/hbase/pull/205/files</para>
+		</section>
+		<section>
+			<title>多HLog并发写入</title>
+			<para>当HLog开启过多时，如果RS意外宕机，会在ZK的/hbase/splitWALs目录下创建大量的子节点，有可能超过ZK的默认存储上限，抛出java.io.IOException: Packet len4461526 is out of range异常</para>
+		</section>
+	</section>
+	<section>
+		<title>HLog回滚</title>
+		<para>在日志写入正常的情况下，HLog的回滚通过两种阀值来控制，分别是时间和大小。默认情况下HLog会每隔一小时回滚一次，控制参数为hbase.regionserver.logroll.period，或者当大小达到${hbase.regionserver.hlog.blocksize} * ${hbase.regionserver.logroll.multiplier} 时，日志也会进行回滚。而在不正常的情况下，如果对HLog执行sync失败，则会立刻回滚</para>
+		<para>回滚的目的是为了便于清理memstore已经flush过的遗留日志，来防止日志数据的持续增长，回滚逻辑是通过LogRoller线程来开启的，其对内实现了WALActionsListener接口，在构造HLog时可通过registerWALActionsListener方法将其注册，线程的工作流程大致如下：</para>
+		<orderedlist>
+			<listitem><para>首先生成一个全新的HLog文件；</para></listitem>
+			<listitem><para>然后通知所有的WALActionsListener监听对象，调用其preLogRoll方法；</para></listitem>
+			<listitem><para>接着开启新HLog的Writer流(0.95版本后默认使用ProtobufLogWriter)，并关闭之前的Writer；</para></listitem>
+			<listitem><para>继续通知WALActionsListener监听对象，调用其postLogRoll方法；</para></listitem>
+			<listitem>
+				<para>最后清理无用的、已经过期了的HLog文件(其记录内容对应的memstore数据已全部执行了flush操作)。</para>
+				<para>Hlog对外声明了如下数据结构用于存储seqNum相关信息(seqNum相当于HLog.Entry的唯一标识，按照时间顺序进行排列，逐渐递增)：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>oldestUnflushedSeqNums：记录每个未flush的Region最近一条操作日志的seqNum；</para></listitem>
+					<listitem><para>oldestFlushingSeqNums：记录每个Region在执行flush操作时的最大seqNum；</para></listitem>
+					<listitem><para>latestSequenceNums：记录当前最新的HLog文件中，每个Region最大的seqNum(最新的数据)；</para></listitem>
+					<listitem><para>hlogSequenceNums：存储结构为&lt;Path, Map&lt;byte[], Long>>，记录指定HLog文件中，每个Region的最大seqNum。</para></listitem>
+				</itemizedlist>
+				<para>如果HLog中每个Region的最大seqNum(从hlogSequenceNums中读取)均小于其最后一次执行flush操作时的seqNum(从oldestFlushingSeqNums中读取)，则说明该HLog已经过期，可以删除，将其拷贝到/hbase/oldWALs目录下，并对WALActionsListener进行通知。</para>
+			</listitem>
+			<listitem>
+				<para>如果执行回滚操作以后，已有的HLog文件数量大于hbase.regionserver.maxlogs(默认为32)，则HBase会选择最老的HLog文件，对其所记录的Region执行flush操作，以便于后期对该HLog进行清理，防止HLog数量的过快增长。</para>
+				<para>判断Region是否需要flush的方法如下：如果文件中记录的某个Region的最大seqNum(从hlogSequenceNums中读取)不小于memstore中该Region的最大seqnum(从oldestUnflushedSeqNums中读取)，则将该Region加入待flush集合。</para>
+				<tip>1.2.0版本之后，hbase.regionserver.maxlogs参数不再使用，系统会根据memstore的分配情况来动态计算出合适的maxlogs值(参考HBASE-14951)，采用的计算公式为：Math.max(32,HBASE_HEAP_SIZE * memstoreRatio * 2/LogRollSize)</tip>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

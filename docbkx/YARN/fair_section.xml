@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>FairScheduler公平调度器</title>
+	<para>FairScheduler是目前为止使用最多的资源调度器，其不但实现了CapacityScheduler的全部功能，还新增了很多额外的调度策略，在可调度的资源上也不在仅限于内存，还可对cpu资源进行调度。</para>
+	<section>
+		<title>调度器配置参数</title>
+		<para>yarn-site.xml中的配置项：</para>
+		<orderedlist>
+			<listitem>
+				<para>yarn.scheduler.fair.allocation.file</para>
+				<para>用于描述资源分配的配置文件，默认为fair-scheduler.xml</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.user-as-default-queue</para>
+				<para>在没有为作业指定提交队列的情况下，是否将用户名作为目标队列的名称，默认为true</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.preemption</para>
+				<para>是否开启资源抢占功能(资源抢占功能目前还处于试验阶段，默认为false)</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.sizebasedweight</para>
+				<para>在计算作业权重时，是否将作业所需资源量也一并考虑进去(资源量越大权重越高)，默认为false</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.assignmultiple</para>
+				<para>是否为每次心跳开启批量分配功能，默认为false</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.max.assign</para>
+				<para>如果开启了批量分配功能，每次分配Container数目的最大上限，默认为-1表示无限制</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.locality.threshold.node</para>
+				<para>该参数应用于延迟调度功能，当有NM与RM进行心跳通信时，如果调度器满足不了NodeLocal形式的分配，则可跳过这次调度机会，参数值用于表示可跳过的最大资源调度机会(假设有10个NM节点，如果该参数值为0.5，那么最多可允许跳过5次调度机会)。</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.locality.threshold.rack</para>
+				<para>同配置7类似，当应用程序请求某个机架上的资源时，它可以接受的可跳过的最大资源调度机会。</para>
+			</listitem>
+			<listitem>
+				<para>yarn.scheduler.fair.allow-undeclared-pools</para>
+				<para>当目标队列不存在时，是否允许其自动创建，默认为true</para>
+			</listitem>
+		</orderedlist>
+		<para>fair-scheduler.xml中的配置项：</para>
+		<programlistingco>
+			<programlisting>
+allocations
+     |_userMaxAppsDefault                每个用户默认能够启动的作业数
+     |_defaultMinSharePreemptionTimeout  触发队列执行资源抢占的等待时间(小于minShare时)
+     |_queueMaxAppsDefault               每个队列默认能够承载的作业数量
+     |_fairSharePreemptionTimeout        触发队列执行资源抢占的等待时间(小于fairShare/2时)
+     |_defaultQueueSchedulingPolicy      队列的默认调度策略，如不指定默认为fair
+     |_queue                             通过name属性指定队列名称
+         |_minResources                  最少资源保证量，格式为(X mb,Y vcores)
+         |_maxResources                  最大资源使用量，格式为(X mb,Y vcores)
+         |_maxRunningApps                队列所允许的最大作业数
+         |_maxAMShare                    AMContainer占队列总资源的最大比例
+         |_weight                        队列权重
+         |_schedulingPolicy              作业调度策略，可选值包括fifo、fair(默认)和drf
+         |_aclSubmitApps                 指定哪些用户可向队列中提交作业
+         |_aclAdministerApps             指定哪些用户可管理队列中的作业
+         |_minSharePreemptionTimeout     队列执行资源抢占的等待时间
+     |_user                              通过name属性指定用户名
+         |_maxRunningApps                用户可同时启动的最大作业数
+     |_queuePlacementPolicy              作业提交到指定队列的路由策略
+         |_rule
+			</programlisting>
+		</programlistingco>
+	</section>
+	<section>
+		<title>调度策略</title>
+		<para>FairScheduler默认提供了3种类型的调度策略，分别是fifo、fair和drf，不同的调度策略决定了队列/作业的遍历行为。</para>
+		<section>
+			<title>Fifo策略</title>
+			<para>三种调度策略中逻辑最为简单的一种，调度算法如下：</para>
+			<programlistingco>
+				<programlisting>
+public int compare(Schedulable s1, Schedulable s2) {
+    int res = s1.getPriority().compareTo(s2.getPriority()); <co id="co.fifo.policy.priority" linkends="co.note.fifo.policy.priority"/>
+    if (res == 0) { <co id="co.fifo.policy.starttime" linkends="co.note.fifo.policy.starttime"/>
+        res = (int) Math.signum(s1.getStartTime() - s2.getStartTime());
+    }
+    if (res == 0) { <co id="co.fifo.policy.name" linkends="co.note.fifo.policy.name"/>
+        res = s1.getName().compareTo(s2.getName());
+    }
+    return res;
+}				
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.fifo.policy.priority" arearefs="co.fifo.policy.priority" >
+						<para>如果s1和s2为队列，则它们的优先级相同，都为1.</para>
+					</callout>
+					<callout id="co.note.fifo.policy.starttime" arearefs="co.fifo.policy.starttime" >
+						<para>如果队列或者作业的优先级相同，通过其启动时间来决定先后。</para>
+					</callout>
+					<callout id="co.note.fifo.policy.name" arearefs="co.fifo.policy.name" >
+						<para>如果启动时间也相同，比较作业或者队列的名字子来决定先后。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</section>
+		<section>
+			<title>Fair策略</title>
+			<para>在不修改任何配置的情况下，FairScheduler默认使用该调度策略，算法如下：</para>
+			<programlistingco>
+				<programlisting>
+public int compare(Schedulable s1, Schedulable s2) {
+    Resource minShare1 = min(s1最少资源保证量、s1需要的资源量); <co id="co.fair.policy.minShare" linkends="co.note.fair.policy.minShare"/>
+    Resource minShare2 = min(s2最少资源保证量、s2需要的资源量);
+    boolean s1Needy = s1已分配的资源量 &lt; minShare1; <co id="co.fair.policy.needy" linkends="co.note.fair.policy.needy"/>
+    boolean s2Needy = s2已分配的资源量 &lt; minShare2; 
+    Resource one = Resources.createResource(1);
+    double minShareRatio1 = s1已分配的内存资源 / max(minShare1,one); <co id="co.fair.policy.minShareRatio" linkends="co.note.fair.policy.minShareRatio"/>
+    double minShareRatio2 = s2已分配的内存资源 / max(minShare1,one);
+    double useToWeightRatio1 = s1已分配的内存资源 / s1的权重; <co id="co.fair.policy.useToWeightRatio" linkends="co.note.fair.policy.useToWeightRatio"/>
+    double useToWeightRatio2 = s2已分配的内存资源 / s2的权重;
+    int res = 0;
+    if (s1Needy &amp;&amp; !s2Needy) <co id="co.fair.policy.cond1" linkends="co.note.fair.policy.cond1"/>
+        res = -1;
+    else if (s2Needy &amp;&amp; !s1Needy) <co id="co.fair.policy.cond2" linkends="co.note.fair.policy.cond2"/>
+        res = 1;
+    else if (s1Needy &amp;&amp; s2Needy) <co id="co.fair.policy.cond3" linkends="co.note.fair.policy.cond3"/>
+        res = (int) Math.signum(minShareRatio1 - minShareRatio2);
+    else <co id="co.fair.policy.cond4" linkends="co.note.fair.policy.cond4"/>
+        res = (int) Math.signum(useToWeightRatio1 - useToWeightRatio2);
+    if (res == 0) { <co id="co.fair.policy.cond5" linkends="co.note.fair.policy.cond5"/>
+        res = (int) Math.signum(s1.getStartTime() - s2.getStartTime());
+        if (res == 0) 
+            res = s1.getName().compareTo(s2.getName());
+    }
+    return res;
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.fair.policy.minShare" arearefs="co.fair.policy.minShare" >
+						<para>如果s1是作业，则最少资源保证量为0，即minShare1为0</para>
+						<para>需要的资源量计算方法：1.如果s1是作业，遍历作业中所有的ResourceRequest来汇总需要的资源结果；2.如果s1是叶子队列，遍历叶子队列中所有的作业来汇总需要的资源结果；3.如果s1是父队列，遍历父队列中所有的子队列来汇总需要的资源结果，以此向下层层递归。</para>
+					</callout>
+					<callout id="co.note.fair.policy.needy" arearefs="co.fair.policy.needy" >
+						<para>该布尔值表示是否还需要为s1分配资源，如果s1用于表示作业则返回值永远为false(因为minShare1=0，见说明1)；而如果s1为队列，则返回值为false有两种肯能，第一种情况：已分配的资源量已经超过了队列的最少资源保证量，第二种情况：队列所需要的资源已全部分配结束。</para>
+					</callout>
+					<callout id="co.note.fair.policy.minShareRatio" arearefs="co.fair.policy.minShareRatio" >
+						<para>如果s1为队列，该表达式用于计算s1的资源已分配比率；如果s1为作业，表达式直接返回该作业已分配的内存资源。</para>
+					</callout>
+					<callout id="co.note.fair.policy.useToWeightRatio" arearefs="co.fair.policy.useToWeightRatio" >
+						<para>该表达式用于计算s1已分配资源的权重比率。</para>
+					</callout>
+					<callout id="co.note.fair.policy.cond1" arearefs="co.fair.policy.cond1" >
+						<para>由说明2可得知该判断条件只有在s1和s2为队列的前提下才有可能满足，表示如果s1队列还需要分配资源而s2不需要，则优先选择s1队列。</para>
+					</callout>
+					<callout id="co.note.fair.policy.cond2" arearefs="co.fair.policy.cond2" >
+						<para>如果s1队列不需要分配资源而s2需要，则优先选择s2队列。</para>
+					</callout>
+					<callout id="co.note.fair.policy.cond3" arearefs="co.fair.policy.cond3" >
+						<para>如果s1队列和s2队列都需要分配资源，比较两个队列的资源分配比率，优先选择资源分配率比较较低的队列(同CapacityScheduler调度逻辑)。</para>
+					</callout>
+					<callout id="co.note.fair.policy.cond4" arearefs="co.fair.policy.cond4" >
+						<para>无论s1和s2同时为队列或者同时为作业都有可能满足该情况：</para>
+						<para>在同时为队列的情况下，说明两个队列都不需要再分配资源(两种情况，参考说明2)，这个时候比较两个队列的资源权重比率，比率越高的队列越优先选择(即：如果两个队列的权重相同，使用资源量越低的队列越优先遍历；而如果两个队列使用的资源量相同，权重越大的队列越优先遍历)；</para>
+						<para>而如果s1和s2同时为作业，根据作业的优先级来计算权重比率，同时，如果调度器开启了sizebasedweight功能(配置4)，将作业所需资源量也一并考虑进去(资源量越大，权重越高)，计算出最后的权重比率。</para>
+					</callout>
+					<callout id="co.note.fair.policy.cond5" arearefs="co.fair.policy.cond5" >
+						<para>如果经过以上运算，队列/作业的调度顺序依然相等，则通过启动时间(fifo)来排序。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</section>
+		<section>
+			<title>DRF策略</title>
+			<para>与Fair策略相比，DRF在计算资源使用率时，将cpu资源也考虑了进去。</para>
+			<para>算法用到的计算公式如下：</para>
+			<blockquote>
+				<para>内存使用率 = 队列已使用的内存 / 队列初始内存(minResource中配置)；</para>
+				<para>cpu使用率 = 队列已使用cpu数 / 队列初始cpu数(minResource中配置)；</para>
+				<para>资源使用率 = max(内存使用率,cpu使用率)；</para>
+				<para>集群内存使用率 = 队列(或作业)已使用的内存 / 集群总内存；</para>
+				<para>集群cpu使用率 = 队列(或作业)已使用的cpu数 / 集群cpu总数；</para>
+				<para>集群资源使用率 = max(集群内存使用率,集群cpu使用率)。</para>
+			</blockquote>
+			<para>具体的调度算法如下：</para>
+			<programlistingco>
+				<programlisting>
+一、针对队列的调度：
+public int compare(Schedulable s1, Schedulable s2) {
+    boolean s1Needy = s1资源使用率 &lt; 100%;
+    boolean s2Needy = s2资源使用率 &lt; 100%;
+    int res = 0;
+    if (!s2Needy &amp;&amp; !s1Needy) { <co id="co.drf.policy.cond1" linkends="co.note.drf.policy.cond1"/>
+        res = compare(s1集群资源使用率/s1的权重, s2集群资源使用率/s2的权重);
+    } else if (s1Needy &amp;&amp; !s2Needy) { <co id="co.drf.policy.cond2" linkends="co.note.drf.policy.cond2"/>
+        res = -1;
+    } else if (s2Needy &amp;&amp; !s1Needy) { <co id="co.drf.policy.cond3" linkends="co.note.drf.policy.cond3"/>
+        res = 1;
+    } else { <co id="co.drf.policy.cond4" linkends="co.note.drf.policy.cond4"/>
+        res = compare(队列s1的资源使用率, 队列s2的资源使用率);
+    }
+    if (res == 0) { <co id="co.drf.policy.cond5" linkends="co.note.drf.policy.cond5"/>
+        res = (int)(s1.getStartTime() - s2.getStartTime());
+    }
+    return res; 
+}
+二、针对作业的调度：
+public int compare(Schedulable s1, Schedulable s2) {
+	int res = compare(s1集群资源使用率/s1的权重, s2集群资源使用率/s2的权重); <co id="co.drf.policy.cond6" linkends="co.note.drf.policy.cond6"/>
+	if (res == 0) { 
+        res = (int)(s1.getStartTime() - s2.getStartTime());
+    }
+    return res; 
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.drf.policy.cond1" arearefs="co.drf.policy.cond1" >
+						<para>如果s1和s2的资源使用率都超过了100%，则比较两个队列的集群资源使用率(附带权重)，即如果s1和s2的权重相同，则集群资源使用率越低的越优先；而如果s1和s2的集群资源使用率相同，则谁的权重越大越优先。</para>
+					</callout>
+					<callout id="co.note.drf.policy.cond2" arearefs="co.drf.policy.cond2" >
+						<para>如果s1的资源使用率达到了100%而s2没有，则优先选择s2。</para>
+					</callout>
+					<callout id="co.note.drf.policy.cond3" arearefs="co.drf.policy.cond3" >
+						<para>如果s2的资源使用率达到了100%而s1没有，则优先选择s1。</para>
+					</callout>
+					<callout id="co.note.drf.policy.cond4" arearefs="co.drf.policy.cond4" >
+						<para>如果s1和s2的资源使用率都没有达到100%，则比较两个队列的资源使用率，使用率越低越优先。</para>
+					</callout>
+					<callout id="co.note.drf.policy.cond5" arearefs="co.drf.policy.cond5" >
+						<para>最后比较两个队列的启动时间，时间越早越优先。</para>
+					</callout>
+					<callout id="co.note.drf.policy.cond6" arearefs="co.drf.policy.cond6" >
+						<para>如果调度对象为作业，通过比较两个作业的集群资源使用率以及作业权重来决定调度先后(权重相同的情况下，集群资源使用率越低越优先)。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</section>
+	</section>
+	<section>
+		<title>调度器工作流程</title>
+		<para>同CapacityScheduler一样，FairScheduler的工作也是通过SchedulerEventType事件来触发的。</para>
+		<orderedlist>
+			<listitem>
+				<para>当APP_ADDED事件触发时，提交作业到指定队列</para>
+				<para>作业的提交通过FairScheduler.addApplication方法来实现，方法的实现逻辑如下：</para>
+				<para>(1)首先由队列名称定位到目标队列(代码参考assignToQueue方法)。</para>
+				<para>定位过程主要是借助于QueuePlacementPolicy来实现的，其内部声明了一个rules集合用来存储QueuePlacementRule元素。每一个QueuePlacementRule相当于是一条路由规则，用于将目标作业路由到指定队列上，如果当前正在遍历的路由规则无法满足，则继续遍历下一个QueuePlacementRule进行处理，直至有路由规则满足或已遍历至rules集合的最后一条记录。</para>
+				<para>FairScheduler一共对外声明了5种类型的QueuePlacementRule，分别为：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Default</para>
+						<para>将作业路由到default队列；</para>
+					</listitem>	
+					<listitem>
+						<para>PrimaryGroup</para>
+						<para>将作业路由到root.$firstGroup队列，firstGroup为作业提交用户的第一个分组信息；</para>
+					</listitem>
+					<listitem>
+						<para>Reject</para>
+						<para>不允许作业提交到任何队列；</para>
+					</listitem>
+					<listitem>
+						<para>SecondaryGroupExistingQueue</para>
+						<para>将作业提交到root.$secondGroup队列，secondGroup为作业提交用户的第二个分组信息；</para>
+					</listitem>
+					<listitem>
+						<para>Specified</para>
+						<para>将作业提交至用户指定的队列上；</para>
+					</listitem>
+					<listitem>
+						<para>User</para>
+						<para>将作业提交到root.$user队列，user变量为作业的提交用户；</para>
+					</listitem>
+					<listitem>
+						<para>NestedUserQueue</para>
+						<para>该路由规则会嵌套一个子规则(可以是任何其他类型的QueuePlacementRule)，首先根据子规则来判断作业将要路由到哪个队列上(简称targetQueue)，如果targetQueue是调度器已经配置好的叶子队列则返回空，否则返回targetQueue.$user。</para>
+					</listitem>
+				</itemizedlist>
+				<para>以上几种QueuePlacementRule中，Default、PrimaryGroup、Reject和User为Terminal类型的路由规则，如果该类型的路由规则得不到满足将不再尝试其他类型的路由规则。因此在构造QueuePlacementPolicy的rules集合时，一定要把Terminal类型的路由规则放到集合的尾部，否则系统在检测时将抛出异常。同时还需注意，如果在声明QueuePlacementRule时指定了create="false"选项，那么状态为Terminal类型的rule便只剩下了Default和Reject。</para>
+				<para>(2)判断用户是否具有权限向队列提交作业(队列的aclSubmitApps配置中是否包含该用户)。</para>
+				<para>(3)构造SchedulerApplication并加入FairScheduler的applications集合。</para>
+				<para>(4)触发APP_ACCEPTED事件，将RMApp状态机切换至Accept状态。</para>
+			</listitem>
+			<listitem>
+				<para>当NODE_UPDATE事件触发时，响应ResourceRequest请求，处理Container分配</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先处理历史Container信息(NM心跳传递过来的)；</para></listitem>
+					<listitem><para>然后处理reserve状态的Container信息；</para></listitem>
+					<listitem>
+						<para>最后基于三级资源分配策略，处理新Container的分配逻辑。</para>
+						<para>首先，基于深度优先遍历所有队列，针对同一层级的叶子队列，根据不同的调度策略(fifo、fair和drf)选择相应的调度算法来决定调度先后；</para>
+						<para>其次，遍历叶子队列中所有的作业，作业的调度顺序同样由调度策略来决定；</para>
+						<para>最后，对指定作业执行assignContainer方法来完成资源的分配处理，详细参考Container分配细节。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>Container分配细节</title>
+			<para>Container是在RM和NM不断的心跳通信过程中来完成分配的，每当有NM心跳到达时，调度器会执行如下处理：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先按照优先级由高到低的顺序遍历出指定ApplicationMaster所申请的所有ResourceRequest；</para>
+					<para>在调度器端，ResourceRequest集合是通过如下数据结构来封装的(为了便于引用简称$resReqs)</para>
+					<blockquote>
+						<para>Map&lt;priority, Map&lt;hostName, ResourceRequest>></para>
+					</blockquote>
+					<para>priority表示资源申请的优先级，hostName表示向哪一台机器/机架申请资源。</para>
+				</listitem>
+				<listitem>
+					<para>针对每一组具有相同优先级的ResourceRequest集合，调度器首先判断集合中是否存在元素向当前NM申请Container计算资源，判断逻辑如下：</para>
+					<para>首先要满足的判断条件是集合中存在Off_Switch类型的资源申请($REQ_OS)；</para>
+					<para>如果资源不允许以Off_Switch方式进行分配($REQ_OS的relaxLocality属性为false)，则集合中要确保存在Rack_Local类型的资源申请($REQ_RL)；</para>
+					<para>如果Rack_Local分配方式也关闭($REQ_RL的relaxLocality属性为false)，则集合中要确保存在Node_Local类型的资源申请，即ResourceRequest的hostName属性恰好是当前通信NN节点的名字；</para>
+				</listitem>
+				<listitem>
+					<para>步骤2校验通过后，开始处理Container分配：</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>首先尝试以NODE_LOCAL的方式来完成Container分配处理；</para>
+							<para>如果针对当前通信的NN节点不存在NODE_LOCAL形式的ResourceRequest，则跳过这次调度机会，等待其他节点心跳时在尝试调度处理，这便是Scheduler的延迟调度功能，可延迟调度的最大次数是可通过参数来配置的(参考调度器配置参数7和8)。</para>
+						</listitem>
+						<listitem>
+							<para>如果NODE_LOCAL延迟调度的次数达到配置7声明的上限，开始尝试以RACK_LOCAL的方式来完成Container分配处理；</para>
+						</listitem>
+						<listitem>
+							<para>如果RACK_LOCAL延迟调度的次数达到配置8声明的上限，开始尝试以Off_Switch的方式来完成Container分配处理。</para>
+						</listitem>
+					</itemizedlist>
+					<tip>在2.7.0版本之前，延迟调度逻辑存在一定问题。比如AMContainer，其在分配过程中无需满足DataLocal，部署在任何一台机器上都可以。但是调度器在调度过程中依然会为其开启延迟调度逻辑，从而减缓了AMContainer的分配效率。为此社区在YARN-2990中进行了修复，针对AMContainer以及一些不需要满足DataLocal的任务(如Reduce)，不开启延迟调度逻辑，直接进行分配处理。</tip>
+				</listitem>
+				<listitem>
+					<para>选定分配方式后，调度器要确保当前与之通信的NM还有足够的空间来部署该Container；</para>
+					<para>如果有，构建RMContainer对象并加入到已分配集合中，等待ContainerAllocator心跳通信时将其作为response返回(参考ContainerAllocator服务)；</para>
+					<para>否则将该Container标记为reserve状态，等到NN有足够可用空间时在尝试分配。</para>
+				</listitem>
+				<listitem>
+					<para>分配成功后，处理ResourceRequest的善后工作。</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>如果Container成功以Node_Local形式分配，遍历$resReqs集合，找出当前优先级下如下类型的ResourceRequest，将其numContainers属性值-1：</para>
+							<para>(1)hostName为当前NN名字的ResourceRequest；</para>
+							<para>(2)hostName为当前NN所在机柜名字的ResourceRequest；</para>
+							<para>(3)hostName为*的ResourceRequest。</para>
+						</listitem>
+						<listitem>
+							<para>如果Container成功以Rack_Local形式分配，遍历$resReqs集合，找出当前优先级下如下类型的ResourceRequest，将其numContainers属性值-1：</para>
+							<para>(1)hostName为当前NN所在机柜名字的ResourceRequest；</para>
+							<para>(2)hostName为*的ResourceRequest。</para>
+						</listitem>
+						<listitem>
+							<para>如果Container成功以Off_Switch形式分配，遍历$resReqs集合，找出当前优先级下hostName为*的ResourceRequest，将其numContainers属性值-1。</para>
+						</listitem>
+					</itemizedlist>
+					<para>执行-1操作后如果属性值为0将其从$resReqs集合中移除。</para>
+				</listitem>
+			</orderedlist>
+			<para>另外如果调度器开启了批量分配的功能(配置5)，同时又满足如下约束条件，便可在当前NM上持续进行Container分配处理。</para>
+			<blockquote>
+				<para>(1)队列已分配的资源没有超过该队列所能承受的最大上限(maxResource配置)；</para>	
+				<para>(2)Node还有足够的资源来部署新分配的Container；</para>
+				<para>(3)已分配的Container个数没有超过配置6声明的上限。</para>
+			</blockquote>
+			<para>否则，每次心跳通信只分配一个Container，这点与CapacityScheduler不同，CapacityScheduler默认就是批量处理。</para>
+		</section>
+	</section>
+	<section>
+		<title>资源抢占逻辑</title>
+		<para>FairScheduler的资源抢占功能是通过yarn.scheduler.fair.preemption参数来控制是否开启的，功能启用后如果满足以下任意一项条件，将开启资源抢占逻辑：</para>
+		<para>(1)队列的资源使用量少于minResource的时长已达到了minSharePreemptionTimeout参数阈值。</para>
+		<para>(2)队列的资源使用量少于fairShare/2的时长已经达到了fairSharePreemptionTimeout参数阈值。</para>
+		<para>判断是否有队列需要执行资源抢占的逻辑是通过FairScheduler类的preemptTasksIfNecessary方法来封装的，默认情况下调度器会每隔5秒进行一次检测(通过yarn.scheduler.fair.preemptionInterval参数来设置)，每次检测会进行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>遍历所有叶子队列，计算每个队列需要抢占的资源量(代码逻辑参考resToPreempt方法)</para>
+				<para>抢占资源量的计算方法如下：</para>
+				<itemizedlist>
+					<listitem>
+						<para>如果队列距离上一次达到minResource的时间已经过去了minSharePreemptionTimeout</para>
+						<para>resDueToMinShare = min(minResource, 需要的资源量) - 当前使用的资源量</para>
+					</listitem>
+					<listitem>
+						<para>如果队列距离上一次达到fairShare/2的时间已经过去了fairSharePreemptionTimeout</para>
+						<para>resDueToFairShare = min(fairShare, 需要的资源量) - 当前使用的资源量</para>
+					</listitem>
+				</itemizedlist>
+				<para>需抢占的资源量 = max(resDueToMinShare, resDueToFairShare)</para>
+			</listitem>
+			<listitem>
+				<para>汇总每个队列需要抢占的资源总量，如果总量大于0，开始执行资源抢占(代码参考FairScheduler类的preemptResources方法)，抢占逻辑大致如下：</para>
+				<para>(1)遍历所有叶子队列，如果其资源使用量已经超过了fairShare阈值，将其内部每个作业所部署的Container加入到runningContainers集合。</para>
+				<para>(2)对runningContainers集合进行排序(首先比较优先级，然后比较containerId)，这样优先级比较低的Container会先被抢占。</para>
+				<para>(3)遍历排序后的runningContainers集合，依次抢占每一个Container(将其杀死并回收其资源)，直至抢占足够的资源为止。</para>
+				<para>对Container执行抢占时并不是立刻将其杀死，而是先将其标记为警告状态，待15秒钟之后在执行KILL操作(代码参考warnOrKillContainer方法)，时间阈值通过yarn.scheduler.fair.waitTimeBeforeKill参数来指定。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

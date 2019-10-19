@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>开发运维</title>
+	<xi:include href="cgroup_section.xml"/>
+	<section>
+		<title>启用作业容灾</title>
+		<para>默认情况下，作业容灾功能是不开启的，可通过设置如下参数来进行启用：</para>
+		<programlistingco>
+				<programlisting>
+&lt;property>
+  &lt;name>yarn.resourcemanager.recovery.enabled&lt;/name>
+  &lt;value>true&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.resourcemanager.store.class&lt;/name> <co id="co.recover.class" linkends="co.note.recover.class"/>
+  &lt;value>org.apache.hadoop.yarn.server.resourcemanager.recovery.FileSystemRMStateStore&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.resourcemanager.fs.state-store.uri&lt;/name> <co id="co.recover.path" linkends="co.note.recover.path"/>
+  &lt;value>file:///tmp/yarn/system/rmstore&lt;/value>
+&lt;/property>
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.recover.class" arearefs="co.recover.class">
+						<para>默认使用该类将作业的状态信息保存到文件系统上(可以是本地文件系统，也可以是hdfs)，待RM重新启动时读取这些状态数据进行作业恢复；</para>
+					</callout>
+					<callout id="co.note.recover.path" arearefs="co.recover.path">
+						<para>作业状态数据的存储路径，如不指定前缀表示hdfs存储。</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		<para>这样，RM重启之后，之前运行未结束的作业便可继续运行。</para>
+	</section>
+	<xi:include href="customApp_section.xml"/>
+	<xi:include href="conf_section.xml"/>
+	<section>
+		<title>常用命令</title>
+		<orderedlist>
+			<listitem>
+				<para>调试命令</para>
+				<para>yarn application -status ApplicationId 查看指定Application的运行状态</para>
+				<para>yarn application -list 列出所有Application</para>
+				<para>yarn application -Kill ApplicationId 杀死指定Application</para>
+				<para>yarn node -status NodeId 查看节点状态</para>
+				<para>yarn node -list 列出所有节点</para>
+				<para>yarn logs -applicationId ApplicationId 查看job日志</para>
+				<para>yarn logs -appOwner AppOwner</para>
+				<para>yarn logs -containerId ContainerId 查看Container日志</para>
+				<para>yarn logs -nodeAddress NodeAddress</para>
+			</listitem>
+			<listitem>
+				<para>管理命令</para>
+				<para>yarn resourcemanager 启动ResourceManager进程</para>
+				<para>yarn nodemanager 启动NodeManager进程</para>
+				<programlisting>
+yarn rmadmin [-refreshQueues] [-refreshNodes] [-refreshUserToGroupsMapping] 
+             [-refreshSuperUserGroupsConfiguration] [-refreshAdminAcls] 
+             [-refreshServiceAcl]
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

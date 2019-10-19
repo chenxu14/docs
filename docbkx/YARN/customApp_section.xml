@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>编写YARN应用程序</title>
+	<para>YARN框架主要提供了一个资源调度平台，基于这个平台可以运行很多应用程序(如MapReduce、Spark、Tez等)，除了以上这些应用外我们还可编写自己的应用程序并将其集成到YARN环境中去处理，而要实现这种应用只需编写以下三个组件的业务逻辑，分别是：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem><para>YarnClient：将App提交到YARN环境；</para></listitem>
+			<listitem><para>ApplicationMaster：为每个Worker申请Container计算资源并构造其运行环境；</para></listitem>
+			<listitem><para>ApplicationWorker：处理具体的子任务；</para></listitem>
+		</itemizedlist>
+	</blockquote>
+	<orderedlist>
+		<listitem>
+			<para>实现YarnClient客户端组件</para>
+			<para>YarnClient的主要作用是为ApplicationMaster构造启动环境，并将整个应用提交给YARN框架进行处理，在应用程序运行期间可通过RPC服务来实时获取整个应用的运行状态，这个服务便是ApplicationClientProtocol，用来处理Client和RM之间的通信。</para>
+			<para>与此同时YARN框架还对外声明了YarnClientImpl业务类，该类很好的对ApplicationClientProtocol服务进行了封装，我们可以通过继承它来实现自己的YarnClient应用，代码如下：</para>
+			<programlistingco>
+				<programlisting>
+public class MyYarnClient extends YarnClientImpl {
+   private YarnConfiguration conf; <co id="co.client.conf" linkends="co.note.client.conf"/>
+   public MyYarnClient(YarnConfiguration conf) {
+      this.conf = conf;
+   }
+   public MyYarnClient() {
+      this(new YarnConfiguration());
+   }
+   public ApplicationId submitApp() { <co id="co.client.submit" linkends="co.note.client.submit"/>
+      ApplicationId appId = null;
+      super.init(conf);
+      super.start();
+      try {
+         YarnClientApplication app=super.createApplication();
+         ApplicationSubmissionContext appContext=app.getApplicationSubmissionContext();
+         appContext.setApplicationName("MyApplication"); <co id="co.client.appName" linkends="co.note.client.appName"/>
+         appContext.setQueue("default"); <co id="co.client.appQueue" linkends="co.note.client.appQueue"/>
+         appContext.setApplicationType("CustomApp"); <co id="co.client.appType" linkends="co.note.client.appType"/>
+         appContext.setAMContainerSpec(createAMContainerContext(appContext)); 
+         Resource res=Records.newRecord(Resource.class);
+         res.setMemory(2048);
+         res.setVirtualCores(1);
+         appContext.setResource(res); <co id="co.client.appRes" linkends="co.note.client.appRes"/>
+         LogAggregationContext logContext = Records
+            .newRecord(LogAggregationContext.class);
+         logContext.setLogAggregationPolicyClassName(
+            "org.apache.hadoop.yarn.server.nodemanager.containermanager
+               .logaggregation.SampleContainerLogAggregationPolicy"); <co id="co.client.log.policy" linkends="co.note.client.log.policy"/>
+         logContext.setLogAggregationPolicyParameters("SR:0.2,MIN:20"); <co id="co.client.policy.param" linkends="co.note.client.policy.param"/>
+         appContext.setLogAggregationContext(logContext);
+         appId = submitApplication(appContext);
+      } catch (YarnException e) {
+         e.printStackTrace();
+      } catch (IOException e) {
+         e.printStackTrace();
+      }
+      return appId;
+   }
+   private ContainerLaunchContext createAMContainerContext( <co id="co.client.appSpec" linkends="co.note.client.appSpec"/>
+       ApplicationSubmissionContext appContext){
+      String stagingDir = conf.get("fs.defaultFS") + File.separator + 
+         "tmp/myStagingDir" + File.separator + appContext.getApplicationId();
+      Map&lt;String,LocalResource> localResources = prepareLocalResources(stagingDir);
+      Map&lt;String,String> launchEnv = setupLaunchEnv(stagingDir);
+      ContainerLaunchContext amContainer = Records
+         .newRecord(ContainerLaunchContext.class);
+      amContainer.setLocalResources(localResources);
+      amContainer.setEnvironment(launchEnv);
+      amContainer.setCommands(setupLaunchCommands());
+      return amContainer;
+   }
+   private List&lt;String> setupLaunchCommands() { <co id="co.client.appCmd" linkends="co.note.client.appCmd"/>
+      List&lt;String> commands = new ArrayList&lt;String>();
+      commands.add(Environment.JAVA_HOME.$() + "/bin/java -server");
+      commands.add("-Xmx2048m");
+      commands.add("-Djava.io.tmpdir=$PWD/tmp");
+      commands.add("com.jd.hadoop.test.MyApplicationMaster");
+      commands.add("1> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stdout");
+      commands.add("2> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stderr");
+      return commands;
+   }
+   private Map&lt;String, String> setupLaunchEnv(String stagingDir) { <co id="co.client.appEnv" linkends="co.note.client.appEnv"/>
+      Map&lt;String, String> env = new HashMap&lt;String, String>();
+      env.put("STAGING_DIR", stagingDir);
+      env.put("WORKER_NUM", "3");
+      env.put("WORKER_MEM", "2048");
+      env.put("WORKER_CORE", "1");
+      String[] yarnPaths=conf.getStrings(YarnConfiguration.YARN_APPLICATION_CLASSPATH,
+         YarnConfiguration.DEFAULT_YARN_APPLICATION_CLASSPATH);
+      for(String path:yarnPaths){
+         addToClassPath(env,path);
+      }
+      addToClassPath(env,Environment.PWD.$() + Path.SEPARATOR + "__app__.jar");
+      return env;
+   }
+   private Map&lt;String,LocalResource> prepareLocalResources(String stagingDir){ <co id="co.client.appLocalRes" linkends="co.note.client.appLocalRes"/>
+      Map&lt;String,LocalResource> res=new HashMap&lt;String,LocalResource>();
+      try {
+         FileSystem fs = FileSystem.get(conf);
+         Path dest=new Path(stagingDir);
+         FileSystem.mkdirs(fs, dest, new FsPermission(FsPermission
+            .createImmutable((short) 0700))); <co id="co.client.stagingDir" linkends="co.note.client.stagingDir"/>
+         File localJar = new File("/home/hadp/myApp.jar");
+         Path destPath=new Path(dest,localJar.getName());
+         FileUtil.copy(localJar, fs, destPath, false, conf); <co id="co.client.appJar" linkends="co.note.client.appJar"/>
+         FileStatus destStatus=fs.getFileStatus(destPath);
+         LocalResource amJarRsrc = Records.newRecord(LocalResource.class);
+         amJarRsrc.setType(LocalResourceType.FILE);
+         amJarRsrc.setVisibility(LocalResourceVisibility.APPLICATION);
+         amJarRsrc.setResource(ConverterUtils.getYarnUrlFromPath(destPath)); <co id="co.client.res.jar" linkends="co.note.client.res.jar"/>
+         amJarRsrc.setTimestamp(destStatus.getModificationTime());
+         amJarRsrc.setSize(destStatus.getLen());
+         res.put("__app__.jar", amJarRsrc);
+      } catch (IOException e) {
+         e.printStackTrace();
+      }
+      return res;
+   }
+   private void addToClassPath(Map&lt;String, String> env, String path) {
+      if(env.get("CLASSPATH")==null){
+         env.put("CLASSPATH", path);
+      }else{
+         env.put("CLASSPATH", env.get("CLASSPATH") + File.pathSeparator + path);
+      }
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.client.conf" arearefs="co.client.conf"><para>注意此处要使用YarnConfiguration对象而不是Configuration；</para></callout>
+					<callout id="co.note.client.submit" arearefs="co.client.submit"><para>通过该方法将App提交到YARN环境中去处理；</para></callout>
+					<callout id="co.note.client.appName" arearefs="co.client.appName"><para>应用程序名称；</para></callout>
+					<callout id="co.note.client.appQueue" arearefs="co.client.appQueue"><para>应用程序所提交到的目标队列；</para></callout>
+					<callout id="co.note.client.appType" arearefs="co.client.appType"><para>应用程序类别；</para></callout>
+					<callout id="co.note.client.appRes" arearefs="co.client.appRes"><para>通过该方法来设置AMContainer运行所需要的资源(内存、cpu数)；</para></callout>
+					<callout id="co.note.client.log.policy" arearefs="co.client.log.policy"><para>App所采用的日志聚合策略，这里为Sample策略；</para></callout>
+					<callout id="co.note.client.policy.param" arearefs="co.client.policy.param"><para>日志聚合策略所需要的运行参数，假设目标App有100个运行成功的Container，该策略参数表示系统会对其中的36个Container进行聚合(20 + (100-20) * 0.2)，除此之外还会对AM日志以及运行失败的Container日志进行聚合；</para></callout>
+					<callout id="co.note.client.appSpec" arearefs="co.client.appSpec"><para>通过该方法来构造AMContainer的运行环境；</para></callout>
+					<callout id="co.note.client.appCmd" arearefs="co.client.appCmd"><para>通过该方法来设置AMContainer的启动命令；</para></callout>
+					<callout id="co.note.client.appEnv" arearefs="co.client.appEnv"><para>通过该方法来构造AMContainer运行所需要的环境变量信息；</para></callout>
+					<callout id="co.note.client.appLocalRes" arearefs="co.client.appLocalRes"><para>通过该方法来构造AMContainer运行所需要的文件资源；</para></callout>
+					<callout id="co.note.client.stagingDir" arearefs="co.client.stagingDir"><para>创建stagingDir目录并赋予700权限编码，该目录用于临时存储App运行所依赖的资源以及阶段输出，App运行结束后可将其删除；</para></callout>
+					<callout id="co.note.client.appJar" arearefs="co.client.appJar"><para>将封装App应用的jar包上传到stagingDir目录，这里假设jar包的本地存放路径是/home/hadp/myApp.jar；</para></callout>
+					<callout id="co.note.client.res.jar" arearefs="co.client.res.jar"><para>构造LocalResource对象来封装AMContainer运行所依赖的文件资源，路径指向之前上传到stagingDir目录的myApp.jar，需要注意的是路径一定要有hdfs前缀，否则AMContainer在加载时无法将其下载到本地。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>实现ApplicationMaster组件</para>
+			<para>App通过YarnClient提交之后，RM会为其分配Container计算资源，并通过ContainerManager服务将其加载，加载过程中主要是执行了ApplicationMaster的main方法来开启其业务逻辑。</para>
+			<para>ApplicationMaster作为整个应用的管理程序其功能职责主要是为每个Worker申请Container计算资源，并将整个作业进行拆分，将不同的子任务分配给不同的Worker进行处理，以此来提高并发吞吐量，简单的实现逻辑如下：</para>
+			<programlistingco>
+				<programlisting>
+public class MyApplicationMaster {
+   private YarnConfiguration yarnConf;
+   private AMRMClient&lt;ContainerRequest> amClient;
+   private int workerNum;
+   private int completedNum;
+
+   public MyApplicationMaster(YarnConfiguration conf){
+      this.yarnConf=conf;
+   }
+   public MyApplicationMaster(){
+      this(new YarnConfiguration());
+   }
+   public void run(){
+      register();
+      addResourceRequests();
+      heartbeat();
+   }
+   private void heartbeat() { <co id="co.am.heartbeat" linkends="co.note.am.heartbeat"/>
+      int expiryInterval = yarnConf.getInt(YarnConfiguration.RM_AM_EXPIRY_INTERVAL_MS, 
+            YarnConfiguration.DEFAULT_RM_AM_EXPIRY_INTERVAL_MS);
+      int interval = Math.min(expiryInterval/2, 3000); <co id="co.am.heartbeat.interval" linkends="co.note.am.heartbeat.interval"/>
+      while(true){
+         try {
+            AllocateResponse response = amClient.allocate(0.1f); <co id="co.am.heartbeat.allocate" linkends="co.note.am.heartbeat.allocate"/>
+            List&lt;Container> containers = response.getAllocatedContainers();
+            for(Container container : containers){
+               new ExecutorLancher(container).start(); <co id="co.am.heartbeat.container" linkends="co.note.am.heartbeat.container"/>
+            }
+            List&lt;ContainerStatus> completedContainers = response
+               .getCompletedContainersStatuses();
+            completedNum += completedContainers.size();
+            if(completedNum >= workerNum){ <co id="co.am.container.complete" linkends="co.note.am.container.complete"/>
+               amClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED, 
+                  "app finished!", "N/A");
+               System.exit(0);
+            }
+            Thread.sleep(interval);
+         } catch (InterruptedException e) {
+            e.printStackTrace();
+         } catch (YarnException e) {
+            e.printStackTrace();
+         } catch (IOException e) {
+            e.printStackTrace();
+         }
+      }
+   }
+   private void addResourceRequests() { <co id="co.am.resreq" linkends="co.note.am.resreq"/>
+      Map&lt;String,String> env = System.getenv();
+      workerNum = Integer.parseInt(env.get("WORKER_NUM"));
+      int workerMem = Integer.parseInt(env.get("WORKER_MEM"));
+      int workerCore = Integer.parseInt(env.get("WORKER_CORE"));
+      for(int i=0;i&lt;workerNum;i++){
+         Resource res = Resource.newInstance(workerMem, workerCore);
+         Priority priority = Records.newRecord(Priority.class);
+         priority.setPriority(0);
+         amClient.addContainerRequest(new 
+            ContainerRequest(res, null, null, priority)); <co id="co.am.resreq.offswitch" linkends="co.note.am.resreq.offswitch"/>
+      }
+   }
+   private void register(){ <co id="co.am.register" linkends="co.note.am.register"/>
+      try {
+         amClient = AMRMClient.createAMRMClient();
+         amClient.init(yarnConf);
+         amClient.start();
+         amClient.registerApplicationMaster(
+            System.getenv().get("NM_HOST"), 0, "N/A");
+      } catch (YarnException e) {
+         e.printStackTrace();
+      } catch (IOException e) {
+         e.printStackTrace();
+      }
+   }
+   public static void main(String[] args){
+      new MyApplicationMaster().run();
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.am.heartbeat" arearefs="co.am.heartbeat"><para>通过该方法实现与RM心跳通信的逻辑，通过不断心跳来完成Container计算资源的申请，具体可参考ApplicationMasterService服务；</para></callout>
+					<callout id="co.note.am.heartbeat.interval" arearefs="co.am.heartbeat.interval"><para>心跳时间间隔，默认为3秒，前提是不能大于AMContainer监控过期时间的一半；</para></callout>
+					<callout id="co.note.am.heartbeat.allocate" arearefs="co.am.heartbeat.allocate"><para>通过AMRMClient服务向RM申请计算资源，服务内部主要使用了ApplicationMasterProtocol协议来完成与RM的通信；</para></callout>
+					<callout id="co.note.am.heartbeat.container" arearefs="co.am.heartbeat.container"><para>针对每一个RM新分配的Container，开启ExecutorLancher线程来完成该Container的加载操作；</para></callout>
+					<callout id="co.note.am.container.complete" arearefs="co.am.container.complete"><para>统计RM端运行结束的Container数量，如果其值不小于AM要申请的Container数量，则说明所有任务都已运行结束，注销该App；</para></callout>
+					<callout id="co.note.am.resreq" arearefs="co.am.resreq"><para>构造ResourceRequest用于申请Container计算资源，这里是粗粒度申请(即事先指定了要申请的Container数量，而不是按需使用申请)；</para></callout>
+					<callout id="co.note.am.resreq.offswitch" arearefs="co.am.resreq.offswitch"><para>由于只是测试应用，这里只构建了OFF_SWITCH类型的资源申请，而没有构建NODE_LOCAL型和RACK_LOCAL型；</para></callout>
+					<callout id="co.note.am.register" arearefs="co.am.register"><para>通过该方法完成ApplicationMaster注册功能。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>ApplicationWorker的加载是通过ExecutorLancher线程来实现的，该类的部分逻辑与YarnClient相似，都是构造Container运行所需要的资源，代码如下：</para>
+			<programlistingco>
+				<programlisting>
+public class ExecutorLancher extends Thread {
+   private Container container;
+   private NMClient nmClient;
+   private YarnConfiguration conf;
+
+   public ExecutorLancher(Container container){
+      this.container = container;
+      nmClient = NMClient.createNMClient();
+      conf = new YarnConfiguration();
+      nmClient.init(conf);
+      nmClient.start();
+   }
+   @Override
+   public void run() {
+      try {
+         String stagingDir = System.getenv("STAGING_DIR");
+         ContainerLaunchContext ctx = Records.newRecord(ContainerLaunchContext.class); <co id="co.worker.ctx" linkends="co.note.worker.ctx"/>
+         ctx.setLocalResources(prepareLocalResources(stagingDir));
+         ctx.setEnvironment(setupLaunchEnv(stagingDir));
+         ctx.setCommands(setupLaunchCommands());
+         nmClient.startContainer(container, ctx); <co id="co.worker.start" linkends="co.note.worker.start"/>
+      } catch (YarnException e) {
+         e.printStackTrace();
+      } catch (IOException e) {
+         e.printStackTrace();
+      }
+   }
+   private List&lt;String> setupLaunchCommands() { <co id="co.worker.cmd" linkends="co.note.worker.cmd"/>
+      List&lt;String> commands = new ArrayList&lt;String>();
+      commands.add(Environment.JAVA_HOME.$() + "/bin/java -server");
+      commands.add("-Xmx" + System.getenv("WORKER_MEM") + "m");
+      commands.add("-Djava.io.tmpdir=$PWD/tmp");
+      commands.add("com.jd.hadoop.test.MyApplicationWorker");
+      commands.add("1> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stdout");
+      commands.add("2> " + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stderr");
+      return commands;
+   }
+   private Map&lt;String, String> setupLaunchEnv(String stagingDir) { <co id="co.worker.env" linkends="co.note.worker.env"/>
+      Map&lt;String, String> env = new HashMap&lt;String, String>();
+      String[] yarnPaths=conf.getStrings(YarnConfiguration.YARN_APPLICATION_CLASSPATH,
+            YarnConfiguration.DEFAULT_YARN_APPLICATION_CLASSPATH);
+      for(String path:yarnPaths){
+         addToClassPath(env,path);
+      }
+      addToClassPath(env,Environment.PWD.$() + Path.SEPARATOR + "__app__.jar");
+      return env;
+   }
+   private void addToClassPath(Map&lt;String, String> env, String path) {
+      if(env.get("CLASSPATH")==null){
+         env.put("CLASSPATH", path);
+      }else{
+         env.put("CLASSPATH", env.get("CLASSPATH") + File.pathSeparator + path);
+      }
+   }
+   private Map&lt;String, LocalResource> prepareLocalResources(String stagingDir) <co id="co.worker.res" linkends="co.note.worker.res"/>
+       throws IOException {
+      Map&lt;String,LocalResource> res=new HashMap&lt;String,LocalResource>();
+      FileSystem fs = FileSystem.get(conf);
+      Path dest=new Path(stagingDir);
+      Path destPath=new Path(dest,new File(Const.APP_JAR).getName());
+      FileStatus destStatus=fs.getFileStatus(destPath);
+      LocalResource amJarRsrc = Records.newRecord(LocalResource.class);
+      amJarRsrc.setType(LocalResourceType.FILE);
+      amJarRsrc.setVisibility(LocalResourceVisibility.APPLICATION);
+      amJarRsrc.setResource(ConverterUtils.getYarnUrlFromPath(destPath));
+      amJarRsrc.setTimestamp(destStatus.getModificationTime());
+      amJarRsrc.setSize(destStatus.getLen());
+      res.put("__app__.jar", amJarRsrc);
+      return res;
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.worker.ctx" arearefs="co.worker.ctx"><para>构造Worker运行环境(包括启动命令、环境变量和依赖资源)，通过ContainerLaunchContext对象来封装；</para></callout>
+					<callout id="co.note.worker.start" arearefs="co.worker.start"><para>通过NMClient服务对运行Worker的Container进行加载，服务内部主要使用了ContainerManagementProtocol协议来实现与NM端的通信；</para></callout>
+					<callout id="co.note.worker.cmd" arearefs="co.worker.cmd"><para>通过该方法构造Worker的启动命令；</para></callout>
+					<callout id="co.note.worker.env" arearefs="co.worker.env"><para>通过该方法构造Worker运行所需要的环境变量；</para></callout>
+					<callout id="co.note.worker.res" arearefs="co.worker.res"><para>通过该方法构造Worker运行所依赖的资源。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>实现ApplicationWorker组件</para>
+			<para>Worker组件用来完成ApplicationMaster分配的具体任务，由于只是测试应用，这里只打印了日志输出而没有做实际的应用处理。</para>
+			<programlisting>
+public class MyApplicationWorker {
+   public static void main(String[] args) {
+      System.out.println("the worker is execute !");
+      System.exit(0);
+   }
+}
+			</programlisting>
+		</listitem>
+		<listitem>
+			<para>应用部署</para>
+			<para>将MyYarnClient、MyApplicationMaster、ExecutorLancher和MyApplicationWorker打包部署到/home/hadp/myApp.jar文件中，然后执行如下单元测试将App应用部署到Yarn环境中去执行。</para>
+			<programlistingco>
+				<programlisting>
+public class HadoopTest extends TestCase {
+   public void testRPC(){
+      try {
+         MyYarnClient client = new MyYarnClient();
+         ApplicationId appId = client.submitApp();
+         while(true){
+            Thread.sleep(1000);
+            ApplicationReport report = client.getApplicationReport(appId); <co id="co.test.report" linkends="co.note.test.report"/>
+            System.out.println("Application report from ResourceManager: \n" + <co id="co.test.report.print" linkends="co.note.test.report.print"/>
+               "\t application identifier: " + appId.toString() + "\n" +
+               "\t appId: " + appId.getId() + "\n" +
+               "\t clientToAMToken: " + report.getClientToAMToken() + "\n" +
+               "\t appDiagnostics: " + report.getDiagnostics() + "\n" +
+               "\t appMasterHost: " + report.getHost() + "\n" +
+               "\t appQueue: " + report.getQueue() + "\n" +
+               "\t appMasterRpcPort: " + report.getRpcPort() + "\n" +
+               "\t appStartTime: " + report.getStartTime() + "\n" +
+               "\t yarnAppState: " + report.getYarnApplicationState() + "\n" +
+               "\t distributedFinalState: "+report.getFinalApplicationStatus()+"\n"+
+               "\t appTrackingUrl: " + report.getTrackingUrl() + "\n" +
+               "\t appUser: " + report.getUser()
+            );
+            YarnApplicationState state = report.getYarnApplicationState();
+            if (state == YarnApplicationState.FINISHED ||
+                    state == YarnApplicationState.FAILED ||
+                    state == YarnApplicationState.KILLED) {
+         		client.close();
+               break;
+            }
+         }
+      } catch (IOException e) {
+         e.printStackTrace();
+      } catch (YarnException e) {
+         e.printStackTrace();
+      } catch (InterruptedException e) {
+         e.printStackTrace();
+      }
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.test.report" arearefs="co.test.report"><para>通过与RM不断心跳来获取App的运行状态直至App运行结束，每次心跳主要是使用了ApplicationClientProtocol协议来完成与RM端的通信；</para></callout>
+					<callout id="co.note.test.report.print" arearefs="co.test.report.print"><para>打印报告输出。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+</section>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>辅助服务</title>
+	<para>如果想为已有的YARN体系引入额外的服务来辅助实现App的部分功能，便可借助于AuxiliaryService(辅助服务)来实现。典型的应用如MapReduce的shuffle功能，以及Spark1.2版本后提供的ExternalShuffle实现。</para>
+	<para>辅助服务的引入主要是通过加载yarn.nodemanager.aux-services配置来实现的，在每个NodeManager的内部都声明一个辅助服务的容器(通过AuxServices类来封装)，容器在初始化阶段会读取yarn.nodemanager.aux-services配置，以便将用户声明的辅助服务加载到容器中去(代码逻辑参考其serviceInit方法)。</para>
+	<para>在AuxServices的内部主要声明了如下数据结构用来存储与AuxiliaryService相关的信息：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>serviceMap - 用来存储所有已注册的AuxiliaryService服务实例</para>
+			<para>map的key值为服务名称，通过yarn.nodemanager.aux-services参数来声明(如果要引入多个服务，服务名字之间用逗号分隔)，每一个服务的名称要符合以下命名规则：a-zA-Z0-9_，且不能以数字开头。</para>
+			<para>map的value值为服务实例，实例的实现类通过yarn.nodemanager.aux-services.&lt;serviceName>.class参数进行声明，并且目标实现类中需要有一个空的构造函数，以便通过反射将其实例化。</para>
+		</listitem>
+		<listitem>
+			<para>serviceMetaData - 用来存储与目标辅助服务相关的元数据信息</para>
+			<para>辅助服务的元数据信息可通过其getMetaData方法进行获取，在ShuffleHandler实现中(用于对MapReduce作业执行shuffle的辅助服务)，主要是返回目标shuffle的server端口号。</para>
+			<para>这些辅助服务的元数据信息会在执行ContainerManagement服务的startContainers方法时返回给调用端，供其进行相应的处理(代码实现上可参考ContainerLauncherImpl.Container类的launch方法)。</para>
+		</listitem>
+	</itemizedlist>
+	<para>辅助服务的启动是伴随着容器的启动而进行的，每当有新的辅助服务启动后，容器对象都会对其进行监听(通过调用其registerServiceListener方法)，如果其在运行过程中出现了异常，那么容器中的其他辅助服务也会级联退出。同时辅助服务的容器(AuxServices)还对外实现了EventHandler接口，每当有AuxServicesEvent事件触发时会进行如下回调处理：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>如果是APPLICATION_INIT事件(NMContainer状态机实例开启之后会触发该事件，如果在构造其对应的ContainerLaunchContext时调用了setServiceData方法来设置与辅助服务相关的元数据信息)</para>
+			<para>事件触发后，首先从事件对象中解析出目标辅助服务，然后执行其initializeApplication方法来处理与目标App相关的初始化操作。在ShuffleHandler的实现中，主要是对Token进行绑定。</para>
+		</listitem>
+		<listitem>
+			<para>如果是APPLICATION_STOP事件(目标NodeManager上指定App的所有NMContainer全部运行结束后会触发该事件)</para>
+			<para>遍历serviceMap集合中的每一个辅助服务，并对其执行stopApplication方法，在ShuffleHandler实现中主要是移除作业对应的Token。</para>
+		</listitem>
+		<listitem>
+			<para>如果是CONTAINER_INIT事件(每一个NMContainer状态机开启之后会触发该事件)</para>
+			<para>遍历serviceMap集合中的每一个辅助服务，对其执行initializeContainer方法。</para>
+		</listitem>
+		<listitem>
+			<para>如果是CONTAINER_STOP事件(每一个NMContainer运行结束之后都会触发该事件)</para>
+			<para>对每一个辅助服务执行stopContainer方法。</para>
+		</listitem>
+	</itemizedlist>
+</section>

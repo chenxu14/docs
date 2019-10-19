@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region实现</title>
+	<xi:include href="load_section.xml" />
+	<xi:include href="split_section.xml" />
+	<xi:include href="merge_section.xml" />
+	<xi:include href="compaction_section.xml" />
+	<xi:include href="recovery_section.xml" />
+</section>

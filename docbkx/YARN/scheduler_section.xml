@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Scheduler资源调度器</title>
+	<para>资源调度器是RM最为核心的组件之一，所有计算资源的申请都是通过他来进行调度的。目前主流的调度器实现有两种：分别为计算能力调度器(CapacityScheduler)和公平调度器(FairScheduler)，两者全部实现了YarnScheduler接口。</para>
+	<para>调度器的工作逻辑同样是由事件驱动机制来进行触发的(事件类型为SchedulerEventType)，虽然不同的调度器处理逻辑不尽相同，但是在事件回调处理上却存在一定的共性：</para>
+	<orderedlist>
+		<listitem>
+			<para>当APP_ADDED事件触发时，构造SchedulerApplication对象用于封装待调度的作业实例，并将其注册到调度器的applications集合中进行保存。</para>
+			<para>注册过程中还会根据路由规则来判断当前作业需要提交至哪个目标队列。</para>
+		</listitem>
+		<listitem>
+			<para>当APP_ATTEMPT_ADDED事件触发时，构造SchedulerApplicationAttempt用于封装目标作业的运行尝试，并将其提交至目标队列中进行部署。</para>
+			<para>调度器处理完APP_ATTEMPT_ADDED事件之后，会派发新的事件给RMAppAttempt，以便其构造ResourceRequest用于申请运行AM的Container。不光是AMContainer的申请，所有TaskContainer的申请也都是通过构造ResourceRequest对象来实现的，该对象主要封装了以下属性信息：</para>
+			<para>(1)priority：资源请求优先级，在所有请求中，用于申请AM的Container具有最高的优先级(0)，其次是FailedMapTask(5)、ReduceTask(10)和MapTask(20)；</para>
+			<para>(2)hostName：机器或机柜的名字，表示从指定机器/机柜上申请资源；</para>
+			<para>(3)resource：申请资源的大小，包括内存数和cpu数；</para>
+			<para>(4)numContainers：申请Container的个数；</para>
+			<para>(5)relaxLocality：本地松弛性标识，默认为true，简单描述如下：</para>
+			<para>ApplicationMaster在为Task申请Container计算资源时，会为每一个Task构造出多个ResourceRequest来满足不同形式的资源申请，包括：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>Node_local形式：向指定机器申请Container；</para></listitem>
+				<listitem><para>Rack_Local形式：向指定机架中的任意一台机器申请Container；</para></listitem>
+				<listitem><para>Off_Switch形式：不考虑机器的位置，任选一台机器来执行Container分配。</para></listitem>
+			</itemizedlist>
+			<para>调度器在响应这些ResourceRequest时，优先匹配Node_local形式的申请，如果满足不了本地分配原则在考虑其他形式的分配(Rack_Local、Off_Switch)，然而在某些时候我们可能希望资源只以Node_local形式来分配而不考虑其他形式，这时便可通过relaxLocality属性来控制：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>如果ResourceRequest类型为Off_Switch，并且relaxLocality为false，表示要申请的Container只能以Rack_Local或Node_Local形式来分配；</para></listitem>
+				<listitem><para>如果ResourceRequest类型为Rack_Local，并且relaxLocality为false，表示要申请的Container只能以Node_Local形式来分配；</para></listitem>
+				<listitem><para>如果ResourceRequest类型为Node_Local，并且relaxLocality为false，系统会打印警告：Relax locality off is not supported on local request；</para></listitem>
+			</itemizedlist>
+			<para>由此看来，relaxLocality属性相当于是一个开关，用来控制Off_Switch或Rack_Local分配方式是否开启。</para>
+			<tip>relaxLocality属性是从2.1.0-beta版本开始引入的，具体介绍可参照https://issues.apache.org/jira/browse/YARN-392。</tip>
+			<para>ResourceRequest构建成功以后需要注入到SchedulerApplicationAttempt实例中进行保存(通过调用YarnScheduler类的allocate方法)，这样当NODE_UPDATE事件触发时，调度器便可基于自身策略来对每一个ResourceRequest申请进行响应，以便将Container计算资源合理的分配出去。</para>
+			<para>需要注意的是ResourceRequest的注入和Container的返回并不是一个同步的过程，因为调度器在响应ResourceRequest处理时需要一些时间，而这段时间内Container可能还没有完成分配逻辑，因此调用端要保持与RM心跳通信的逻辑来不断获取新创建的Container信息(参考ContainerAllocator服务)。</para>
+		</listitem>
+		<listitem>
+			<para>当APP_ATTEMPT_REMOVED事件触发时</para>
+			<para>APP_ATTEMPT_REMOVED事件是在RMAppAttempt状态机运行结束时触发的(无论最终状态为FINISHED还是FAILED都会触发)，事件触发后调度器会释放目标FSAppAttempt所申请到的所有Container，并将目标FSAppAttempt从作业的运行队列中移除。</para>
+			<para>需要注意的是如果作业在提交时开启了keepContainers标识(通过ApplicationSubmissionContext类的setKeepContainersAcrossApplicationAttempts方法进行设置)，那么当AM由于以下原因异常退出时(代码参考BaseFinalTransition类中有关FAILED事件的回调处理)，针对已经处于RUNNING状态的RMContainer调度器是不进行释放处理的：</para>
+			<blockquote>
+				<para>(1)AMContainer的资源被其他任务抢占；</para>
+				<para>(2)AMContainer在目标机器上加载超时；</para>
+				<para>(3)AMContainer所在机器与RM失连；</para>
+				<para>(4)AMContainer在加载过程中发现坏死磁盘数超过阈值；</para>
+				<para>(5)由于NM执行了resync操作导致AMContainer被杀死。</para>
+			</blockquote>
+			<para>这样当新的AM启动后便可重用之前的资源，执行work-preserving操作。</para>
+		</listitem>
+		<listitem>
+			<para>当APP_REMOVED事件触发时，将目标SchedulerApplication从调度器的applications集合中移除。</para>
+		</listitem>
+		<listitem>
+			<para>当CONTAINER_EXPIRED事件触发时。</para>
+			<para>如果在10分钟之内，NM没能将Container成功加载的消息汇报给RM，ContainerAllocationExpirer监控将会触发该事件来使调度器对目标RMContainer执行释放处理(触发EXPIRE事件，将目标RMContainer切换至EXPIRED状态)。</para>
+		</listitem>
+		<listitem>
+			<para>当NODE_UPDATE事件类型触发时，响应ResourceRequest申请，执行Container分配处理。</para>
+			<para>NODE_UPDATE事件是在NM和RM心跳通信时触发的，心跳过程中，NM会将自身的节点状态信息传递给RM(参考NodeStatusUpdater服务)，信息包括：NM健康状态、其上部署的Containers和运行的AM。RM收到这些信息后会通过事件触发机制将其转发给调度器进行处理，调度器收到这些信息后，开启如下调度逻辑：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>首先遍历NM发送过来的Container信息：</para>
+					<para>如果其状态为RUNNING，触发RMContainerEvent事件，事件类型为LAUNCHED，使RMContainer状态机做相应处理；</para>
+					<para>如果其状态为COMPLETE，触发RMContainerEvent事件，事件类型为FINISHED，使RMContainer状态机做相应处理，同时对Container所占用的资源进行回收。</para>
+				</listitem>
+				<listitem><para>然后开始分配新的Container，分配逻辑由具体的调度器实现类来决定。</para></listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>当NODE_ADDED事件类型触发时，扩充集群计算资源。</para>
+			<para>NODE_ADDED事件是在NM注册时，或NM从unhealthy恢复到healthy时触发的，事件触发后调度器会将该NM节点提供的计算资源(cpu、内存)整合到集群总资源中去。</para>
+		</listitem>
+		<listitem>
+			<para>当NODE_REMOVED事件类型触发时，削减集群计算资源。</para>
+			<para>如果NM处于unhealthy状态，或其host加入了yarn.resourcemanager.nodes.exclude-path配置里，则会触发NODE_REMOVED事件，事件触发后资源调度器执行如下处理：</para>
+			<para>(1)将该NM的计算资源(cpu、内存)从集群总资源中削减出去；</para>
+			<para>(2)对部署在NM上的RMContainer执行kill操作。</para>
+		</listitem>
+	</orderedlist>
+	<xi:include href="capacity_section.xml" />
+	<xi:include href="fair_section.xml" />
+</section>

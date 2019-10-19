@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>表格锁管理</title>
+	<para>为了防止多用户并发修改表结构的情况发生，HBase对外声明了表格锁功能，即在对表格执行修改操作之前，应首先获取对应的表格锁，如果锁对象此时被其他线程占用，则当前线程需进入等待状态，直至目标表格锁成功抢占为止。</para>
+	<para>表格锁功能的实现其实是基于Zookeeper的一种Revocable-Shared-Locks应用(详细可参考http://zookeeper.apache.org/doc/trunk/recipes.html#sc_revocableSharedLocks)，在HBase中，该应用主要是通过ZKInterProcessLockBase类来封装的，其对外声明了如下实用方法：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>acquire-获取目标锁</para>
+			<para>具体实现如下：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先在Zookeeper中创建目标锁节点</para>
+					<para>节点类型为EPHEMERAL_SEQUENTIAL(即节点名称会按照创建时间的先后顺序来递增进行编号)，拿表格锁应用举例：</para>
+					<para>如果是读锁其对应的Zookeeper节点路径为：/hbase/table-lock/[tableName]/read-*</para>
+					<para>如果是写锁其对应的Zookeeper节点路径为：/hbase/table-lock/[tableName]/write-*</para>
+					<para>其中"*"代表数字，会按照创建时间的先后顺序来增长。</para>
+				</listitem>
+				<listitem>
+					<para>抢占目标锁</para>
+					<para>在满足以下判断条件时，可以对目标锁进行抢占：</para>
+					<blockquote><para>当前线程所创建的锁节点编号在目标目录下是最小的，如/hbase/table-lock/[tableName]/read-0</para></blockquote>
+					<para>否则当前线程需要进入等待状态，直至所有编号比它小的锁节点全部删除为止，这段时间的监控是通过注册DeletionListener来实现的。</para>
+				</listitem>
+				<listitem>
+					<para>更新当前锁信息</para>
+					<para>目标锁抢占成功后，将其赋予acquiredLock变量，以便通过它来对目标锁进行引用</para>
+				</listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>release-释放当前占有的锁</para>
+			<para>首先通过acquiredLock变量来获取当前线程所占据的锁信息(AcquiredLock)，然后通过其getPath方法来返回它所在ZK中创建的节点路径。最后将该节点路径进行删除，以便其他抢占目标锁的线程能够进行回调处理，同时将acquiredLock变量赋值为null，表示当前线程没有占据任何锁。</para>
+		</listitem>
+		<listitem>
+			<para>reapExpiredLocks-撤销已经申请过期的锁</para>
+			<para>遍历每一个锁节点路径，并判断如下公式是否成立</para>
+			<blockquote><para>锁节点的创建时间 + 过期时间 &lt; 当前时间</para></blockquote>
+			<para>若成立，直接将该锁节点进行删除</para>
+		</listitem>
+	</itemizedlist>
+	<para>为了便于表格锁的管理，HBase对外声明了TableLockManager对象，可通过它来实现表格锁的创建与释放功能，每一个表格锁是通过TableLock对象来封装的，其在实现上会将具体的业务转交给ZKInterProcessLockBase进行处理。同时TableLockManager还对外声明了如下配置参数用于设置表格锁相关的信息：</para>
+	<orderedlist>
+		<listitem>
+			<para>hbase.table.lock.enable</para>
+			<para>是否对表格操作启用加锁功能，默认为true。</para>
+		</listitem>
+		<listitem>
+			<para>hbase.table.write.lock.timeout.ms</para>
+			<para>获取写锁的超时时间，默认为10分钟。</para>
+		</listitem>
+		<listitem>
+			<para>hbase.table.read.lock.timeout.ms</para>
+			<para>获取读锁的超时时间，默认为10分钟。</para>
+		</listitem>
+		<listitem>
+			<para>hbase.table.lock.expire.ms</para>
+			<para>表格锁过期时间，默认为10分钟。</para>
+		</listitem>
+	</orderedlist>
+</section>

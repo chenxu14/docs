@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Application状态机</title>
+	<para>Application状态机用于封装NM视角每个App的运行状态，状态转换图如下所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/nmapp-lifecycle.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>Application状态转变是由ApplicationEventType事件触发的，状态转移表如下所示：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->INITING</para>
+			<para>触发事件：INIT_APPLICATION(在NM上启动部署App的第一个Container时触发)</para>
+			<para>回调处理：通过AppInitTransition类来封装。</para>
+			<blockquote><para>将App的acl信息(构建ContainerLaunchContext时指定)注入到ApplicationACLsManager中进行管理。同时触发LogHandlerEvent事件，事件类型为APPLICATION_STARTED，使LogHandler做相应处理(参考LogHandler服务)。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：INITING-->INITING</para>
+			<para>触发事件：APPLICATION_LOG_HANDLING_INITED(LogHandler处理完APPLICATION_STARTED事件后触发)</para>
+			<para>回调处理：通过AppLogInitDoneTransition类来封装。</para>
+			<blockquote><para>构造LocalResourcesTracker用来跟踪App依赖资源的获取情况，通过触发INIT_APPLICATION_RESOURCES事件(详细参考ResourceLocalizationService服务)。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：INITING-->INITING</para>
+			<para>触发事件：INIT_CONTAINER(在NM上启动部署每个Container时都会触发)</para>
+			<para>回调处理：通过InitContainerTransition类来封装。</para>
+			<blockquote><para>将事件封装的Container加入到该App的Container集合中去，等到Application的状态为RUNNING时在逐个进行初始化处理。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：INITING-->RUNNING</para>
+			<para>触发事件：APPLICATION_INITED(LocalResourcesTracker成功构建后触发)</para>
+			<para>回调处理：通过AppInitDoneTransition类来封装。</para>
+			<blockquote><para>遍历每一个待初始化的Container，通过触发ContainerEvent事件(事件类型为INIT_CONTAINER)来通知NMContainer状态机进行Container初始化操作。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->RUNNING</para>
+			<para>触发事件：INIT_CONTAINER(在NM上启动部署每个Container时都会触发)</para>
+			<para>回调处理：通过InitContainerTransition类来封装。</para>
+			<blockquote><para>获取事件对象封装的Container，触发ContainerEvent事件(事件类型为INIT_CONTAINER)来使NMContainer状态机执行Container的初始化操作。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->RUNNING</para>
+			<para>触发事件：APPLICATION_CONTAINER_FINISHED</para>
+			<blockquote><para>任何一个隶属于该App的Container运行结束后都会触发该事件。</para></blockquote>
+			<para>回调处理：通过ContainerDoneTransition类来封装。</para>
+			<blockquote><para>将运行结束的Container从App的Container集合中移除出去。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->FINISHING_CONTAINERS_WAIT | APPLICATION_RESOURCES_CLEANINGUP</para>
+			<para>触发事件：FINISH_APPLICATION(NM处理RM心跳过来的App时触发，参考NodeStatusUpdater服务)</para>
+			<para>回调处理：通过AppFinishTriggeredTransition类来封装。</para>
+			<blockquote><para>如果App还有未运行结束的Container，触发ContainerEvent事件对其进行杀死(事件类型为KILL_CONTAINER)，否则对App执行清理操作：包括删除与作业相关文件资源(通过触发LocalizationEvent事件，事件类型为DESTROY_APPLICATION_RESOURCES，使ResourceLocalizationService服务做相应处理)、关闭作业启动的辅助服务等。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：APPLICATION_RESOURCES_CLEANINGUP-->FINISHED</para>
+			<para>触发事件：APPLICATION_RESOURCES_CLEANEDUP(App资源清理结束后触发)</para>
+			<para>回调处理：通过AppCompletelyDoneTransition类来封装。</para>
+			<blockquote><para>通知LogHandler作业运行结束，使其做相应处理(比如将日志聚合到hdfs存储)。</para></blockquote>
+		</listitem>
+	</itemizedlist>
+</section>

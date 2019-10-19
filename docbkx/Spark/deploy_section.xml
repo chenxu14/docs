@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>基于YARN的应用部署</title>
+	<section>
+		<title>Cluster模式</title>
+		<para>基于该模式部署后，DriverPrograme程序运行在AMContainer容器中，部署命令如下：</para>
+		<programlistingco>
+			<programlisting>
+./bin/spark-submit
+    --class org.apache.spark.examples.SparkPi <co id="co.spark.app.main" linkends="co.note.spark.app.main"/>
+    --master yarn-cluster <co id="co.spark.app.deploy" linkends="co.note.spark.app.deploy"/>
+    --name spakeTest <co id="co.spark.app.name" linkends="co.note.spark.app.name"/>
+    --num-executors 3 <co id="co.spark.app.works" linkends="co.note.spark.app.works"/>
+    --driver-memory 4g <co id="co.spark.master.mem" linkends="co.note.spark.master.mem"/>
+    --driver-cores 1 <co id="co.spark.master.core" linkends="co.note.spark.master.core"/>
+    --executor-memory 2g <co id="co.spark.worker.mem" linkends="co.note.spark.worker.mem"/>
+    --executor-cores 1 <co id="co.spark.worker.core" linkends="co.note.spark.worker.core"/>
+    --queue default <co id="co.spark.app.queue" linkends="co.note.spark.app.queue"/>
+    --driver-java-options "-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps" <co id="co.spark.master.jvm" linkends="co.note.spark.master.jvm"/>
+    --driver-library-path &lt;extra_lib_path> <co id="co.spark.master.lib" linkends="co.note.spark.master.lib"/>
+    --jars &lt;any_local_files_used_in_SparkContext.addJar> <co id="co.spark.app.addJars" linkends="co.note.spark.app.addJars"/>
+    --driver-class-path &lt;extra_class_path> <co id="co.spark.master.classpath" linkends="co.note.spark.master.classpath"/>
+    --files file.txt <co id="co.spark.cache.file" linkends="co.note.spark.cache.file"/>
+    --archives archives.zip <co id="co.spark.cache.archive" linkends="co.note.spark.cache.archive"/>
+    --properties-file spark-defaults.conf <co id="co.spark.prop.file" linkends="co.note.spark.prop.file"/>
+    --conf PROP=VALUE <co id="co.spark.prop" linkends="co.note.spark.prop"/>
+    --proxy-user <co id="co.spark.user" linkends="co.note.spark.user"/>
+    --verbose <co id="co.spark.verbose" linkends="co.note.spark.verbose"/>
+    lib/spark-examples-1.0.0-hadoop2.2.0.jar <co id="co.spark.app.jar" linkends="co.note.spark.app.jar"/>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.spark.app.main" arearefs="co.spark.app.main" ><para>应用主程序入口类；</para></callout>
+				<callout id="co.note.spark.app.deploy" arearefs="co.spark.app.deploy" ><para>DriverProgram部署方式，yarn-cluster表示部署在AM上；</para></callout>
+				<callout id="co.note.spark.app.name" arearefs="co.spark.app.name" ><para>应用程序名称；</para></callout>
+				<callout id="co.note.spark.app.works" arearefs="co.spark.app.works" ><para>使用Container的个数，包括AMContainer和TaskContainer；</para></callout>
+				<callout id="co.note.spark.master.mem" arearefs="co.spark.master.mem" ><para>分配给AMContainer的内存大小；</para></callout>
+				<callout id="co.note.spark.master.core" arearefs="co.spark.master.core" ><para>分配给AMContainer的cpu数；</para></callout>
+				<callout id="co.note.spark.worker.mem" arearefs="co.spark.worker.mem" ><para>分配给TaskContainer的内存大小；</para></callout>
+				<callout id="co.note.spark.worker.core" arearefs="co.spark.worker.core" ><para>TaskContainer使用cpu数；</para></callout>
+				<callout id="co.note.spark.app.queue" arearefs="co.spark.app.queue" ><para>指定应用程序所提交到的目标队列；</para></callout>
+				<callout id="co.note.spark.master.jvm" arearefs="co.spark.master.jvm" ><para>指定加载AMContainer的JVM运行参数；</para></callout>
+				<callout id="co.note.spark.master.lib" arearefs="co.spark.master.lib" ><para>为AMContainer的运行环境添加lib依赖；</para></callout>
+				<callout id="co.note.spark.app.addJars" arearefs="co.spark.app.addJars" ><para>将指定jar包上传到Container工作目录中去，并添加到环境变量下；</para></callout>
+				<callout id="co.note.spark.master.classpath" arearefs="co.spark.master.classpath" ><para>为AMContainer的运行指定额外的环境变量信息；</para></callout>
+				<callout id="co.note.spark.cache.file" arearefs="co.spark.cache.file" ><para>将指定文件上传到Container工作目录中去；</para></callout>
+				<callout id="co.note.spark.cache.archive" arearefs="co.spark.cache.archive" ><para>将指定归档文件上传到Container工作目录中去；</para></callout>
+				<callout id="co.note.spark.prop.file" arearefs="co.spark.prop.file" ><para>Spark参数配置文件，默认为conf目录下的spark-defaults.conf。</para></callout>
+				<callout id="co.note.spark.prop" arearefs="co.spark.prop" ><para>动态设置目标参数值；</para></callout>
+				<callout id="co.note.spark.user" arearefs="co.spark.user" ><para>通过代理用户来执行作业；</para></callout>
+				<callout id="co.note.spark.verbose" arearefs="co.spark.verbose" ><para>打印冗余信息以便于作业调试；</para></callout>
+				<callout id="co.note.spark.app.jar" arearefs="co.spark.app.jar" ><para>封装应用的jar包；</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>Client模式</title>
+		<para>基于该模式部署，DriverPrograme程序运行在客户端，并与AM保持通信，部署命令如下：</para>
+		<blockquote><para>./bin/spark-shell --master yarn-client</para></blockquote>
+	</section>
+</section>

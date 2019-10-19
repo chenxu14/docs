@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>体系结构</title>
+	<para>设计意图：</para>
+	<orderedlist>
+		<listitem>可持续提供服务，单台机器出现故障不影响集群的使用；</listitem>
+		<listitem>基于流式数据读取，不同于数据库有寻址操作，适用于全局数据分析；</listitem>
+		<listitem>大数据处理，存储GB级或TB级的大文件；</listitem>
+		<listitem>一次写入多次读取(Write-once-read-many)；</listitem>
+		<listitem>数据本地执行或就近执行，节省数据传输开销；</listitem>
+		<listitem>跨平台可移植性。</listitem>
+	</orderedlist>
+	<section>
+		<title>NameNode</title>
+		<section>
+			<title>安全模式</title>
+			<para>Namenode启动时会进入安全模式，此时文件系统将处于只读状态，所有对文件的修改操作都会抛出异常SafeModeException。安全模式下，namenode负责检测每一个block是否达到要求的备份数，当满足备份条件的block达到一定比例时(通过dfs.safemode.threshold.pct配置，默认为0.999f)，安全模式将退出。</para>
+			<tip>
+				<para>安全模式操作命令：hadoop dfsadmin -safemode [enter | leave | get |wait]，其中</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>enter – 进入安全模式</para></listitem>
+					<listitem><para>leave - 强制NameNode离开安全模式</para></listitem>
+					<listitem><para>get   - 返回安全模式是否开启的信息</para></listitem>
+					<listitem><para>wait  - 等待，一直到安全模式结束。</para></listitem>
+				</itemizedlist>
+			</tip>
+		</section>
+		<section>
+			<title>元数据存储</title>
+			<para>文件系统的元数据信息(目录结构、文件属性等)是基于内存数据库来存储的，其持久化策略为数据快照加操作日志。NameNode启动时将数据快照加载进内存，然后依次执行EditLog所记录的操作，从而得到最新的数据状态。</para>
+			<figure id='metadata.store'>
+				<title>元数据加载方式</title>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="80%" width="80%" fileref="../media/hdfs/metadata-store.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+			</figure>
+			<para>如图所示，FsImage为数据快照信息，EditLog为数据操作日志。针对两种类型的文件，Hadoop分别提供了ImageViewer和EditsViewer来查看它们的内容，其中FsImage存储结构如下：</para>
+			<figure id='fsimg.format'>
+				<title>fsimage存储格式</title>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hdfs/fsimg-format.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+			</figure>
+			<para>
+				其中，如果path表示一个文件，并且numBlcok > 1，则 blockId、numBytes、genStamp三个字段会出现多次，分别对应每一个block信息。
+				由元数据的存储结构可以发现，namenode并没有持久化存储每一个block的location信息，这些信息是在datanode启动的时候通过heartbeat发送给namenode的，然后存储到namenode的内存里(详细参考<link>http://www.alidata.org/archives/1120</link>)</para>
+		</section>
+		<section>
+			<title>源码解析</title>
+			<para>一、NameNode服务源码</para>
+			<para>当执行hadoop-daemon.sh start namenode命令时，其实是执行了NameNode类的main方法，服务启动的时候做了如下处理：</para>
+				<para>判断集群是否基于HA方式部署，判断依据：以dfs.namenode.rpc-address为前缀的配置存在多个</para>
+				<para>初始化NN状态，如果基于HA方式部署则初始状态为Standby，否则为Active</para>
+				<para>由dfs.ha.allow.stale.reads配置参数来判断StandbyNN是否允许读操作</para>
+				<para>初始化以下配置参数的值：</para>
+					<para>dfs.nameservice.id</para>
+					<para>dfs.ha.namenode.id</para>
+				<para>启动NameNodeHttpServer服务响应客户端的http请求</para>
+				<para>加载NameNode元数据信息，元数据的加载是通过FSNamesystem的loadFromDisk方法来完成的，处理逻辑如下：</para>
+				<para>(1)实例化FSImage用来封装数据快照信息，数据快照的存储地址通过dfs.namenode.name.dir参数获得</para>
+				<para>(2)实例化FSEditLog用来封装操作日志，操作日志的存储路劲通过dfs.namenode.shared.edits.dir(共享存储)和dfs.namenode.edits.dir(存储在NN中)参数来指定</para>
+				<para>(3)实例化FSNamesystem用来封装文件系统，实例化过程中会初始化一些组件，包括：</para>
+					<para>BlockManager：管理DN存储的block信息(block信息通过心跳通信向NN汇报)</para>
+					<tip>如果基于HA方式部署，block信息会持久化存储到操作日志共享目录下，这样StandBy节点也可以知道block的分配情况</tip>
+					<para>SnapshotManager：实现文档快照功能(2.2新特性)</para>
+					
+				<para>启动NameNodeRpcServer服务响应客户端的RPC请求</para>
+				
+		</section>
+	</section>
+	<section>
+		<title>DataNode</title>
+	</section>
+</section>

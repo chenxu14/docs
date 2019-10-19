@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启动部署</title>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>准备工作：</para>
+			<orderedlist>
+				<listitem>
+					<para>为集群的每个节点创建3个linux用户(hdfs、yarn和mapred)分别用来启动不同的进程，并将3个用户划分到同一用户组来作为hadoop集群的superuser用户组(dfs.permissions.superusergroup属性设置)；</para>
+					<tip>
+						<para>在用户/用户组关系映射处理上，如果hadoop采用默认的处理逻辑(通过bash -c groups命令来判断指定用户属于哪一用户组)，则NameNode节点还需添加dn用户(通过dfs.datanode.kerberos.principal属性指定的用户)，并将其加入superuser用户组，否则DataNode节点与NameNode节点没有办法完成心跳通信的逻辑。</para>
+						<para>而如果集群还启用了QJM热切功能，需要按照同样的方法来添加nn用户(通过dfs.namenode.kerberos.principal属性指定的用户)，否则NameNode节点无法与JournalNode进行通信。</para>
+					</tip>
+				</listitem>
+				<listitem><para>选择其中一台节点安装KerberosServer，其他节点安装KerberosClient(参考Keberos安装章节)；</para></listitem>
+				<listitem><para>将hadoop集群中每个进程的principal注册到KDC环境中，并生成与principal对应的keytab(注册过程通过kadmin命令来完成，要注册的principal参考配置明细章节)；</para></listitem>
+				<listitem><para>为每一个datanode节点安装jsvc组件(组件安装参考hadoop-env.xml配置文件章节)。</para></listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>启动脚本：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先以hdfs用户启动namenode进程，依次执行如下脚本：</para>
+					<para>hdfs namenode -format</para>
+					<para>$HADOOP_HOME/sbin/start-dfs.sh</para>
+				</listitem>
+				<listitem>
+					<para>然后以root用户启动所有的datanode进程，执行如下脚本：</para>
+					<para>$HADOOP_HOME/sbin/start-secure-dns.sh</para>
+					<tip>如果要对单独的datanode进行启动可使用如下脚本(同样使用root用户)：$HADOOP_HOME/sbin/hadoop-daemon.sh --config $HADOOP_CONF_DIR --script hdfs start datanode</tip>
+				</listitem>
+				<listitem>
+					<para>接着以yarn用户启动ResourceManager和所有的NodeManager进程，执行如下脚本：</para>
+					<para>$HADOOP_HOME/sbin/start-yarn.sh</para>
+				</listitem>
+				<listitem>
+					<para>最后以mapred用户启动JobHistoryServer组件，执行如下脚本：</para>
+					<para>$HADOOP_HOME/sbin/mr-jobhistory-daemon.sh start historyserver</para>
+				</listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+</section>

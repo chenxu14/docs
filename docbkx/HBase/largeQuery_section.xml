@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude"
+    xmlns:ns5="http://www.w3.org/2000/svg"
+    xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+    xmlns:ns3="http://www.w3.org/1999/xhtml"
+    xmlns:db="http://docbook.org/ns/docbook">
+    <title>大查询隔离</title>
+    <para>大查询相对于普通查询来讲是一种非常耗费资源的操作，如果不在服务端加以控制隔离，很容易造成系统资源的使用饱和，进而使原本快速高效的Put和Get操作也变得延迟明显。为了避免这种状况的发生有必要在服务端引入一套隔离机制来限制大查询能够使用的系统资源，比如在RPC层面去限制能够处理大查询的Handler数量。</para>
+    <para>针对以下类型的查询可定义为大查询操作。</para>
+    <orderedlist>
+        <listitem><para>Scan对象声明了LARGEQUERY属性(通过调用setAttribute方法)，并将其属性值设置为true。</para></listitem>
+        <listitem><para>没有声明数据的检索区间(即Scan过程没有声明startkey和endkey)。</para></listitem>
+        <listitem>
+            <para>对Scanner执行next的次数超过了指定阈值。</para>
+            <para>阈值可通过hbase.ipc.server.largequery.maxseq参数进行指定(默认为20)，也可通过HBase的动态刷新服务来对参数值进行动态调整。</para>
+        </listitem>
+        <listitem><para>调用了自定义的协处理器，并且协处理器会涉及一些比较耗费资源的聚合操作(比如AggregateService)。</para></listitem>
+    </orderedlist>
+    <para>针对大查询请求，服务端需要满足以下处理要求。</para>
+    <orderedlist>
+        <listitem>
+            <para>能够动态的调整是否开启大查询隔离功能。</para>
+            <para>可通过hbase.ipc.server.largequery.isolate参数项来决定功能是否开启，再通过hbase的动态刷新服务来对功能进行动态启用。</para>
+        </listitem>
+        <listitem>
+            <para>能够限制用来处理大查询请求的Handler数量，如果没有空闲线程来处理请求，查询将进入排队。</para>
+            <para>handler数量可通过hbase.regionserver.largequery.handler.count参数指定，而查询队列的长度可通过numCallsInLargeQueryQueue指标进行监控。</para>
+        </listitem>
+        <listitem>
+            <para>针对大查询可动态调整是否开启BlockCache。</para>
+            <para>在离线应用场景下会有扫描大量表格数据的需求，然而这些数据并不是经常访问的热点数据，缓存下来会降低BlockCache的利用率。因此可考虑将其关闭，通过设置hbase.regionserver.largequery.cacheblock参数值为false，也可通过动态刷新服务对参数值进行调整。</para>
+        </listitem>
+        <listitem>
+            <para>能考虑offpeak的声明情况，在非尖峰时段不开启大查询隔离机制。</para>
+        </listitem>
+    </orderedlist>
+    <section>
+        <title>实现细节</title>
+        <para>关于Handler的隔离控制主要是通过扩展SimpleRpcScheduler来实现的，在HBase的原生实现里面，Handler一共被划分成了3个分组：</para>
+        <para>(1)priority分组用来处理高优先级的请求，比如对meta表格的查询申请。</para>
+        <para>(2)replication分组用来处理replication请求。</para>
+        <para>(3)call分组用来处理用户表格的操作请求。</para>
+        <para>在此基础上我们可以新建一个largeQuery分组用来处理大查询请求，并为其分配指定数量的handler。在将查询请求划分到该分组之前，需要对系统环境进行如下判断：</para>
+        <orderedlist>
+            <listitem><para>系统开启了大查询隔离功能(即hbase.ipc.server.largequery.isolate参数值为true)。</para></listitem>
+            <listitem><para>largeQuery分组指定的handler数量大于0(即hbase.regionserver.largequery.handler.count参数值不为0)。</para></listitem>
+            <listitem>
+                <para>目标请求的优先级被标记为LARGEQUERY。</para>
+                <para>请求优先级的判断逻辑主要通过AnnotationReadingPriorityFunction类的getPriority方法来封装，这里对该方法进行了如下扩展：</para>
+                <para>(1)如果是ScanRequest请求，并且请求没有声明startKey和endKey，将请求划分到大查询的优先级里。</para>
+                <para>(2)同样如果是ScanRequest请求，如果其执行next方法的次数大于hbase.ipc.server.largequery.maxseq参数阈值，那么无论其是否指定startkey和endkey都将其划分到大查询分组里。</para>
+                <para>(3)如果是CoprocessorServiceRequest请求，通过CoprocessorJudger来判断目标请求是否为大查询，如果其isLargeQuery方法返回true，将其划分到大查询的优先级里。</para>
+            </listitem>
+        </orderedlist>
+        <para>如果满足以上判断条件，并且请求时间不在offpeak区间内，目标查询请求将会被划分到largeQuery分组中进行处理，还可通过numCallsInLargeQueryQueue指标来对分组中的请求排队情况进行监控。</para>
+        <tip>AnnotationReadingPriorityFunction类在执行getPriority方法时，会根据目标服务的方法注解来决定请求的优先级，如果表格的协处理器逻辑都是比较耗费资源的大查询操作，可将RSRpcServices服务的execService方法注解为@QosPriority(priority=HConstants.LARGEQUERY_QOS)。</tip>
+    </section>
+    <section>
+        <title>隔离效果</title>
+        <para>这里以调用AggregateService协处理器服务的getRowNum方法为例进行测试，在统计目标表格行数的过程中，每台RegionServer的cpu使用情况如下：</para>
+        <mediaobject>
+            <imageobject>
+                <imagedata contentdepth="100%" width="90%" scalefit="1" fileref="../media/hbase/largeQuery.png"></imagedata>
+            </imageobject>
+        </mediaobject>
+        <para>如图所示，机器hbase09.nh启用了大查询隔离功能，其cpu使用率可以控制在40%之内，而其它机器由于没有启用隔离机制导致cpu资源被打满。同时在hbase09.nh和hbase10.nh上选取不同的Region进行查询测试，结果如下：</para>
+        <programlisting>
+scan 'Mobile.CI_Message',{LIMIT => 1, STARTROW => '-18', ENDROW => '-19'}
+1 row(s) in 0.0530 seconds
+
+scan 'Mobile.CI_Message',{LIMIT => 1, STARTROW => '-17', ENDROW => '-18'}
+ERROR: Call id=7, waitTime=60001, operationTimeout=60000 expired.
+        </programlisting>
+        <para>可以看到hbase09.nh上的查询并未受到大查询的影响，响应时间正常。而hbase10.nh上由于大查询占据了所有的handler，导致普通查询进入排队直至超时。</para>
+    </section>
+    <section>
+    	<title>功能启用</title>
+    	<para>针对ClientServcie所封装的查询请求，HBase在rpc层面做了自动的判断处理，如果是大查询将采用单独的Handler分组进行处理。如果是基于协处理器的处理请求(比如kylin和phoniex)，需要手动实现CoprocessorJudger接口来判断目标协处理器的访问是否为大查询。比如针对AggregateService协处理器的使用可做如下判断：</para>
+    	<programlisting>
+public class AggregateServiceJudger implements CoprocessorJudger {
+    @Override
+    public boolean isLargeQuery(ByteString msg) {
+        try {
+            AggregateRequest request = AggregateRequest.parseFrom(msg);
+            Scan scan = request.getScan();
+            String startRow = scan.getStartRow().toStringUtf8();
+            String stopRow = scan.getStopRow().toStringUtf8();
+            if ("".equals(startRow) || "".equals(stopRow)) {
+                return true;
+            }
+        } catch (InvalidProtocolBufferException e) {
+            LOG.info(e.getMessage(), e);
+        }
+        return false;
+    }
+}
+    	</programlisting>
+    	<para>然后将AggregateServiceJudger通过hbase.regionserver.largequery.judger.class参数项引入到系统的上下文环境，该参数的默认值为：org.apache.hadoop.hbase.coprocessor.DefaultCoprocessorJudger，针对所有协处理器的访问均不认为是大查询。</para>
+    </section>
+    <section>
+        <title>参数配置</title>
+        <orderedlist>
+            <listitem>
+                <para>hbase.ipc.server.largequery.isolate</para>
+                <para>是否启用大查询的隔离功能，默认值为true，可通过动态刷新服务来进行动态调整。</para>
+            </listitem>
+            <listitem>
+                <para>hbase.ipc.server.largequery.maxseq</para>
+                <para>当对Scanner执行next的次数大于该参数阈值时，将其标记为大查询，默认值为20，可通过动态刷新服务来进行动态调整。</para>
+            </listitem>
+            <listitem>
+                <para>hbase.regionserver.largequery.handler.count</para>
+                <para>用于处理大查询请求的handler数量，默认值为0表示不启用隔离功能即使hbase.ipc.server.largequery.isolate参数值为true。</para>
+            </listitem>
+            <listitem>
+                <para>hbase.regionserver.largequery.cacheblock</para>
+                <para>针对大查询操作是否开启blockCache，默认开启，可通过动态刷新服务来进行动态调整。</para>
+            </listitem>
+            <listitem>
+            	<para>hbase.regionserver.largequery.judger.class</para>
+            	<para>通过该参数引入自定义的CoprocessorJudger来判断要访问的协处理器是否涉及大查询。</para>
+            </listitem>
+        </orderedlist>
+    </section>
+</section>

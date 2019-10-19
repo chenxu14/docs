@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.chen.doc</groupId>
+  <artifactId>hadoop</artifactId>
+  <version>1.0.0</version>
+  <name>hadoop</name>
+  <packaging>pom</packaging>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.agilejava.docbkx</groupId>
+        <artifactId>docbkx-maven-plugin</artifactId>
+        <version>2.0.14</version>
+        <executions>
+          <execution>
+            <id>documentation identifier</id>
+            <phase>pre-site</phase>
+            <goals>
+              <goal>generate-pdf</goal>
+            </goals>
+            <configuration>
+              <includes>hbase.xml</includes>
+              <bodyFontFamily>SimSun</bodyFontFamily>
+              <titleFontFamily>SimHei</titleFontFamily>
+              <monospaceFontFamily>SimSun</monospaceFontFamily>
+              <fonts>
+                <font>
+                  <name>SimSun</name>
+                  <style>normal</style>
+                  <weight>normal</weight>
+                  <embedFile>src/docbkx-fonts/simsun.ttc</embedFile>
+                  <metricsFile>src/docbkx-fonts/simsun.xml</metricsFile>
+                </font>
+                <font>
+                  <name>SimHei</name>
+                  <style>normal</style>
+                  <weight>normal</weight>
+                  <embedFile>src/docbkx-fonts/simhei.ttf</embedFile>
+                  <metricsFile>src/docbkx-fonts/simhei.xml</metricsFile>
+                </font>
+              </fonts>
+            </configuration>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- shared configuration -->
+          <generatedSourceDirectory>${project.build.directory}/docbkx/generated</generatedSourceDirectory>
+          <xincludeSupported>true</xincludeSupported>
+          <paperType>A4</paperType>
+          <fop1Extensions>1</fop1Extensions>
+          <foCustomization>src/docbkx-stylesheet/fo/docbook.xsl</foCustomization>
+          <customizationParameters>
+            <!-- additional XSLT parameters -->
+            <parameter>
+              <name>key</name>
+              <value>value</value>
+            </parameter>
+          </customizationParameters>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

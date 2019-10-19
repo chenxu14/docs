@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>GC调整</title>
+	<para>在对响应及时性要求比较高的系统中，GC往往是最为头疼的问题，控制不当将会产生长时间的STW，为了使GC能够高效的工作，HBase在内存使用上做了如下处理：</para>
+	<orderedlist>
+		<listitem>
+			<para>采用堆外内存，并做成缓冲池来循环使用，防止堆内存中老年代产生内存碎片问题。</para>
+			<para>老年代中产生内存碎片的主要原因大致如下：默认情况下，新生代中的内存对象在经过15次交换回收之后才会进入老年代，如果读写操作比较频繁，新生代中将会包含大量的chunk和block对象，由于这些对象会在内存中保留一段时间，因此并不会被YGC马上回收掉，从而导致suvivo区间很容易被打满。写满之后，新生代中溢出的数据将直接进入老年代，这些溢出数据通常会包含很多的临时对象，并且每个临时对象的存储空间又很小，不足以容纳一个Block和Chunk。当CMS触发之后，这些临时对象将会被回收，然而其所占用的空间却没有办法再次被有效利用到，从而形成碎片问题。碎片积累过多将会引发promotion fail异常，进而触发fullGc操作，使应用进入长时间的暂停。</para>
+			<para>采用堆外内存的方式处理之后，大部分数据对象在拷贝到DirectByteBuffer区域后，都将在新生代中被GC回收掉，从而降低suvivo区间被打满的概率，使临时对象都能在YGC过程中被回收，从而减轻老年代内存碎片问题。</para>
+			<para>在2.0版本之前，HBase主要针对BucketCache提供了堆外缓存策略，而在数据写入方面的缓存策略(chunkpool)依然采用堆内的方式进行。2.0版本之后开始提供堆外缓存策略实现(详细参考HBASE-15786)。</para>
+		</listitem>
+		<listitem>
+			<para>优化以下应用来提高堆内存的使用效率(HBASE-15179)。</para>
+		</listitem>
+	</orderedlist>
+<!-- 
+	<para>Java采用分代回收策略对内存中不再使用的对象进行回收，堆内存被划分为新生代(Young Generation)、旧生代(Old Generation)和永久世代(Permanent generation)，如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="70%" width="70%" fileref="../media/hbase/generation.PNG"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>其中，新生代内存用于存储生命周期比较短暂的对象，JVM针对这些对象采用copy-&amp;-sweep策略来回收，好处是使对象在内存中紧密排列，不会有内存碎片产生，缺点是对象的内存地址会经常发生变动，变动期间触发Stop the World Event来阻塞应用；</para>
+	<para>而旧生代内存用于存储生命周期比较“长寿”的对象(比如缓存对象)，这些对象的内存地址不会轻易发生变动，JVM对其采用mark-&amp;-sweep策略来回收；</para>
+	<para>最后永久世代用于存储Class对象。这些对象永远不会被回收。</para>
+	<tip>
+		<para>有关java的垃圾回收机制可参考http://www.oracle.com/webfolder/technetwork/tutorials/obe/java/gc01/index.html。</para>
+	</tip>
+	<para>JVM针对不同的垃圾回收策略声明了多种不同的实现算法，在JDK5.0之前，JVM默认采用Serial-Collector来对新生代和旧生代的内存进行回收，该算法普遍适用于单CPU普通客户机的情况下，然而HBase通常运行在多核计算机上，并且对内存的使用非常频繁(像memstore和BlockCache这些功能)，采用串行处理并不能使垃圾回收的效率达到最优化，而且还有可能出现性能瓶颈。因此需要对gc配置作如下修改：</para>
+	<orderedlist>
+		<listitem>
+			<para>首先，提高新生代内存，从而降低YGC的触发频率</para>
+			<para>新生代内存通过-Xmn参数来指定，Sun官方建议将其设置为整个堆内存大小的3/8。虽然提高新生代内存能够降低YGC的触发频率，然而新生代内存也不是越大越好，因为YGC期间会阻塞应用程序的访问，内存数量越大，垃圾回收的时间也便越长，从而增加系统响应上的延迟。</para>
+		</listitem>
+		<listitem>
+			<para>选用合理的垃圾收集器</para>
+			<para>JVM提供了多种垃圾收集器来满足不同场景的使用需求，针对新生代内存，HBase建议采用Parallel Collector来对垃圾数据进行并行回收；而对于旧生代内存HBase建议使用CMS来做垃圾回收处理.</para>
+			<para>CMS是Concurrent-Mark-Sweep的缩写，该收集器的另一种叫法为Concurrent-Low-Pause-Collector。顾名思义，收集器在执行垃圾回收期间尽量不阻塞应用程序线程，与其保持并发运行的状态，从而保证系统的实时性。</para>
+			<tip>
+				<para>CMS通常在内存空间比较大的情况下使用(大于等于8G)，主要目的是为了确保系统响应的及时性。使用该收集器的同时，JVM默认使用Parallel-Collector来对新生代的内存进行回收。另外，从java7开始，JVM引入G1收集器，G1在CMS的基础上做了很大程度的性能改进，是以后的主流趋势。</para>
+			</tip>
+			<para>CMS收集器的使用可通过如下命令参数来指定：</para>
+			<blockquote><para>-XX:+UseConcMarkSweepGC -XX:CMSInitiatingOccupancyFraction=70</para></blockquote>
+			<para>其中CMSInitiatingOccupancyFraction参数用来设置CMS操作的触发时机(堆内存使用达到70%时触发)。</para>
+		</listitem>
+		<listitem>
+			<para>添加日志输出以便于后期跟踪处理</para>
+			<para>日志功能可通过如下命令参数来指定：</para>
+			<para>-verbose:gc -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -Xloggc:path/gc.log</para>
+			<para>日志文件中，主要跟踪concurrent mode failure和promotion failed两种错误，出现原因如下：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>promotion failed表示新生代内存数据进入旧生代时发生错误；</para></listitem>
+					<listitem><para>concurrent mode failure表示在执行CMS期间，堆内存使用达到了100%，此时将阻塞应用程序线程。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+		</listitem>
+	</orderedlist>
+	<para>最后，完整的命令参数设置如下：</para>
+ -->
+ 	<section>
+ 		<title>CMS配置参考</title>
+		<programlistingco>
+			<programlisting>
+export HBASE_REGIONSERVER_OPTS="-server -Xmx20g -Xms20g <co id="co.jvm.xmx" linkends="co.note.jvm.xmx"/>
+    -Xmn2g <co id="co.jvm.xmn" linkends="co.note.jvm.xmn"/>
+    -XX:PermSize=512m -XX:MaxPermSize=512m <co id="co.jvm.perm" linkends="co.note.jvm.perm"/>
+    -XX:MaxDirectMemorySize=20g <co id="co.jvm.nio" linkends="co.note.jvm.nio"/>
+    -XX:SurvivorRatio=8 <co id="co.jvm.survivor" linkends="co.note.jvm.survivor"/>
+    -XX:+UseConcMarkSweepGC <co id="co.jvm.cms" linkends="co.note.jvm.cms"/>
+    -XX:ParallelGCThreads=25 <co id="co.jvm.thread" linkends="co.note.jvm.thread"/>
+    -XX:CMSInitiatingOccupancyFraction=70 <co id="co.jvm.fraction" linkends="co.note.jvm.fraction"/>
+    -XX:+UseCMSCompactAtFullCollection <co id="co.jvm.compact" linkends="co.note.jvm.compact"/>
+    -XX:+CMSParallelRemarkEnabled <co id="co.jvm.remark" linkends="co.note.jvm.remark"/>
+    -XX:CMSFullGCsBeforeCompaction=2 <co id="co.jvm.compact.num" linkends="co.note.jvm.compact.num"/>
+    -XX:+CMSScavengeBeforeRemark <co id="co.jvm.chunk" linkends="co.note.jvm.chunk"/>
+    -XX:+CMSClassUnloadingEnabled 
+    -XX:MaxTenuringThreshold=3 <co id="co.jvm.threshold" linkends="co.note.jvm.threshold"/>
+    -Dcom.sun.management.jmxremote
+    -Xloggc:/path/to/gc.log -verbose:gc <co id="co.jvm.verbose" linkends="co.note.jvm.verbose"/>
+    -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+PrintGCApplicationStoppedTime 
+    -XX:+PrintGCApplicationConcurrentTime -XX:+PrintTenuringDistribution"
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.jvm.xmx" arearefs="co.jvm.xmx"><para>堆内存最大值与最小值设置成相同的值；</para></callout>
+				<callout id="co.note.jvm.xmn" arearefs="co.jvm.xmn"><para>设置新生代内存大小为2G，由于YGC会触发stopTheWorld，如果设置太大应用的暂停时间可能会变长；</para></callout>
+				<callout id="co.note.jvm.perm" arearefs="co.jvm.perm"><para>设置永久代内存大小为512m；</para></callout>
+				<callout id="co.note.jvm.nio" arearefs="co.jvm.nio"><para>设置堆外内存大小为20G，如果HBase的BucketCache和chunkpool采用堆外内存来存储需要合理设置该值；</para></callout>
+				<callout id="co.note.jvm.survivor" arearefs="co.jvm.survivor"><para>设置每个survivor区域的大小为整个新生代的1/10，需要注意的是survivor空间写满后内存数据将会直接进入老年代，这样很容易产生内存碎片问题，因为一些临时对象并没有在新生代进行交换回收就进入了老年代，而这些临时对象的空间往往又非常小，不足以存放一个MSLAB，这样当有MSLAB块晋升时便会产生promotion failed错误，因此可适当提高survivor的空间比例；</para></callout>
+				<callout id="co.note.jvm.cms" arearefs="co.jvm.cms"><para>使用CMS作为垃圾回收器；</para></callout>
+				<callout id="co.note.jvm.thread" arearefs="co.jvm.thread"><para>并行收集器的线程数，通过该值计算ParallelCMSThreads，计算公式(ParallelGCThreads+3)/4)；</para></callout>
+				<callout id="co.note.jvm.fraction" arearefs="co.jvm.fraction"><para>堆内存使用70%的时候触发老年代回收；</para></callout>
+				<callout id="co.note.jvm.compact" arearefs="co.jvm.compact"><para>执行FullGC时对年老代的压缩，防止内存碎片的产生；</para></callout>
+				<callout id="co.note.jvm.remark" arearefs="co.jvm.remark"><para>开启并行标记来降低标记停顿；</para></callout>
+				<callout id="co.note.jvm.compact.num" arearefs="co.jvm.compact.num"><para>FullGc执行多少次后开始对内存进行压缩，0表示每次都压缩；</para></callout>
+				<callout id="co.note.jvm.chunk" arearefs="co.jvm.chunk">
+					<para>在CMS进入remark阶段之前确保触发一次minorGc，以便于新生代内存中执行chunk划分操作(执行minorGc后，对象的内存地址是顺序排列的，便于chunk的划分)。在通过并行的方式来标记每一个chunk。详细参考https://blogs.oracle.com/jonthecollector/entry/did_you_know</para>
+				</callout>
+				<callout id="co.note.jvm.threshold" arearefs="co.jvm.threshold">
+					<para>有两种情况可以使新生代内存转移到老年代：</para>
+					<orderedlist>
+						<listitem>
+							<para>对象在新生代中经过MaxTenuringThreshold次回收后依然存活；</para>
+							<para>HBase中的对象大致可分为三类，分别为：</para>
+							<blockquote>
+								<para>(1)函数内的临时对象，这种对象会很快被淘汰；</para>
+								<para>(2)存活一定周期的对象，如Memstore中的KeyValue，LRUBlockCache中的Block以及开启WAL压缩以后的字典数据，这些对象基本都是在老年代被回收；</para>
+								<para>(3)永久存活的对象，如BucketCache中的Block以及ChunkPool中的Chunk，这些对象会一直存在于老年代。</para>
+							</blockquote>
+							<para>由这些对象的存储特点来看可以适当的降低MaxTenuringThreshold参数值(参考http://zjushch.iteye.com/blog/1839754)。</para>
+						</listitem>
+						<listitem>
+							<para>minorGC触发后，新生代内存中存活对象的总大小大于(Survivor*TargetSurvivorRatio/100)时，对age最大的内存对象进行回收，其中Survivor默认占新生代总内存的1/10(可通过SurvivorRatio来设置)，而TargetSurvivorRatio默认为50。</para>
+						</listitem>
+					</orderedlist>
+					<para>需要额外注意的是如果MaxTenuringThreshold > 15表示忽略第一种情况。</para>
+				</callout>
+				<callout id="co.note.jvm.verbose" arearefs="co.jvm.verbose"><para>gc输出重定向到指定日志文件中。</para></callout>
+			</calloutlist>
+		</programlistingco>
+		<para>gc.log的日志输出如下：</para>
+		<programlistingco>
+			<programlisting>
+......
+Total time for which application threads were stopped: 0.1378870 seconds <co id="co.jvmverbose.stop" linkends="co.note.jvmverbose.stop"/>
+Application time: 60.1425690 seconds <co id="co.jvmverbose.concurrent" linkends="co.note.jvmverbose.concurrent"/>
+2014-10-20T14:35:26.722+0800: 1885083.122: [GC 1885083.122: [ParNew
+Desired survivor size 751599616 bytes, new threshold 16 (max 100) <co id="co.jvmverbose.tenuring" linkends="co.note.jvmverbose.tenuring"/>
+- age   1:   40827184 bytes,   40827184 total
+- age   2:   28071968 bytes,   68899152 total
+- age   3:    5642232 bytes,   74541384 total
+- age   4:    2789128 bytes,   77330512 total
+- age   5:    4128208 bytes,   81458720 total
+- age   6:    4397544 bytes,   85856264 total
+- age   7:    5372432 bytes,   91228696 total
+- age   8:    3841376 bytes,   95070072 total
+- age   9:    3984008 bytes,   99054080 total
+- age  10:    1745880 bytes,  100799960 total
+- age  11:    2912944 bytes,  103712904 total
+- age  12:    3076792 bytes,  106789696 total
+- age  13:    1718568 bytes,  108508264 total
+- age  14:    2075728 bytes,  110583992 total
+- age  15:   55723608 bytes,  166307600 total
+: 11940717K->199902K(13212096K), 0.1684370 secs] 45886578K->34145763K(99195328K), 
+0.1686220 secs]
+......
+2014-11-20T16:58:31.235+0800: 21524.166: [CMS-concurrent-mark-start]
+2014-11-20T16:58:31.387+0800: 21524.318: [CMS-concurrent-mark: 0.152/0.152 secs]
+    [Times: user=1.26 sys=0.20, real=0.15 secs]
+2014-11-20T16:58:31.387+0800: 21524.318: [CMS-concurrent-preclean-start]
+2014-11-20T16:58:31.410+0800: 21524.341: [CMS-concurrent-preclean: 0.023/0.023 secs]
+    [Times: user=0.07 sys=0.02, real=0.02 secs] 
+2014-11-20T16:58:31.410+0800: 21524.341: [CMS-concurrent-abortable-preclean-start]
+2014-11-20T16:58:33.423+0800: 21526.353: [CMS-concurrent-abortable-preclean: 
+    2.012/2.012 secs] [Times: user=6.68 sys=2.42, real=2.02 secs] 
+2014-11-20T16:58:33.516+0800: 21526.447: [CMS-concurrent-sweep-start]
+....
+2014-11-20T16:58:40.871+0800: 21533.802: [CMS-concurrent-sweep: 7.199/7.355 secs]
+    [Times: user=26.47 sys=8.96, real=7.35 secs] 
+2014-11-20T16:58:40.871+0800: 21533.802: [CMS-concurrent-reset-start]
+2014-11-20T16:58:40.965+0800: 21533.896: [CMS-concurrent-reset: 0.095/0.095 secs]
+    [Times: user=0.23 sys=0.22, real=0.10 secs] 
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.jvmverbose.stop" arearefs="co.jvmverbose.stop"><para>PrintGCApplicationStoppedTime配置项的输出数据，表示在执行minorGc期间系统应用的阻塞时间；</para></callout>
+				<callout id="co.note.jvmverbose.concurrent" arearefs="co.jvmverbose.concurrent"><para>PrintGCApplicationConcurrentTime配置项的输出数据，表示系统距离上一次暂停之后所持续运行的时间；</para></callout>
+				<callout id="co.note.jvmverbose.tenuring" arearefs="co.jvmverbose.tenuring"><para>PrintTenuringDistribution配置项的输出数据，用来打印每个age阶段的新生代内存大小，如果总大小大于DesiredSurvivorSize，将age为15的内存数据转移到老年代。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>G1配置参考</title>
+		<para>采用G1回收机制之前，应首先明确如下概念：</para>
+		<orderedlist>
+			<listitem>
+				<para>RSets - Remembered Sets</para>
+				<para>采用G1回收策略后，JVM堆内存将会被划分成多个Region，针对每个Region回收器会构造一个RSet用来维护外部对象对Region内部对象的引用，如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="80%" fileref="../media/hbase/RSets.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>这样当查询Region中有哪些对象被引用时，只需要遍历RSet，而不需要对整个堆内存进行遍历。</para>
+			</listitem>
+			<listitem>
+				<para>CSets - Collection Set</para>
+				<para>用于存储每次GC操作需要针对哪些Region来进行垃圾回收(注：这里的Region是G1中的概念，而不是HBase的Region，以下引用类似)。</para>
+			</listitem>
+		</orderedlist>
+		<para>然后再来看相关的配置参数：</para>
+		<programlistingco>
+			<programlisting>
+export HBASE_REGIONSERVER_OPTS="-Xmx20g -Xms20g <co id="co.g1.heap" linkends="co.note.g1.heap"/>
+    -XX:+UseG1GC
+    -XX:+UnlockExperimentalVMOptions <co id="co.g1.unlock" linkends="co.note.g1.unlock"/>
+    -XX:MaxGCPauseMillis=50 <co id="co.g1.pause" linkends="co.note.g1.pause"/>
+    -XX:InitiatingHeapOccupancyPercent=65 <co id="co.g1.mark" linkends="co.note.g1.mark"/>
+    -XX:MaxTenuringThreshold=3 <co id="co.g1.tenuring" linkends="co.note.g1.tenuring"/>
+    -XX:ParallelGCThreads=18 <co id="co.g1.threadNum" linkends="co.note.g1.threadNum"/>
+    -XX:G1ConcRefinementThreads=18 <co id="co.g1.RefinementNum" linkends="co.note.g1.RefinementNum"/>
+    -XX:ConcGCThreads=5 <co id="co.g1.ConcGC" linkends="co.note.g1.ConcGC"/>
+    -XX:G1ReservePercent=10 <co id="co.g1.reserve" linkends="co.note.g1.reserve"/>
+    -XX:G1HeapRegionSize=8M <co id="co.g1.regionSize" linkends="co.note.g1.regionSize"/>
+    -XX:G1NewSizePercent=5 <co id="co.g1.newSize" linkends="co.note.g1.newSize"/>
+    -XX:G1MaxNewSizePercent=20 <co id="co.g1.newMax" linkends="co.note.g1.newMax"/>
+    -XX:G1MixedGCLiveThresholdPercent=85 <co id="co.g1.live" linkends="co.note.g1.live"/>
+    -XX:G1HeapWastePercent=10 <co id="co.g1.waste" linkends="co.note.g1.waste"/>
+    -XX:G1MixedGCCountTarget=8 <co id="co.g1.gcCount" linkends="co.note.g1.gcCount"/>
+    -XX:G1OldCSetRegionThresholdPercent=10 <co id="co.g1.maxRegion" linkends="co.note.g1.maxRegion"/>
+    -XX:+ParallelRefProcEnabled <co id="co.g1.parallelRef" linkends="co.note.g1.parallelRef"/>
+    -XX:G1RSetUpdatingPauseTimePercent=10 <co id="co.g1.rsetupdate" linkends="co.note.g1.rsetupdate"/>
+    -XX:-OmitStackTraceInFastThrow -XX:+PerfDisableSharedMem -XX:-ResizePLAB
+    -Xloggc:$GC_LOG_PATH -verbosegc -XX:+PrintGC -XX:+PrintGCDateStamps
+    -XX:+PrintAdaptiveSizePolicy -XX:+PrintGCDetails 
+    -XX:+PrintGCApplicationStoppedTime -XX:+PrintTenuringDistribution
+    -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=5 -XX:GCLogFileSize=20M
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.g1.heap" arearefs="co.g1.heap"><para>采用G1回收机制以后，无需在对新生代的内存大小进行设置，否则会影响到MaxGCPauseMillis运行策略。</para></callout>
+				<callout id="co.note.g1.unlock" arearefs="co.g1.unlock"><para>G1有一些配置参数的默认值是固定设置的，可通过该配置来开启这些默认值的修改功能。</para></callout>
+				<callout id="co.note.g1.pause" arearefs="co.g1.pause"><para>理想情况下，每次GC的暂停时间(默认为200毫秒)，实际情况可能高于该值。</para></callout>
+				<callout id="co.note.g1.mark" arearefs="co.g1.mark">
+					<para>堆内存使用达到该阈值时触发多阶段并行标记操作，默认值为45%，如果堆内存的使用空间一直高于该阈值会造成mixedGC频繁。</para>
+				</callout>
+				<callout id="co.note.g1.tenuring" arearefs="co.g1.tenuring"><para>新生代中的内存对象经过指定次数的交换回收后如果依然存活，将进入老年代(默认值为15)。</para></callout>
+				<callout id="co.note.g1.threadNum" arearefs="co.g1.threadNum">
+					<para>理想值通过8+(logical processors-8)(5/8)计算得出，这些并行线程主要处理如下操作：</para>
+					<para>(1)ExtRootScanning：扫描线程堆栈获取对CSet有引用的root。</para>
+					<para>(2)UpdateRSet：处理RSet的更新操作。</para>
+					<para>(3)ProcessedBuffers：每当Region的内存空间发生变动时会记录update日志到buffers，在由这些并行线程对buffers进行解析，以便同步变动内容至RSet。</para>
+					<para>(4)ScanRSet：扫描RSet获取当前存活的对象(有其他对象对其进行引用)。</para>
+					<para>(5)ObjectCopy：执行交换回收以防止碎片，该操作往往是GC过程中最为耗时的。</para>
+				</callout>
+				<callout id="co.note.g1.RefinementNum" arearefs="co.g1.RefinementNum"><para>用于处理ProcessedBuffers的最大线程数，默认与ParallelGCThreads相同，当线程数不够用的时候将采用App线程，这样会降低App的响应效率。可注意观察gc日志中是否存在"0 ( 0.0%) by mutator threads."这样的输出来判断Refinement线程数是否达到上限。</para></callout>
+				<callout id="co.note.g1.ConcGC" arearefs="co.g1.ConcGC"><para>理想值为ParallelGCThreads的1/4。</para></callout>
+				<callout id="co.note.g1.reserve" arearefs="co.g1.reserve"><para>默认值为10%，表示预留出10%的堆内存空间作为FreeSpace用于交换回收，来防止to-space exhausted错误。出现该错误时表示FreeSpace空间已被写满，将触发FullGc操作。</para></callout>
+				<callout id="co.note.g1.regionSize" arearefs="co.g1.regionSize"><para>每个Region所占据的堆内存空间，默认情况下取决于JVM的堆内存大小(在1Mb ~ 32Mb之间)，理想情况下堆内存会被划分成2048个Region。</para></callout>
+				<callout id="co.note.g1.newSize" arearefs="co.g1.newSize"><para>通过该参数来决定新生代内存的最小值，默认为整个堆内存的5%，最好控制在2G以内，否则YGC的时间将有可能过长。</para></callout>
+				<callout id="co.note.g1.newMax" arearefs="co.g1.newMax"><para>通过该参数来决定新生代内存的最大值，默认为整个堆内存空间的60%，建议调低至20%。</para></callout>
+				<callout id="co.note.g1.live" arearefs="co.g1.live"><para>只对liveObject空间占比小于该阈值的Region进行回收，默认为65%，建议调高至85%，否则Region中将有过多的垃圾空间未被回收。</para></callout>
+				<callout id="co.note.g1.waste" arearefs="co.g1.waste"><para>mixedGc每次迭代可回收的内存空间要大于该阈值，否则将退出迭代。默认值为整个堆内存空间的10%，如果阈值比较低，mixedGc的时间可能会很长，因为Region中的liveObject较多，CopyObject的时间也会变长。</para></callout>
+				<callout id="co.note.g1.gcCount" arearefs="co.g1.gcCount"><para>mixedGc的迭代次数，每次迭代所处理的Region个数通过如下公式计算得出：reclaimable Tenured regions / -XX:G1MixedGCCountTarget。并且先回收liveObject占比相对较少的Region，因此最后一次迭代的执行时间往往是最长的，因其CopyObject会比较耗时。</para></callout>
+				<callout id="co.note.g1.maxRegion" arearefs="co.g1.maxRegion"><para>每次mixedGc，所处理的老年代Region数量不能大于该阈值，默认值为10%.</para></callout>
+				<callout id="co.note.g1.parallelRef" arearefs="co.g1.parallelRef"><para>当GC日志中，Ref Proc和GC ref-proc的时间占比比较长的时候需考虑开启该功能以便进行并发处理。</para></callout>
+				<callout id="co.note.g1.rsetupdate" arearefs="co.g1.rsetupdate"><para>GC过程中用于处理RSet更新操作的时间不能大于该阈值，默认值为10，表示不能超过总暂停时间的10%.</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

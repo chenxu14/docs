@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude"
+    xmlns:ns5="http://www.w3.org/2000/svg"
+    xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+    xmlns:ns3="http://www.w3.org/1999/xhtml"
+    xmlns:db="http://docbook.org/ns/docbook">
+    <title>存储资源隔离</title>
+    <para>rsgroup虽然很好的满足了计算资源的隔离需求，但是针对存储资源却做不到隔离，所有业务分组依然会公用一套HDFS，并且block在分发过程中无法感知group维度。为此可效仿rsgroup特性来对hdfs进行定制，实现dngroup功能，从而在存储层面对业务资源进行隔离控制。</para>
+    <mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="90%" scalefit="1" fileref="../media/hbase/dngroup.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>如图所示，要实现dngroup特性我们可以从以下几个方面去做处理。</para>
+	<orderedlist>
+		<listitem>
+			<para>首先按照一定维度为每个datanode划分分组</para>
+			<para>分组信息的维护可通过扩展hdfs的网络拓扑结构来实现，原生的拓扑结构主要包括如下两个层级：/rack/node，其中rack为每台机器所在的机架信息，而HBase在部署集群的时候通常是不启用机架感知功能的，因为有可能会带来网络负载的极不均衡。因此这里可将rack维度替换掉，变成分组维度，即所有机器在逻辑上都部署到同一机架，但是机架下面有很多不同的分组，功能实现上主要通过GroupBasedNetworkTopology类来封装。</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.net;
+public class GroupBasedNetworkTopology extends NetworkTopology {
+  @Override
+  public int getNumOfRacks() {
+    return 1;
+  }
+}
+				</programlisting>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>其次为每个hdfs文件引入一个新的扩展属性用来标识它所在的分组</para>
+			<para>hdfs的文件扩展属性主要是通过XAttr来进行维护的，在调用FSNamesystem#setStoragePolicy为目标文件夹设置存储策略的时候，可将分组信息也一并进行指定，具体的调用关系链如下：</para>
+			<programlistingco>
+				<programlisting>
++++ org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+void setStoragePolicy(String src, String policyName) throws IOException {
+  String groupName = BlockStoragePolicySuite.GROUP_UNSPECIFIED;
+  policyName = (policyName == null) ? null : StringUtils.toUpperCase(policyName);
+  if (policyName != null &amp;&amp; policyName.indexOf("/") != -1) { <co id="co.xattr.policy" linkends="co.note.xattr.policy"/>
+    String[] names = policyName.split("/");
+    policyName = names[0];
+    groupName = names[1];
+  }
+  ...
+  auditStat = FSDirAttrOp.setStoragePolicy(
+      dir, blockManager, src, policyName, groupName);
+  ...
+}
+
++++ org/apache/hadoop/hdfs/server/namenode/FSDirAttrOp.java
+static HdfsFileStatus setStoragePolicy(
+    FSDirectory fsd, BlockManager bm, String src, final String policyName,
+    String groupName) throws IOException {
+  ...
+  unprotectedSetStoragePolicy(fsd, bm, iip, policy.getId(), groupName);
+  fsd.getEditLog().logSetStoragePolicy(src, policy.getId(), groupName); <co id="co.xattr.editlog" linkends="co.note.xattr.editlog"/>
+  ...
+}
+static void unprotectedSetStoragePolicy(
+    FSDirectory fsd, BlockManager bm, INodesInPath iip, byte policyId,
+    String groupName) throws IOException {
+  ...
+  setDirStoragePolicy(fsd, inode.asDirectory(), policyId, groupName, snapshotId); <co id="co.xattr.group" linkends="co.note.xattr.group"/>
+  ...
+}
+private static void setDirStoragePolicy(
+    FSDirectory fsd, INodeDirectory inode, byte policyId,
+    String groupName, int latestSnapshotId) throws IOException {
+  List&lt;XAttr> existingXAttrs = XAttrStorage.readINodeXAttrs(inode);
+  List&lt;XAttr> xAttrs = BlockStoragePolicySuite.buildXAttr(policyId, groupName);
+  List&lt;XAttr> newXAttrs = FSDirXAttrOp.setINodeXAttrs(fsd, existingXAttrs, xAttrs,
+      EnumSet.of(XAttrSetFlag.CREATE, XAttrSetFlag.REPLACE));
+  XAttrStorage.updateINodeXAttrs(inode, newXAttrs, latestSnapshotId);
+}
+
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.xattr.policy" arearefs="co.xattr.policy"><para>存储策略的设置参数与之前稍有不同，需要通过"/"来分割策略与分组信息；</para></callout>
+					<callout id="co.note.xattr.editlog" arearefs="co.xattr.editlog" ><para>需要将xattr的修改记录同步到editlog，以便于standbyNN同步相关信息到fsimage；</para></callout>
+					<callout id="co.note.xattr.group" arearefs="co.xattr.group" >
+						<para>对目标文件夹的扩展属性进行设置，从而将分组信息进行保存，保存后的扩展属性信息可通过如下命令查看(比如这里查看/tmp文件夹的分组信息)：</para>
+						<para>/bin/hadoop fs -getfattr -n trusted.hsm.block.storage.group /tmp</para>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>最后修改hdfs的副本分发规则，在执行Block块分配的时候只选择目标分组下的机器进行分配</para>
+			<para>选块逻辑主要是对BlockManager类进行调用，在执行其chooseTarget方法时可将分组信息传递进去，以便在方法内部进行分组过滤和处理，相关的代码调用链如下：</para>
+			<programlistingco>
+				<programlisting>
++++ org/apache/hadoop/hdfs/server/namenode/FSNamesystem.java
+DatanodeStorageInfo[] getNewBlockTargets(String src, long fileId,
+    String clientName, ExtendedBlock previous, Set&lt;Node> excludedNodes,
+    List&lt;String> favoredNodes, LocatedBlock[] onRetryBlock) throws IOException {
+  ...
+  storagePolicyID = pendingFile.getStoragePolicyID();
+  storageGroup = pendingFile.getStorageGroup(); <co id="co.xattr.get" linkends="co.note.xattr.get"/>
+  ...
+  return getBlockManager().chooseTarget4NewBlock( 
+    src, replication, clientNode, excludedNodes, blockSize, favoredNodes,
+    storagePolicyID, storageGroup);
+}
+LocatedBlock getAdditionalDatanode(String src, long fileId,
+    final ExtendedBlock blk, final DatanodeInfo[] existings,
+    final String[] storageIDs, final Set&lt;Node> excludes,
+    final int numAdditionalNodes, final String clientName ) throws IOException {
+  ...
+  storagePolicyID = file.getStoragePolicyID();
+  storageGroup = file.getStorageGroup();
+  ...
+  final DatanodeStorageInfo[] targets = blockManager.chooseTarget4AdditionalDatanode(
+    src, numAdditionalNodes, clientnode, chosen, 
+    excludes, preferredblocksize, storagePolicyID, storageGroup);
+  ...
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.xattr.get" arearefs="co.xattr.get"><para>从文件的inode中解析出其隶属于哪个分组(通过读取扩展属性来实现)，分组扩展属性只保存到文件夹粒度，如果inode为文件，需要对其父目录进行解析。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>BlockManager真正的选块逻辑是通过BlockPlacementPolicy接口进行封装的，并且选块策略是可通过plugin的方式进行额外定制的。因此我们可编写自己的BlockPlacementPolicy实现，用来满足分组维度的Block分发需求。相关代码调用链如下：</para>
+			<programlistingco>
+				<programlisting>
++++ org/apache/hadoop/hdfs/server/blockmanagement/BlockManager.java
+public DatanodeStorageInfo[] chooseTarget4NewBlock(final String src,
+    final int numOfReplicas, final Node client,
+    final Set&lt;Node> excludedNodes,
+    final long blocksize,
+    final List&lt;String> favoredNodes,
+    final byte storagePolicyID,
+    final String storageGroup) throws IOException {
+  ...
+  final DatanodeStorageInfo[] targets = blockplacement.chooseTarget( <co id="co.xattr.placement" linkends="co.note.xattr.placement"/>
+    src, numOfReplicas, client, excludedNodes, blocksize, 
+    favoredDatanodeDescriptors, storagePolicy, storageGroup);
+  ...
+}
+
++++ org/apache/hadoop/hdfs/server/blockmanagement/GroupBasedPlacementPolicy.java
+protected Node chooseTarget(...) {
+  ...
+  try {
+    ...
+    if (numOfResults == 0) { <co id="co.xattr.firstblock" linkends="co.note.xattr.firstblock"/>
+      DatanodeStorageInfo storageInfo = chooseLocalStorage(...);
+      if (storageInfo == null) {
+        throw new NotEnoughReplicasException();
+      }
+      ...
+    }
+    String groupScope = NodeBase.PATH_SEPARATOR_STR + storageGroup; <co id="co.xattr.other" linkends="co.note.xattr.other"/>
+    chooseRandom(numOfReplicas, groupScope, excludedNodes, blocksize, maxNodesPerRack,
+        results, avoidStaleNodes, storageTypes, storageGroup);
+  } catch (NotEnoughReplicasException e) {
+    ... <co id="co.xattr.retry" linkends="co.note.xattr.retry"/>
+  }
+}
+protected DatanodeStorageInfo chooseLocalStorage(...) {
+  if (localMachine == null) { <co id="co.xattr.random" linkends="co.note.xattr.random"/>
+    return chooseRandom(...);
+  }
+  ...
+  for (DatanodeStorageInfo localStorage
+      : DFSUtil.shuffle(localDatanode.getStorageInfos())) { <co id="co.xattr.storage" linkends="co.note.xattr.storage"/>
+    if (addIfIsGoodTarget(localStorage, excludedNodes, blocksize, maxNodesPerRack,
+        false, results, avoidStaleNodes, type, storageGroup) >= 0) {
+      ...
+      return localStorage;
+    }
+  }
+  ...
+  return chooseRandom(...); <co id="co.xattr.nolocal" linkends="co.note.xattr.nolocal"/>
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.xattr.placement" arearefs="co.xattr.placement"><para>选块逻辑通过BlockPlacementPolicy类来封装，可覆盖其chooseTarget方法，用来自定义选块逻辑；</para></callout>
+					<callout id="co.note.xattr.firstblock" arearefs="co.xattr.firstblock"><para>选块过程中，首先选择本地DN作为目标Pipeline的起始地址；</para></callout>
+					<callout id="co.note.xattr.other" arearefs="co.xattr.other"><para>从目标group中随机选择其他节点加入到pipeline；</para></callout>
+					<callout id="co.note.xattr.retry" arearefs="co.xattr.retry"><para>选块失败，捕获异常并执行retry操作；</para></callout>
+					<callout id="co.note.xattr.random" arearefs="co.xattr.random"><para>如果本地没有部署DN进程，从目标分组中随机筛选其他节点进行副本存储；</para></callout>
+					<callout id="co.note.xattr.storage" arearefs="co.xattr.storage"><para>对目标DN的每一块盘进行筛选，看是否满足副本放置规则(拥有足够的空间，没有处于Decommission状态，满足分层存储对磁盘类型的要求等)；</para></callout>
+					<callout id="co.note.xattr.nolocal" arearefs="co.xattr.nolocal"><para>如果不满足副本本地存放需求，从目标分组中随机筛选其他节点进行副本存储。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>功能启用</title>
+		<para>首先在core-site.xml文件中添加如下配置。</para>
+		<orderedlist>
+			<listitem>
+				<para>net.topology.impl</para>
+				<para>将参数值设置成org.apache.hadoop.net.GroupBasedNetworkTopology，启用自定义的网络拓扑结构。</para>
+			</listitem>
+			<listitem>
+				<para>dfs.block.replicator.classname</para>
+				<para>设置成org.apache.hadoop.hdfs.server.blockmanagement.GroupBasedPlacementPolicy，启用自定义的副本分发策略。</para>
+			</listitem>
+			<listitem>
+				<para>net.topology.script.file.name</para>
+				<para>引入自定义脚本用于判断目标机器的所属分组，脚本定义大致如下(注意脚本针对hdfs进程的启动用户需要有可执行权限)。</para>
+				<programlistingco>
+					<programlisting>
+#!/bin/sh
+while [ $# -gt 0 ] ; do
+  node=$1
+  exec&lt; /path/to/topology.data <co id="co.topology.data" linkends="co.note.topology.data"/>
+  result=""
+  while read line ; do
+    ar=( $line )
+    if [ "${ar[0]}" = "$node" ] ; then
+      result="${ar[1]}"
+    fi
+  done
+  shift
+  if [ -z "$result" ] ; then
+    echo -n "/NONE" <co id="co.topology.defaultRack" linkends="co.note.topology.defaultRack"/>
+  else
+    echo -n "$result"
+  fi
+done
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.topology.data" arearefs="co.topology.data" ><para>每行文本的存储格式为"ip grouppath"</para></callout>
+						<callout id="co.note.topology.defaultRack" arearefs="co.topology.defaultRack" ><para>如果topology.data文件中不包含目标IP，采用默认分组。</para></callout>
+					</calloutlist>
+				</programlistingco>
+            </listitem>
+		</orderedlist>
+		<para>其次在hdfs-site.xml文件中添加如下配置。</para>
+		<orderedlist>
+			<listitem>
+				<para>dfs.namenode.replication.considerLoad</para>
+				<para>需要将该参数值设置为false，否则如果group负载较大，会导致block分发失败。</para>
+			</listitem>
+		</orderedlist>
+		<para>这样集群启动后便可通过如下命令来设置目标文件夹下所有文件将要采用的存储策略。</para>
+		<para>$HADOOP_HOME/bin/hdfs storagepolicies -setStoragePolicy -path /tmp -policy HOT/TEST</para>
+		<para>执行以上命令后，/tmp目录下的所有文件将只会存储于TEST分组对应的机器上，采用的存储类型为DISK。</para>
+		<tip>借助于HBASE-14061特性为不同分组的表格设置不同的存储策略，借助于HBASE-12848特性为不同分组的WAL设置不同的存储策略。</tip>
+	</section>
+	<section>
+		<title>分组信息维护</title>
+		<para>如上所述，datanode的分组信息是通过hdfs的网络拓扑结构来进行维护的，针对分组信息的判断逻辑我们引入了一个自定义的shell脚本，并为之关联一个topology.data用来存储所有节点与分组之前的映射关系。然而截止到目前为止，topology.data只能在namenode启动的时候被静态加载一次，后续如果想要修改某个datanode的分组信息，需要重启namenode才能完成，给分组信息的维护和管理带来了非常大的不便。</para>
+		<para>基于此，我们可以针对DFSAdmin#refreshNodes操作做一些额外定制，在刷新节点信息的同时刷新hdfs的网络拓扑结构信息，以便在重启datanode过程中对其分组信息进行重新的识别和处理，相关补丁修复如下：</para>
+		<programlistingco>
+			<programlisting>
++++ org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java
+   public void refreshNodes(final Configuration conf) throws IOException {
+     refreshHostsReader(conf);
+     namesystem.writeLock();
+     try {
+       refreshDatanodes();
+       countSoftwareVersions();
++      dnsToSwitchMapping.reloadCachedMappings();
+     } finally {
+       namesystem.writeUnlock();
+     }
+   }
+			</programlisting>
+		</programlistingco>
+		<para>这样，当我们想要修改某个datanode的分组映射关系时，只需执行如下操作即可，避免重启namenode带来的开销。</para>
+		<orderedlist>
+			<listitem>
+				<para>修改topology.data文件中有关目标datanode的分组信息；</para>
+			</listitem>
+			<listitem>
+				<para>执行如下命令刷新hdfs的网络拓扑结构信息</para>
+				<para>hdfs dfsadmin -refreshNodes</para>
+			</listitem>
+			<listitem>
+				<para>重启目标datanode进程以便namenode重新识别其分组信息。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>目录分组信息继承</title>
+		<para>实际应用中我们可能会有这样的需求：为了避免线上实时业务受到比较大的IO冲击，需要将一些离线作业的output先保存到IO不敏感的离线分组。然而每一个output输出是有可能包含多个目录层级的，由于分组信息只能从当前目录或父目录中获取，因此output输出在创建子目录的时候需要对父目录的权限进行继承，以便子目录中的文件能够识别对应的分组信息。基于此可对FSDirMkdirOp类进行相应定制，相关代码补丁如下：</para>
+		<programlistingco>
+			<programlisting>
++++ org/apache/hadoop/hdfs/server/namenode/FSDirMkdirOp.java
+   private static INodesInPath createSingleDirectory(...
+     if (NameNode.stateChangeLog.isDebugEnabled()) {
+       NameNode.stateChangeLog.debug("mkdirs: created directory " + cur);
+     }
++    if (cur.startsWith("/tmp")) { // currently only tmp dir <co id="co.xattr.tmp" linkends="co.note.xattr.tmp"/>
++      try {
++        List&lt;XAttr> xAttrs = XAttrHelper.buildXAttrAsList(
++            BlockStoragePolicySuite.buildGroupName());
++        List&lt;XAttr> result = fsd.getFSNamesystem().getXAttrs(
++            existing.getParentPath(), xAttrs);
++        byte[] groupAttr = XAttrHelper.getFirstXAttrValue(result);
++        if (groupAttr != null) {
++          String groupName = XAttrCodec.encodeValue(groupAttr, XAttrCodec.TEXT);
++          groupName = groupName.replaceAll("\"", "");
++          if(!"".equals(groupName.trim())) {
++            fsd.getFSNamesystem().setStoragePolicy(cur,
++                HdfsConstants.HOT_STORAGE_POLICY_NAME, groupName);
++            if (NameNode.stateChangeLog.isDebugEnabled()) {
++              NameNode.stateChangeLog.debug(
++                  "setXAttr: group name on " + cur + " is " + groupName);
++            }
++          }
++        }
++      } catch (Exception e) {
++        if (NameNode.LOG.isDebugEnabled()) {
++          NameNode.LOG.info("failed to set xattr on " + cur, e);
++        }
++      }
++    }
+     return existing;
+   }
++++ org/apache/hadoop/hdfs/server/namenode/FSDirXAttrOp.java
+   static List&lt;XAttr> getXAttrs(FSDirectory fsd, final String srcArg,
+       List&lt;XAttr> xAttrs) throws IOException {
+     ...
+     boolean getAll = xAttrs == null || xAttrs.isEmpty();
+-    if (!getAll) {
++    if (!getAll &amp;&amp; !src.startsWith("/tmp")) { <co id="co.xattr.filter" linkends="co.note.xattr.filter"/>
+       XAttrPermissionFilter.checkPermissionForApi(pc, xAttrs, isRawPath);
+     }
+     ...
+     List&lt;XAttr> all = FSDirXAttrOp.getXAttrs(fsd, src);
+-    List&lt;XAttr> filteredAll = XAttrPermissionFilter.
+-        filterXAttrsForApi(pc, all, isRawPath);
++    List&lt;XAttr> filteredAll = null;
++    if (src.startsWith("/tmp")) {
++      filteredAll = all;
++    } else {
++      filteredAll = XAttrPermissionFilter.filterXAttrsForApi(pc, all, isRawPath);
++    }
+     ...
+   }
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.xattr.tmp" arearefs="co.xattr.tmp" ><para>如果要创建的目录是/tmp的子孙目录，继承其父目录的扩展属性信息；</para></callout>
+				<callout id="co.note.xattr.filter" arearefs="co.xattr.filter" ><para>如果是/tmp目录，不过滤相关权限校验。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

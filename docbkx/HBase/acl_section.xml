@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>ACL权限管理</title>
+	<para>ACL权限管理是HBase基于协处理器的一项典型应用，通过它能够限制集群的访问用户以及每个用户的操作权限。在功能实现上ACL管理主要是通过AccessController类进行封装的，除了WALObserver以外，该类实现了所有的Observer接口，这样在执行任意HBase访问操作时AccessController都会进行拦截处理，用以判断当前用户是否具备目标操作权限，若无权限则抛出AccessDeniedException异常来终止其行为。</para>
+	<para>权限校验功能主要是通过TableAuthManager类进行管理的，其对外声明了多种authorize方法以便于从不同的角度对用户信息进行校验，校验流程大致如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>首先读取缓存信息，获取当前用户所拥有的权限列表</para>
+			<para>为了加快权限信息的获取效率，HBase对其提供了缓存功能，这样便可以省去acl表格的查询过程。缓存数据是通过PermissionCache对象进行保存的，其内部维护了如下两个Map集合：</para>
+			<blockquote>
+				<para>(1)userCache：封装用户与其对应的权限列表；</para>
+				<para>(2)groupCache：封装用户组与其对应的权限列表。</para>
+			</blockquote>
+			<para>这样便可从PermissionCache中获取到当前用户所拥有的权限信息集合。</para>
+			<para>由于权限信息在acl表格和内存中都有存储，因此在执行权限更新操作时，需要对这两部分的数据内容都进行修改，以避免造成数据存储不一致的情况发生。整个协调过程是通过使用Zookeeper来实现的，每当向acl表格添加或删除一条记录时，AccessController都会执行updateACL方法进行相关处理。方法在执行过程中会首先判断哪些表格的授权信息发生了变动，然后开始调用ZKPermissionWatcher的writeToZookeeper方法将目标表格新的授权信息写入ZK的/hbase/acl/&lt;table>节点，以便ZKPermissionWatcher进行相应的回调处理。</para>
+			<para>AccessController协处理器启动加载之后，都会创建与之对应的ZKPermissionWatcher对象来对/hbase/acl/&lt;table>节点进行监听，一旦有节点的数据内容发生变动，将执行如下回调处理操作：</para>
+			<para>(1)首先读取出节点的数据内容，并从中解析出目标表格新的授权信息集合</para>
+			<para>集合是通过guava的ListMultimap对象进行封装，其中key为user，value为TablePermission。</para>
+			<para>(2)然后将新的授权信息写入PermissionCache，覆盖其以前的旧数据</para>
+			<para>由此来看表格的授权信息可从3个存储媒介中进行获取，分别是缓存、acl表格和Zookeeper。</para>
+		</listitem>
+		<listitem>
+			<para>对用户所拥有的权限列表进行遍历，看是否有元素匹配目标操作</para>
+			<para>权限信息主要是通过Permission对象进行封装的，其内部提供了一个action集合，用以表明该权限可以执行哪些操作，可选操作有：READ(R), WRITE(W), EXEC(X), CREATE(C)和ADMIN(A)，分别对应读、写、执行、创建和管理权限。除此之外，HBase还对外声明了TablePermission对象用于封装与表格有关的操作权限，以及UserPermission用于封装用户对表格的操作权限。在进行权限匹配操作时，主要是调用Permission类的implies方法来判断当前用户有无目标操作的执行权限。</para>
+		</listitem>
+	</orderedlist>
+	<para>除了使用Observer进行操作拦截以外，AccessController还启用了Endpoint功能，并通过它来为协处理器引入AccessControllerServer服务，以便对服务端的授权信息进行管理，该服务对外声明了如下实用方法：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>grant-为指定用户进行授权</para>
+			<para>方法在执行过程中主要是调用了AccessControlLists类的addUserPermission方法来向acl表格添加新的授权记录。</para>
+			<para>所有与acl表格相关的操作都是通过AccessControlLists对象进行管理的，表格存储结构大致如下：</para>
+			<para>(1)每一行的rowkey为tableName；</para>
+			<para>(2)每个Cell的key-value存储结构大致如下：</para>
+			<table frame='all'>
+				<title>Cell存储结构</title>
+				<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+					<colspec colname='c1' colwidth="16.5em"/>
+					<colspec colname='c2'/>
+					<thead>
+						<row><entry>key类型</entry><entry>value描述</entry></row>
+					</thead>
+					<tbody>
+						<row>
+							<entry>user</entry>
+							<entry>table level permissions for a user [R=read, W=write]</entry>
+						</row>
+						<row>
+							<entry>group</entry>
+							<entry>table level permissions for a group</entry>
+						</row>
+						<row>
+							<entry>user,family</entry>
+							<entry>column family level permissions for a user</entry>
+						</row>
+						<row>
+							<entry>group,family</entry>
+							<entry>column family level permissions for a group</entry>
+						</row>
+						<row>
+							<entry>user,family,qualifier</entry>
+							<entry>column qualifier level permissions for a user</entry>
+						</row>
+						<row>
+							<entry>group,family,qualifier</entry>
+							<entry>column qualifier level permissions for a group</entry>
+						</row>
+					</tbody>
+				</tgroup>
+			</table>
+		</listitem>
+		<listitem>
+			<para>revoke-撤销指定用户的授权信息</para>
+			<para>通过调用AccessControlLists类的removeUserPermission方法将目标授权信息从acl表格中移除。</para>
+		</listitem>
+		<listitem><para>getUserPermissions-获取指定用户目前已有的授权信息</para></listitem>
+		<listitem><para>checkPermissions-检测指定用户是否具备目标操作的处理权限</para></listitem>
+	</itemizedlist>
+	<section>
+		<title>功能启用</title>
+		<para>在hbase-site.xml文件中追加如下配置项：</para>
+		<programlisting>
+&lt;property>
+   &lt;name>hbase.coprocessor.master.classes&lt;/name>
+   &lt;value>org.apache.hadoop.hbase.security.access.AccessController&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>hbase.coprocessor.region.classes&lt;/name>
+   &lt;value>org.apache.hadoop.hbase.security.access.AccessController&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>hbase.coprocessor.regionserver.classes&lt;/name>
+   &lt;value>org.apache.hadoop.hbase.security.access.AccessController&lt;/value>
+&lt;/property>
+		</programlisting>
+		<para>还可通过hbase.superuser配置项引入管理员用户，这些用户具备所有的操作权限。</para>
+		<para>功能开启后，可通过hbase_shell的如下命令来执行与授权有关的操作：</para>
+		<orderedlist>
+			<listitem>
+				<para>为指定用户授权</para>
+				<para>grant &lt;user> &lt;permissions> [&lt;@namespace> [&lt;table> [&lt;column family> [&lt;column qualifier>]]]</para>
+			</listitem>
+			<listitem>
+				<para>撤销用户的目标权限</para>
+				<para>revoke &lt;user> [&lt;table> [&lt;column family> [&lt;column qualifier>]]</para>
+			</listitem>
+			<listitem>
+				<para>查看用户权限列表</para>
+				<para>user_permission &lt;table></para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

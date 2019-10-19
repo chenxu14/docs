@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>ORCFile</title>
+	<para>ORCFile的数据组织方式与RCFile有一定相似的地方，都是先按行进行切片，在按列进行分区。所不同的是ORCFile的压缩比例更高，查询性能也相对较快一些，原因如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>更高的压缩比</para>
+			<para>ORCFile在执行数据写入的时候会首先采用字典压缩的办法对写入数据进行轻量级的压缩，持久化到文件时在采用snapppy、zlib等通用的压缩算法进行进一步的压缩，因此数据的压缩比例更高。</para>
+		</listitem>
+		<listitem>
+			<para>更快的检索效率</para>
+			<para>针对每个列分区数据，RCFile只是存储其数据内容，而ORCFile会首先对目标列分区数据进行轻量的聚合(如min、max和sum)，在将聚合结果作为元数据与列分区数据一同保存。这样在执行查询操作时可结合这些元数据对文件做一些轻量级的过滤。比如文件中含有age这一列，通过元数据得知age列的min值为31，这样在执行age&lt;30的查询操作时便可将该文件迅速过滤掉。</para>
+		</listitem>
+	</orderedlist>
+	
+</section>

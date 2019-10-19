@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>原子广播机制</title>
+	<para>Zookeeper在事务广播上使用的方法类似于two-phrase commit(二段事务提交)，第一阶段的触发通过Leader类的propose方法来完成，方法处理流程如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/zookeeper/phrase-1.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<orderedlist>
+		<listitem>
+			<para>首先调用Leader类的proposal方法，将事务封装成数据包，发送给Follower；</para>
+		</listitem>
+		<listitem>
+			<para>Follower收到数据包之后，调用processPacket方法来对其进行解析。处理过程中，通过FollowerZookeeperServer找到SyncRequestProcessor处理器来将操作日志记录到本地，同时通过SendAckRequestProcessor处理器向Leader发送ack响应信息；</para>
+		</listitem>
+		<listitem>
+			<para>另一方面，Leader自身也会调用SyncRequestProcessor处理器来将操作日志记录在本地，记录成功后通过AckRequestProcessor处理器将ack响应发送给自己；</para>
+		</listitem>
+	</orderedlist>
+	<tip>
+		<para>第一阶段的核心处理器为SyncRequestProcessor，Zookeeper通过它来向系统添加事务日志(通过ZKDatabase的append方法)。</para>
+	</tip>
+	<para>
+		Leader收到Server发送过来的ack响应之后，调用processAck方法对响应进行处理，处理过程中调用QuorumVerifier的containsQuorum方法来判断发送ack响应的Server是否占总Server的绝大多数，
+		如果是则说明第一阶段顺利完成，开始向Follower下发commit命令(通过commit方法)，执行two-phrase commit的第二阶段。
+	</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/zookeeper/phrase-2.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<tip><para>第二阶段的核心处理器为CommitProcessor，Zookeeper通过它来将数据写入内存</para></tip>
+	<para>由此来看，第一阶段用于保存操作日志，第二阶段用于修改内存数据。这样确保了只有当操作日志被绝大多数Server记录了之后，数据才是可见的。而操作日志是各Server之间数据同步和Leader选举的关键(日志记录是顺序编号的，新选举的Leader拥有最大的zxid)。</para>
+</section>

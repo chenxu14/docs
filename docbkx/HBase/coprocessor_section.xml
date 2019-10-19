@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>协处理器功能</title>
+	<para>通过HBase的协处理器功能主要可以实现以下两种应用需求：</para>
+	<blockquote>
+		<para>(1)操作拦截，拦截指定方法的执行并加入额外的业务处理；</para>
+		<para>(2)功能扩展，为功能组件引入额外的RPC服务来扩展其原有功能。</para>
+	</blockquote>	
+	<para>为此，协处理器对外声明了Observer和Endpoint两大组件来分别实现每一项需求。</para>
+	<orderedlist>
+		<listitem>
+			<para>Observer</para>
+			<para>Observer是通过Coprocessor接口来对外进行声明的，其实现功能类似于传统数据库中的触发器应用，当相关服务的方法执行时进行拦截处理，然后加入用户自定义的代码逻辑。针对不同的服务组件，HBase共声明了6种不同类型的Observer来对相关服务进行拦截处理，分别为：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>MasterObserver</para>
+					<para>访问HMaster节点并执行相关操作时进行拦截处理，比如：创建/删除表格、执行集群shutdown命令等。</para>
+				</listitem>
+				<listitem>
+					<para>RegionServerObserver</para>
+					<para>访问HRegionServer节点并执行相关操作时进行拦截处理，比如：执行Replication备份前后、执行HLog回滚命令前后。</para>
+				</listitem>
+				<listitem>
+					<para>RegionObserver</para>
+					<para>访问Region并执行相关操作时进行拦截处理，比如：Get、Put、Scan操作，或对memStore执行flush，对Region执行split等。</para>
+				</listitem>
+				<listitem>
+					<para>WALObserver</para>
+					<para>执行HLog数据写入操作时进行拦截处理。</para>
+				</listitem>
+				<listitem>
+					<para>EndpointObserver</para>
+					<para>访问Endpoint服务时进行拦截处理。</para>
+				</listitem>
+				<listitem>
+					<para>BulkLoadObserver</para>
+					<para>执行BulkLoad操作时进行拦截处理。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>Endpoint</para>
+			<para>Endpoint相当于是传统数据库中的存储过程，通过它可以为功能组件引入额外的RPC服务，以此来实现功能扩展。在协处理器中，Endpoint组件是通过CoprocessorService接口来对外声明的，接口内部只声明了一个方法：getService()，用于返回将要引入的服务实例。在0.96版本之后，Endpoint服务主要是基于protobuf来构建的，客户端与服务端的通信管道采用CoprocessorRpcChannel进行封装，不同类型的协处理器有着不同的管道实现类，但在底层的通信逻辑上都是基于BlockingRpcChannelImplementation来封装的(参考RPC通信功能实现章节)。</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>MasterCoprocessorRpcChannel</para>
+					<para>如果协处理器是应用在HMaster进程上的，那么客户端与Endpoint采用该管道进行通信，管道实例的获取可通过HBaseAdmin的coprocessorService方法来完成，获取到管道实例之后便可通过protobuf的相关API来构建目标服务的客户端代理，以此来实现目标服务的远程调用功能(具体可参考使用例子章节)。</para>
+					<para>在管道内部，主要是通过MasterService的execMasterService方法来执行远端服务的。</para>
+				</listitem>
+				<listitem>
+					<para>RegionServerCoprocessorRpcChannel</para>
+					<para>如果协处理器是应用在HRegionServer进程上的，那么客户端与Endpoint采用该管道进行通信，管道实例的获取可通过HBaseAdmin的coprocessorService(ServerName)方法来完成。在管道内部，主要是通过ClientService的execRegionServerService方法来执行远端服务的。</para>
+				</listitem>
+				<listitem>
+					<para>RegionCoprocessorRpcChannel</para>
+					<para>如果协处理器是应用在Region层面的，那么客户端与Endpoint采用该管道进行通信，管道实例的获取可通过HTable的coprocessorService方法来完成。在管道内部，主要是通过ClientService的execService方法来执行远端服务的。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+	</orderedlist>
+	<xi:include href="acl_section.xml" />
+	<section>
+		<title>自定义协处理器</title>
+		<para>在本开发示例中主要是基于协处理器来实现IP访问白名单的功能，从而限制哪些机器可以对集群执行shutdown操作。</para>
+		<para>集群的shutdown操作主要是通过HMaster的shutdown方法来实现的，在协处理器的实现类中，主要是对该方法进行拦截处理，加入客户端访问ip的过滤逻辑。具体实现步骤如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先通过protobuf来生成我们要引入的Endpoint服务</para>
+				<para>服务的protocol声明如下(CustomCoprocessor.proto)：</para>
+				<programlistingco>
+					<programlisting>
+option java_package = "org.apache.hadoop.hbase.protobuf.generated";
+option java_outer_classname = "CustomCoprocessorProtos";
+option java_generic_services = true;
+option java_generate_equals_and_hash = true;
+option optimize_for = SPEED;
+
+message GetNodesListRequest { }
+
+message GetNodesListResponse {
+    repeated string nodes = 1;
+}
+
+message RefreshNodesRequest { }
+
+message RefreshNodesResponse { }
+
+service CustomCoprocessorService {
+    rpc getNodesList(GetNodesListRequest) returns(GetNodesListResponse); <co id="co.coprocessor.getNodes" linkends="co.note.coprocessor.getNodes"/>
+    rpc refreshNodes(RefreshNodesRequest) returns(RefreshNodesResponse); <co id="co.coprocessor.refreshNodes" linkends="co.note.coprocessor.refreshNodes"/>
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.coprocessor.getNodes" arearefs="co.coprocessor.getNodes"><para>通过该方法来获取可以对集群执行shutdown操作的ip列表；</para></callout>
+						<callout id="co.note.coprocessor.refreshNodes" arearefs="co.coprocessor.refreshNodes"><para>执行刷新ip列表操作。</para></callout>
+					</calloutlist>
+				</programlistingco>
+				<para>然后通过如下命令编译生成目标服务：</para>
+				<para>protoc -I=$SRC_DIR --java_out=$DST_DIR $SRC_DIR/CustomCoprocessor.proto</para>
+			</listitem>
+			<listitem>
+				<para>实现自定义的协处理器</para>
+				<programlistingco>
+					<programlisting>
+package org.apache.hadoop.hbase.coprocessor;
+public class CustomCoprocessor extends BaseMasterObserver <co id="co.coprocessor.observer" linkends="co.note.coprocessor.observer"/> implements 
+      CoprocessorService <co id="co.coprocessor.endpoint" linkends="co.note.coprocessor.endpoint"/>, CustomCoprocessorService.Interface{
+    private List&lt;String> nodes;
+    public CustomCoprocessor(){ <co id="co.coprocessor.constructor" linkends="co.note.coprocessor.constructor"/>
+        nodes = new ArrayList&lt;String>();
+        getNodes();
+    }
+    @Override
+    public Service getService() { <co id="co.coprocessor.getService" linkends="co.note.coprocessor.getService"/>
+        return CustomCoprocessorService.newReflectiveService(this);
+    }
+    @Override
+    public void preShutdown(ObserverContext&lt;MasterCoprocessorEnvironment> ctx) <co id="co.coprocessor.preShutdown" linkends="co.note.coprocessor.preShutdown"/>
+            throws IOException{
+        String clientHost = RequestContext.get().getRemoteAddress().getHostName();
+        if (! nodes.contains(clientHost)){
+            throw new IOException("shutdown error, client host not in ipList!");
+        }
+    }
+    @Override
+    public void getNodesList(RpcController controller,
+            GetNodesListRequest request, RpcCallback&lt;GetNodesListResponse> done) {
+        GetNodesListResponse.Builder builder = GetNodesListResponse.newBuilder();
+        for(String node : nodes){
+            builder.addNodes(node);
+        }
+        GetNodesListResponse response = builder.build();
+        done.run(response);
+    }
+    @Override
+    public void refreshNodes(RpcController controller,
+            RefreshNodesRequest request, RpcCallback&lt;RefreshNodesResponse> done) {
+        getNodes();
+    }
+    private void getNodes(){
+        nodes.clear();
+        BufferedReader bf = null;
+        try {
+            bf =new BufferedReader(new FileReader("path/to/ipList.txt"));
+            String node = bf.readLine();
+            while (node != null){
+                nodes.add(node);
+                node = bf.readLine();
+            }
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                if (bf !=null){
+                    bf.close();
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.coprocessor.observer" arearefs="co.coprocessor.observer"><para>由于协处理器是应用在HMaster进程上的，因此需要实现MasterObserver；</para></callout>
+						<callout id="co.note.coprocessor.endpoint" arearefs="co.coprocessor.endpoint"><para>要将自定义的Endpoint服务引入到HMaster组件中需要实现该接口，而如果要将其引入到HRegionServer组件则需要实现SingletonCoprocessorService接口；</para></callout>
+						<callout id="co.note.coprocessor.constructor" arearefs="co.coprocessor.constructor"><para>协处理器的构造函数必须不能带有方法参数，否则不会被加载；</para></callout>
+						<callout id="co.note.coprocessor.getService" arearefs="co.coprocessor.getService"><para>通过getService来返回服务实例，HMaster进程启动后，会构造出协处理器的宿主程序(CoprocessorHost)，然后依次调用每一个协处理器的getService方法，来将目标服务加入到服务列表中去；</para></callout>
+						<callout id="co.note.coprocessor.preShutdown" arearefs="co.coprocessor.preShutdown">
+							<para>在执行shutdown操作之前进行拦截处理，加入访问IP过滤逻辑，如果ip不在指定列表里则抛出异常。除此之外还需修改HMaster的shutdown方法逻辑，在捕获到协处理器的异常之后放弃接下来的处理，代码如下所示：</para>
+							<programlisting>
+public void shutdown() {
+  if (cpHost != null) {
+    try {
+      cpHost.preShutdown();
+    } catch (IOException ioe) {
+      LOG.error("Error call master coprocessor preShutdown()", ioe);
+      return;
+    }
+  }
+  ...
+}
+							</programlisting>
+						</callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>将协处理器加入到目标组件中去</para>
+				<para>HBase提供了两种办法来引入目标协处理器，分别为加载配置参数和修改表格元数据。第二种方法主要是针对具体的表格来做引入，这里采用第一种方式，只需向hbase-site.xml文件中添加以下配置即可。</para>
+				<programlisting>
+&lt;property>
+   &lt;name>hbase.coprocessor.master.classes&lt;/name>
+   &lt;value>org.apache.hadoop.hbase.coprocessor.CustomCoprocessor&lt;/value>
+&lt;/property>
+				</programlisting>
+				<para>如果要引入多个协处理器则需要将它们用逗号分割，索引位置排在前面的协处理器具有更高的执行优先级，如果其执行出错会放弃对剩余协处理器的执行。</para>
+			</listitem>
+			<listitem>
+				<para>功能测试</para>
+				<para>可通过如下代码来完成对目标协处理器的测试功能。</para>
+				<programlisting>
+HBaseAdmin admin=new HBaseAdmin(conf);
+CoprocessorRpcChannel channel = admin.coprocessorService();
+CustomCoprocessorService.Interface service = 
+    CustomCoprocessorService.newStub(channel);
+service.refreshNodes(null, RefreshNodesRequest.newBuilder().build(),
+    new RpcCallback&lt;RefreshNodesResponse>() {
+        @Override
+        public void run(GetUserGroupsResponse response) { }
+    }
+);
+GetNodesListRequest request = GetNodesListRequest.newBuilder().build();
+service.getNodesList(null, request, new RpcCallback&lt;GetNodesListResponse>() {
+    @Override
+    public void run(GetUserGroupsResponse response) { 
+        for (String node : response.getNodesList()){
+            System.out.println(node);
+        }
+    }
+});
+admin.close();
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

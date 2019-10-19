@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Hive-SQL编译</title>
+	<programlisting>
+FROM (SELECT a.status, b.school, b.gender FROM status_updates a
+    JOIN profiles b ON (a.userid = b.userid and a.ds='2009-03-20' )
+) subq1
+INSERT OVERWRITE TABLE gender_summary PARTITION(ds='2009-03-20')
+    SELECT subq1.gender, COUNT(*) GROUP BY subq1.gender
+INSERT OVERWRITE TABLE school_summary PARTITION(ds='2009-03-20')
+    SELECT subq1.school, COUNT(*) GROUP BY subq1.school;
+	</programlisting>
+	<orderedlist>
+		<listitem>
+			<para>生成抽象语法树</para>
+			<programlistingco>
+				<programlisting>
+TOK_QUERY <co id="co.tree.query" linkends="co.note.tree.query"/>
+   TOK_FROM
+      TOK_SUBQUERY <co id="co.tree.subquery" linkends="co.note.tree.subquery"/>
+         TOK_QUERY
+            TOK_FROM
+               TOK_JOIN <co id="co.tree.join" linkends="co.note.tree.join"/>
+                  TOK_TABREF (status_updates a)
+                  TOK_TABREF (profiles b)
+                  and
+                     = (a.userid, b.userid)
+                     = (a.ds, '2009-03-20')
+            TOK_INSERT 
+               TOK_DESTINATION <co id="co.tree.dest" linkends="co.note.tree.dest"/>
+                  TOK_DIR
+                     TOK_TMP_FILE 
+               TOK_SELECT
+                  TOK_SELEXPR (a.status)
+                  TOK_SELEXPR (b.school)
+                  TOK_SELEXPR (b.gender)
+         subq1
+   TOK_INSERT
+      TOK_DESTINATION
+         TOK_TAB
+            TOK_TABNAME (gender_summary)
+            TOK_PARTSPEC <co id="co.tree.part" linkends="co.note.tree.part"/>
+               TOK_PARTVAL (ds='2009-03-20')
+      TOK_SELECT <co id="co.tree.select" linkends="co.note.tree.select"/>
+         TOK_SELEXPR (subq1.gender)
+         TOK_SELEXPR
+            TOK_FUNCTION (count)
+      TOK_GROUPBY <co id="co.tree.group" linkends="co.note.tree.group"/>
+         TOK_TABLE_OR_COL (subq1.gender)
+   ...
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.tree.query" arearefs="co.tree.query" ><para>QUERY语句由一个FROM子句后跟多个INSERT从句构成；</para></callout>
+					<callout id="co.note.tree.subquery" arearefs="co.tree.subquery" ><para>QUERY具有层级嵌套结构，子查询通过SUBQUERY来封装；</para></callout>
+					<callout id="co.note.tree.join" arearefs="co.tree.join" ><para>级联查询通过JOIN节点来封装；</para></callout>
+					<callout id="co.note.tree.dest" arearefs="co.tree.dest" ><para>DESTINATION节点指向操作数据的输出位置，TOK_TMP_FILE表示输出到临时文件，TOK_TAB表示输出到表格；</para></callout>
+					<callout id="co.note.tree.part" arearefs="co.tree.part" ><para>PARTSPEC声明表格分区；</para></callout>
+					<callout id="co.note.tree.select" arearefs="co.tree.select" ><para>SELECT节点用于封装输出字段；</para></callout>
+					<callout id="co.note.tree.group" arearefs="co.tree.group" ><para>GROUPBY节点用于封装分组字段。</para></callout>
+				</calloutlist>
+			</programlistingco>	
+		</listitem>
+		<listitem>
+			<para>由抽象语法树生成QueryBlock</para>
+		</listitem>
+		<listitem>
+			<para>由QueryBlock生成操作树</para>
+			<programlistingco>
+				<programlisting>
+STAGE PLANS:
+  Stage: Stage-9
+    Map Reduce Local Work
+      Alias -> Map Local Tables:
+        subq1:b 
+          Fetch Operator
+            limit: -1
+      Alias -> Map Local Operator Tree:
+        subq1:b 
+          TableScan
+            alias: b
+            Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+            HashTable Sink Operator <co id="co.operator.mapjoin" linkends="co.note.operator.mapjoin"/>
+              condition expressions: <co id="co.operator.mapjoin.cond" linkends="co.note.operator.mapjoin.cond"/>
+                0 
+                1 {school} {gender} 
+              keys: <co id="co.operator.mapjoin.key" linkends="co.note.operator.mapjoin.key"/>
+                0 userid (type: int)
+                1 userid (type: int)
+  
+  Stage: Stage-8
+    Map Reduce
+      Local Work: <co id="co.operator.mapjoin.upload" linkends="co.note.operator.mapjoin.upload"/>
+        Map Reduce Local Work
+  
+  Stage: Stage-3
+    Map Reduce <co id="co.operator.mapred" linkends="co.note.operator.mapred"/>
+      Map Operator Tree:
+        TableScan <co id="co.operator.mapjoin.scan" linkends="co.note.operator.mapjoin.scan"/>
+          Reduce Output Operator <co id="co.operator.group.map" linkends="co.note.operator.group.map"/>
+            key expressions: _col0 (type: int) <co id="co.operator.group.key" linkends="co.note.operator.group.key"/>
+            sort order: +
+            Map-reduce partition columns: _col0 (type: int) <co id="co.operator.group.partition" linkends="co.note.operator.group.partition"/>
+            Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+            value expressions: _col1 (type: bigint) <co id="co.operator.group.value" linkends="co.note.operator.group.value"/>
+      Reduce Operator Tree: 
+        Group By Operator <co id="co.operator.group.reduce" linkends="co.note.operator.group.reduce"/>
+          aggregations: count(VALUE._col0)
+          keys: KEY._col0 (type: int) <co id="co.operator.group.reduce.key" linkends="co.note.operator.group.reduce.key"/>
+          mode: mergepartial
+          outputColumnNames: _col0, _col1 <co id="co.operator.group.reduce.value" linkends="co.note.operator.group.reduce.value"/>
+          Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+          Select Operator
+            expressions: _col0 (type: int), UDFToInteger(_col1) (type: int)
+            outputColumnNames: _col0, _col1
+            Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+            File Output Operator <co id="co.operator.output" linkends="co.note.operator.output"/>
+              compressed: false <co id="co.operator.output.compressed" linkends="co.note.operator.output.compressed"/>
+              Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+              table: 
+                input format: org.apache.hadoop.mapred.TextInputFormat
+                output format: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat <co id="co.operator.output.format" linkends="co.note.operator.output.format"/>
+                serde: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe <co id="co.operator.output.serde" linkends="co.note.operator.output.serde"/>
+                name: compile_test.gender_summary <co id="co.operator.output.table" linkends="co.note.operator.output.table"/>
+  Stage: Stage-0
+    Move Operator <co id="co.operator.move" linkends="co.note.operator.move"/>
+      tables:
+        partition:
+          ds 2009-03-20
+        replace: true
+        table:
+          input format: org.apache.hadoop.mapred.TextInputFormat
+          output format: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          serde: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+          name: compile_test.gender_summary
+
+  Stage: Stage-4
+    Stats-Aggr Operator
+
+  Stage: Stage-5
+    Map Reduce
+      Map Operator Tree:
+        TableScan
+          Reduce Output Operator
+            key expressions: _col0 (type: string)
+            sort order: +
+            Map-reduce partition columns: _col0 (type: string)
+            Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+            value expressions: _col1 (type: bigint)
+      Reduce Operator Tree:
+        Group By Operator
+          aggregations: count(VALUE._col0)
+          keys: KEY._col0 (type: string)
+          mode: mergepartial
+          outputColumnNames: _col0, _col1
+          Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+          Select Operator
+            expressions: _col0 (type: string), UDFToInteger(_col1) (type: int)
+            outputColumnNames: _col0, _col1
+            Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+            File Output Operator
+              compressed: false
+              Statistics: Num rows: 0 Data size: 0 Basic stats: NONE Column stats: NONE
+              table:
+                input format: org.apache.hadoop.mapred.TextInputFormat
+                output format: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+                serde: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+                name: compile_test.school_summary
+
+  Stage: Stage-1
+    Move Operator
+      tables:
+        partition:
+          ds 2009-03-20
+        replace: true
+        table:
+          input format: org.apache.hadoop.mapred.TextInputFormat
+          output format: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          serde: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+          name: compile_test.school_summary
+
+  Stage: Stage-6
+    Stats-Aggr Operator
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.operator.mapjoin" arearefs="co.operator.mapjoin"><para>执行MapJoin操作；</para></callout>
+					<callout id="co.note.operator.mapjoin.cond" arearefs="co.operator.mapjoin.cond"><para>'0'表示join左边的表(这里为status_updates)，'1'表示join右边的表(这里为profiles)，由于接下来的INSERT语句没有使用status_updates表的任何字段而使用了profiles表格的school和gender字段，所以'0'后面没有表达式而'1'后面有{school}和{gender}；</para></callout>
+					<callout id="co.note.operator.mapjoin.key" arearefs="co.operator.mapjoin.key"><para>由join原理可知key值便是join字段值，两个表都是userid；</para></callout>
+					<callout id="co.note.operator.mapjoin.upload" arearefs="co.operator.mapjoin.upload"><para>由MapJoin原理得知该操作主要是上传HashTableFiles到DistributedCache中；</para></callout>
+					<callout id="co.note.operator.mapred" arearefs="co.operator.mapred"><para>Map Reduce用来标识该Stage需要执行MapReduce操作；</para></callout>
+					<callout id="co.note.operator.mapjoin.scan" arearefs="co.operator.mapjoin.scan"><para>扫描HashTableFiles；</para></callout>
+					<callout id="co.note.operator.group.map" arearefs="co.operator.group.map"><para>执行groupBy操作map端的处理；</para></callout>
+					<callout id="co.note.operator.group.key" arearefs="co.operator.group.key"><para>由GroupBy原理得知key值为groupBy字段值，这里为gender；</para></callout>
+					<callout id="co.note.operator.group.partition" arearefs="co.operator.group.partition"><para>由GroupBy原理得知partitionKey值同样为groupBy字段值，这里为gender；</para></callout>
+					<callout id="co.note.operator.group.value" arearefs="co.operator.group.value"><para>value值表示记录个数；</para></callout>
+					<callout id="co.note.operator.group.reduce" arearefs="co.operator.group.reduce"><para>执行groupBy操作reduce端的处理；</para></callout>
+					<callout id="co.note.operator.group.reduce.key" arearefs="co.operator.group.reduce.key"><para>由GroupBy原理得知key值为groupBy字段值，这里为gender；</para></callout>
+					<callout id="co.note.operator.group.reduce.value" arearefs="co.operator.group.reduce.value"><para>指定GroupBy操作的value字段，这里为gender和count(*)；</para></callout>
+					<callout id="co.note.operator.output" arearefs="co.operator.output"><para>将作业输出保存到表格文件中；</para></callout>
+					<callout id="co.note.operator.output.compressed" arearefs="co.operator.output.compressed"><para>是否对表格数据启用压缩；</para></callout>
+					<callout id="co.note.operator.output.format" arearefs="co.operator.output.format"><para>表格数据存储格式；</para></callout>
+					<callout id="co.note.operator.output.serde" arearefs="co.operator.output.serde"><para>表格数据序列化与反序列化类；</para></callout>
+					<callout id="co.note.operator.output.table" arearefs="co.operator.output.table"><para>表格名称；</para></callout>
+					<callout id="co.note.operator.move" arearefs="co.operator.move"><para>move操作将表格数据移动到指定分区目录下；</para></callout>
+					
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+</section>

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Metric运行统计</title>
+	<para>Metric主要用来统计系统进程在运行期间的各项参数指标，通过它可让开发人员对系统的运行错误做出正确的判断，是系统调试的有利参照；也能方便运维人员对系统的健康状态做出全局的把控，以便做调优处理。比如针对datanode进程，我们可以监控到block的副本数量、客户端的请求数等等，这些都是通过Metric系统来实现的。</para>
+	<para>metrics的构建是基于生产者-消费者模式来设计的，针对生产者hadoop框架对外声明了MetricsSource接口，可通过其getMetrics方法来获取它所提供的metrics信息；而针对消费者hadoop还对外声明了MetricsSink接口，MetricsSystem会周期性的执行其putMetrics方法，将已有metrics注入其中，供其消费，具体的设计图如下所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/common/metrics.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>为系统进程引入metrics统计功能只需在进程启动的时候做以下两件事情：</para>
+	<blockquote>
+		<para>1.初始化MetricsSystem系统；</para>
+		<para>2.将已有MetricsSource和MetricsSink实现进行注册。</para>
+	</blockquote>
+	<para>MetricsSystem的初始化可通过DefaultMetricsSystem.initialize(prefix)方法来实现，其中prefix用来指定配置前缀(hadoop-metrics2.properties文件中)，MetricsSystem会加载以它为开头的配置到系统中去。而MetricsSource和MetricsSink的注册可通过两种方式来实现：通过api的方式和通过配置文件的方式。通过api的方式比较简单，MetricsSystem初始化后通过其register方法即可，这里主要看配置文件的方式。</para>
+	<section>
+		<title>Metric配置</title>
+		<para>metrics配置默认保存在$HADOOP_HOME/etc/hadoop/hadoop-metrics2.properties文件中，每一行的配置语法如下：</para>
+		<blockquote><para>[prefix].[source|sink].[instance].[options]</para></blockquote>
+		<para>其中[prefix]为MetricsSystem在初始化时指定的前缀信息；[instance]可以是任意字符串，用来唯一标识source或sink实例，也可以是"*"，用来标识所有实例；[options]为一些具体的配置项信息，配置示例如下：</para>
+		<programlistingco>
+			<programlisting>
+*.sink.file.class=org.apache.hadoop.metrics2.sink.FileSink <co id="co.metric.conf" linkends="co.note.metric.conf"/>
+namenode.sink.file.period=100 <co id="co.metric.conf.period" linkends="co.note.metric.conf.period"/> 
+namenode.sink.file.filename=/tmp/namenode-metrics.out <co id="co.metric.conf.file" linkends="co.note.metric.conf.file"/>
+namenode.sink.file.context=rpc <co id="co.metric.conf.context" linkends="co.note.metric.conf.context"/>
+
+*.source.filter.class=org.apache.hadoop.metrics2.filter.GlobFilter <co id="co.metric.conf.filter" linkends="co.note.metric.conf.filter"/>
+*.record.filter.class=${*.source.filter.class}
+*.metric.filter.class=${*.source.filter.class}
+nodemanager.*.source.filter.include=Jvm* <co id="co.metric.filter.source" linkends="co.note.metric.filter.source"/>
+nodemanager.source.rpc.record.filter.exclude=foo* <co id="co.metric.filter.record" linkends="co.note.metric.filter.record"/>
+nodemanager.sink.file.metric.filter.exclude=MemHeapUsedM <co id="co.metric.filter.metric" linkends="co.note.metric.filter.metric"/>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.metric.conf" arearefs="co.metric.conf" ><para>对所有进程使用FileSink做metrics消费处理，hadoop目前对外声明了两种类型的MetricsSink，分别是GangliaSink(将metrics信息广播给Ganglia框架进行处理)和FileSink(将metrics信息保存到指定文件中)；</para></callout>
+				<callout id="co.note.metric.conf.period" arearefs="co.metric.conf.period" ><para>指定namenode进程的metrics消费周期为100秒；</para></callout>
+				<callout id="co.note.metric.conf.file" arearefs="co.metric.conf.file" ><para>将namenode进程的metrics信息保存到/tmp/namenode-metrics.out文件中；</para></callout>
+				<callout id="co.note.metric.conf.context" arearefs="co.metric.conf.context" ><para>context可理解为一个metrics分组，可用来做metrics过滤，这里表示只接受rpc分组的metrics消息。</para></callout>
+				<callout id="co.note.metric.conf.filter" arearefs="co.metric.conf.filter" ><para>分别为source(监控源),record(监控记录)和metrics(监控项)声明过滤器，它们之间的关系是：监控源可提供多条监控记录，监控记录可包含多个监控项；</para></callout>
+				<callout id="co.note.metric.filter.source" arearefs="co.metric.filter.source" ><para>nodemanager进程中只保留名称以Jvm开头的source所提供的metrics；</para></callout>
+				<callout id="co.note.metric.filter.record" arearefs="co.metric.filter.record" ><para>nodemanager进程中针对context为rpc的metric分组，过滤掉名称以foo开头的监控记录；</para></callout>
+				<callout id="co.note.metric.filter.metric" arearefs="co.metric.filter.metric" ><para>nodemanager进程中过滤掉名称为MemHeapUsedM的监控项。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>监控项统计</title>
+		
+	</section>
+</section>

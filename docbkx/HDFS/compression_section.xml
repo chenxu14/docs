@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用LZO数据压缩</title>
+	<para>1.首先在每台机器上安装lzo的开发包：yum install lzo-devel.x86_64 lzop.x86_64</para>
+	<tip>
+		<para>如果yum源提供的开发包版本比较旧，可以去官方下载最新的源代码来编译安装，官方地址：http://www.oberhumer.com/opensource/lzo/，使用如下命令进行安装：</para>
+		<para>./configure --enable-shared --prefix /usr/local/lzo-2.08</para>
+		<para>make &amp;&amp; make install</para>
+	</tip>
+	<para>2.编译hadoop-lzo</para>
+	<para>(1)hadoop-lzo的最新代码可从如下SVN目录下载：</para>
+	<blockquote>
+		<para>svn checkout https://github.com/twitter/hadoop-lzo/trunk hadoop-lzo</para>
+	</blockquote>
+	<para>(2)下载完成后修改pom.xml文件，将hadoop.current.version属性设置成需要的值，然后使用maven进行编译：</para>
+	<blockquote>
+		<para>mvn clean package -Dmaven.test.skip=true</para>
+	</blockquote>
+	<tip>
+		<para>如果lzo是通过编译安装的，则在执行maven编译的时候有可能出现如下错误：</para>
+		<programlisting>
+[exec] checking lzo/lzo2a.h presence... no
+[exec] checking for lzo/lzo2a.h... no
+[exec] configure: error: lzo headers were not found...
+[exec]      gpl-compression library needs lzo to build.
+[exec]      Please install the requisite lzo development package.
+		</programlisting>
+		<para>此时，指定C_INCLUDE_PATH环境变量值为/usr/local/lzo-2.08/include，然后在重新编译即可。</para>
+	</tip>
+	<para>(3)编译完成后，在target目录下会产生hadoop-lzo-*.jar文件和native文件夹，依次拷贝到$HADOOP_HOME/share/hadoop/common/目录和$HADOOP_HOME/lib/native目录下。</para>
+	<para>3.配置hadoop</para>
+	<para>(1)在$HADOOP_HOME/etc/hadoop/core-site.xml文件中追加如下配置：</para>
+	<programlisting>
+&lt;property>  
+    &lt;name>io.compression.codecs&lt;/name>  
+    &lt;value>org.apache.hadoop.io.compress.GzipCodec,  
+              org.apache.hadoop.io.compress.DefaultCodec,  
+              com.hadoop.compression.lzo.LzoCodec,  
+              com.hadoop.compression.lzo.LzopCodec,  
+              org.apache.hadoop.io.compress.BZip2Codec  
+    &lt;/value>  
+&lt;/property>  
+&lt;property>  
+    &lt;name>io.compression.codec.lzo.class&lt;/name>  
+    &lt;value>com.hadoop.compression.lzo.LzoCodec&lt;/value>  
+&lt;/property>		
+	</programlisting>
+	<para>(2)在$HADOOP_HOME/etc/hadoop/mapred-site.xml文件中追加如下配置：</para>
+	<programlisting>
+&lt;property>    
+    &lt;name>mapred.compress.map.output&lt;/name>    
+    &lt;value>true&lt;/value>    
+&lt;/property>
+&lt;property>    
+    &lt;name>mapred.map.output.compression.codec&lt;/name>    
+    &lt;value>com.hadoop.compression.lzo.LzoCodec&lt;/value>    
+&lt;/property>	
+	</programlisting>
+	<para>4.测试LZO功能</para>
+	<para>首先将hadoop的最新配置同步到每台机器上，重启集群后执行以下命令来检测lzo是否成功启用：</para>
+	<blockquote>
+		<para>hadoop jar hadoop-lzo-*.jar com.hadoop.compression.lzo.LzoIndexer file.lzo</para>
+	</blockquote>
+	<para>执行成功后会在同目录下产生file.lzo.index文件。</para>
+</section>

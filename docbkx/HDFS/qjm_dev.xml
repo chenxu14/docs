@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用QJM HA功能</title>
+	<section>
+		<title>配置明细</title>
+		<programlistingco>
+			<programlisting>
+hdfs-site.xml文件中添加以下配置
+&lt;property>
+  &lt;name>dfs.nameservices&lt;/name>
+  &lt;value>mycluster&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.ha.namenodes.mycluster&lt;/name> <co id="co.ha.namenodes" linkends="co.note.ha.namenodes"/>
+  &lt;value>nn1,nn2&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.rpc-address.mycluster.nn1&lt;/name>
+  &lt;value>machine1.example.com:8020&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.rpc-address.mycluster.nn2&lt;/name>
+  &lt;value>machine2.example.com:8020&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.http-address.mycluster.nn1&lt;/name>
+  &lt;value>machine1.example.com:50070&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.http-address.mycluster.nn2&lt;/name>
+  &lt;value>machine2.example.com:50070&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.namenode.shared.edits.dir&lt;/name> <co id="co.shared.edits" linkends="co.note.shared.edits"/>
+  &lt;value>qjournal://node1.example.com:8485;node2.example.com:8485/mycluster&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.client.failover.proxy.provider.mycluster&lt;/name>
+  &lt;value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.ha.fencing.methods&lt;/name> <co id="co.fencing.method" linkends="co.note.fencing.method"/>
+  &lt;value>sshfence&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.ha.fencing.ssh.private-key-files&lt;/name> <co id="co.ssh.privateKey" linkends="co.note.ssh.privateKey"/>
+  &lt;value>/home/exampleuser/.ssh/id_rsa&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.journalnode.edits.dir&lt;/name> <co id="co.journalnode.local" linkends="co.note.journalnode.local"/>
+  &lt;value>/path/to/journal/node/local/data&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>dfs.ha.automatic-failover.enabled&lt;/name> <co id="co.automatic.failover" linkends="co.note.automatic.failover"/>
+  &lt;value>true&lt;/value>
+&lt;/property>
+
+core-site.xml文件中添加以下配置：
+&lt;property>
+  &lt;name>fs.defaultFS&lt;/name>
+  &lt;value>hdfs://mycluster&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>ha.zookeeper.quorum&lt;/name>
+  &lt;value>zk1.example.com:2181,zk2.example.com:2181,zk3.example.com:2181&lt;/value>
+  &lt;description>lists the host-port pairs running the ZooKeeper service.&lt;/description>
+&lt;/property>
+&lt;property>
+  &lt;name>ha.zookeeper.acl&lt;/name>
+  &lt;value>digest:admin:0DPiKuNIrrVmD8IUCuw1hQxNqZc=:cdrwa&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>ha.zookeeper.auth&lt;/name>
+  &lt;value>digest:admin&lt;/value>
+&lt;/property>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.ha.namenodes" arearefs="co.ha.namenodes"><para>参与热切的namenode名称；</para></callout>
+				<callout id="co.note.shared.edits" arearefs="co.shared.edits"><para>journalnode共享操作日志的地址，前缀为qjournal，后缀为nameservice名称，journalnode默认端口为8485；</para></callout>
+				<callout id="co.note.fencing.method" arearefs="co.fencing.method">
+					<para>fencing功能的触发是通过forcefence参数来设置的，如：hdfs haadmin -failover --forcefence</para>
+					<para>其主要功能是防止集群脑裂，在成功热切之前杀死原ActiveNN进程，为此，Hadoop内置了两种实现方法，分别是：</para>
+					<blockquote>
+						<para>sshfence：通过ssh连接到目标机器然后执行fuser -v -k -n tcp [nnPort]；</para>
+						<para>shell：通过自定义shell脚本来杀死进程。</para>
+					</blockquote>
+					<para>另外需要注意，如果集群开启了自动容灾功能(即dfs.ha.automatic-failover.enabled配置项为true)，则forcefence参数不在需要，集群会自动实现隔离机制。</para>
+				</callout>
+				<callout id="co.note.ssh.privateKey" arearefs="co.ssh.privateKey"><para>本地私钥路径，需要把公钥附加到目标机器的authorized_keys文件中以此实现无密码链接；</para></callout>
+				<callout id="co.note.journalnode.local" arearefs="co.journalnode.local"><para>journalnode本地保存editlog的位置；</para></callout>
+				<callout id="co.note.automatic.failover" arearefs="co.automatic.failover"><para>是否启用自动故障转移功能，基于zookeeper的进程锁机制。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>部署说明</title>
+		<orderedlist>
+			<listitem><para>首先，启动所有JournalNode进程：$HADOOP_HOME/sbin/hadoop-daemon.sh start journalnode；</para></listitem>
+			<listitem><para>格式化其中一台namenode：$HADOOP_HOME/bin/hdfs namenode -format ns；</para></listitem>
+			<listitem><para>将格式化后的namenode元数据拷贝到另一台namenode上；</para></listitem>
+			<listitem><para>格式化zookeeper存储：$HADOOP_HOME/bin/hdfs zkfc -formatZK；</para></listitem>
+			<listitem><para>执行$HADOOP_HOME/sbin/start-dfs.sh，该脚本会启动所有的namenode和datanode，如果启用了auto-failover还会启动zkfc进程。</para></listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>容灾测试</title>
+		<para>一、NameNode容灾测试</para>
+		<para>针对NameNode的容灾测试可采用如下方法来进行：</para>
+		<blockquote>
+			<para>1.通过hdfs haadmin -failover命令</para>
+			<para>2.在ActiveNN上依次杀死如下进程(DFSZKFailoverController和NameNode)</para>
+		</blockquote>
+		<para>然后通过hdfs haadmin -getServiceState [nnId]命令查看NameNode的状态是否成功切换。</para>
+		<para>将死掉的NameNode重新加入集群需执行以下步骤(顺序很重要)：</para>
+		<blockquote>
+			<para>$HADOOP_HOME/sbin/hadoop-daemon.sh start zkfc</para>
+			<para>$HADOOP_HOME/sbin/hadoop-daemon.sh start namenode</para>
+		</blockquote>
+		<para>二、JournalNode容灾测试</para>
+		<para>测试环境：</para>
+		<blockquote>
+			<para>3台JournalNode机器：JournalNodeA、JournalNodeB和JournalNodeC；</para>
+			<para>2台NameNode机器：NN(Active)、NN2(Standby)。</para>
+		</blockquote>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>用例1：杀死JournalNodeA进程，执行文件写操作；</para>
+				<para>测试结果：文件成功写入。</para>
+			</listitem>
+			<listitem>
+				<para>用例2：杀死JournalNodeA和JournalNodeB进程，执行文件写操作(writeA)；</para>
+				<para>测试结果：NN进程和NN2进程都会自己死掉，死掉时NN本地的 editlog并没有记录writeA操作(原因：NN先执行共享editdir的写操作，在执行本地editdir的写操作，如果共享editdir写入失败，放弃接下来的处理)。</para>
+			</listitem>
+			<listitem>
+				<para>用例3：杀死JournalNodeA后，执行文件写操作，等待JournalNodeB和JournalNodeC同步完editlog后，重新启动JournalNodeA；</para>
+				<para>测试结果：JournalNodeA会将editlog升级到最新状态。</para>
+			</listitem>
+			<listitem>
+				<para>用例4：杀死JournalNodeA、JournalNodeB和JournalNodeC，并假设3个进程都不可再恢复(磁盘坏死)，然后另选3台机器启动JournalNodeD、JournalNodeE和JournalNodeF，在通过NN节点执行hdfs namenode -initializeSharedEdits命令；</para>
+				<para>测试结果：JournalNodeD、JournalNodeE和JournalNodeF的日志记录被成功初始化，集群正常对外提供服务，没有发生数据丢失的现象。</para>
+				<tip><para>在执行hdfs namenode -initializeSharedEdits命令时，ActiveNN会根据本地的editlog存储来初始化JournalNode数据。因此，即使JournalNode数据丢失，也是可以通过ActiveNN来恢复的。</para></tip>
+			</listitem>
+		</itemizedlist>
+	</section>
+</section>

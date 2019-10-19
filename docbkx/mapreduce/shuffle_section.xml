@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Shuffle实现</title>
+	<section>
+		<title>shuffle数据获取</title>
+		<para>shuffle数据的获取逻辑是以plugin的方式注入到ReduceTask中的，用户可通过实现ShuffleConsumerPlugin接口来自定义shuffle数据的获取方式，在通过mapreduce.job.reduce.shuffle.consumer.plugin.class配置将目标实现引入到任务中。</para>
+		<para>在无特殊指定的情况下，默认采用org.apache.hadoop.mapreduce.task.reduce.Shuffle来处理shuffle数据的获取逻辑，整个获取过程是通过其run方法来封装的，大致实现如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先开启EventFetcher线程来与ApplicationMaster保持心跳。</para>
+				<para>心跳协议是通过TaskUmbilicalProtocol来定义的，每次心跳会执行其getMapCompletionEvents方法来获取AM端已运行结束的map事件(无论是SUCCEEDED还是FAILED)。然后针对每个事件调用ShuffleSchedulerImpl类的resolve方法进行处理，处理过程中需要参考目标事件的状态：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果是mapTask运行成功的事件</para>
+						<para>获取目标mapTask的运行地址，并将其加入pendingHosts集合中以便于Fetcher线程对其数据进行获取。</para>
+					</listitem>
+					<listitem>
+						<para>如果是mapTask运行失败的事件</para>
+						<para>将目标mapTask加入obsoleteMaps集合，Fetcher线程下次迭代时不在向其拉取数据。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>然后开启Fetcher线程从步骤1所构建的pendingHosts集合中拉取shuffle数据。</para>
+				<para>Fetcher线程在运行过程中会处于不断迭代的状态，每次迭代会从pendingHosts集合中随机选择一条记录，进行copyFromHost处理(拉取reduce需要的shuffle数据)，如果数据获取失败，将执行如下操作：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>对数据获取失败的host进行计数处理，如果总失败次数达到了mapreduce.reduce.shuffle.max-host-failures参数阈值，将会对ApplicationMaster进行通知。</para>
+					</listitem>
+					<listitem>
+						<para>将fetch失败的mapTask汇报给ApplicationMaster。</para>
+						<para>汇报之前需满足以下任意一项条件(代码逻辑参考checkAndInformJobTracker方法)：</para>
+						<para>(1)fetch失败是由于目标host连接不上导致的；</para>
+						<para>(2)开启了mapreduce.reduce.shuffle.notify.readerror配置，并且产生了readError(目前为止该条件永远不满足)；</para>
+						<para>(3)对目标map的输出进行fetch操作的总失败次数达到了mapreduce.reduce.shuffle.maxfetchfailures参数阈值；</para>
+						<para>(4)从目标host上拉取shuffle数据的失败次数达到mapreduce.reduce.shuffle.max-host-failures参数阈值。</para>
+						<para>汇报过程主要是执行TaskUmbilicalProtocol类的statusUpdate方法，目前该方法的执行时机并不正确：每次汇报都是在shuffle数据全部获取成功之后才进行的(具体可参考ReduceTask类中有关statusUpdate方法的引用)，而不是shuffle数据获取过程中。这样即使有fetch出错也不会通知到ApplicationMaster端，因为这将有可能导致reduce作业执行失败。</para>
+					</listitem>
+					<listitem>
+						<para>对reduce任务进行健康检查(代码参考checkReducerHealth方法)。</para>
+						<para>以下三个条件都满足时，reduce将处于不健康的状态，需要杀死，此时作业将以失败而告终：</para>
+						<para>(1)shuffle拉取失败的map数大于min(总map数，5)，或者所有未完成的shuffle拉取操作全都以失败而告终；</para>
+						<para>(2)shuffle拉取的总失败次数已经超过数据拉取成功的map数；</para>
+						<para>(3)shuffle拉取成功的map数还没有达到多半，或者reduce已经很长时间内没能成功获取shuffle数据了。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>等待所有的shuffle数据全部成功获取，通过调用ShuffleSchedulerImpl类的waitUntilDone方法。</para>
+				<para>等待过程中如果产生了以下异常，shuffle操作将退出，reduce任务也将以失败而告终。</para>
+				<para>(1)对reduce任务执行健康检测失败；</para>
+				<para>(2)对目标map输出执行fetch操作的总失败次数达到了max(30, totalMaps / 10)，代码逻辑可参考ShuffleSchedulerImpl类的copyFailed方法；</para>
+				<para>(3)EventFetcher线程运行过程中，调用TaskUmbilicalProtocol协议进行通信的失败次数达到了10次。</para>
+			</listitem>
+		</orderedlist>
+		<para>至此shuffle数据成功拉取，接下来将进入排序阶段。</para>
+	</section>
+</section>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Driver组件</title>
+	<section>
+		<title>CoarseGrainedSchedulerBackend服务</title>
+		<para>CoarseGrainedSchedulerBackend服务相当于Driver组件的调度终端，负责为每一个作业阶段(Statge)的任务集(TaskSets)分配计算资源。</para>
+		<para>服务启动后通过DriverActor来与Executor终端进行通信</para>
+		
+	</section>
+</section>

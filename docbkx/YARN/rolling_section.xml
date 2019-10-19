@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>滚动升级</title>
+	<para>hadoop从2.6.0版本起开始提供YARN框架的滚动升级功能(具体可参考YARN-666)，能够保证集群在升级过程中不对已有业务产生任何影响，已有作业的工作进度能够保持。</para>
+	<xi:include href="nm_work_preserving.xml" />
+	<xi:include href="rm_work_preserving.xml" />
+	<xi:include href="am_work_preserving.xml" />
+</section>

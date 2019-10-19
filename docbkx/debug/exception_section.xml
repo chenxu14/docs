@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg" xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml" xmlns:db="http://docbook.org/ns/docbook">
+	<title>异常信息汇总</title>
+	<orderedlist>
+		<listitem>
+			<para>org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException: No lease on /tmp/.. File does not exist. Holder DFSClient_attempt_201312242346_189483_r_000079_1 does not have any open files.</para>
+			<para>异常描述：hadoop进程所属用户能够访问的操作系统文件数量达到上限。</para>
+			<para>解决办法：</para>
+			<blockquote>
+				<para>1.加大系统用户可访问的操作系统文件上限，通过修改/etc/security/limits.conf配置文件</para>
+				<para>2.在hdfs.xml配置文件中，提高dfs.datanode.max.xcievers参数值</para>
+			</blockquote>
+		</listitem>
+	</orderedlist>
+</section>

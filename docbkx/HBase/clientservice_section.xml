@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>数据读写</title>
+	<para>HBase的数据读写操作主要是通过访问ClientService服务来实现的，服务发布于RegionServer端，用于响应客户端的读写请求。</para>
+	<section>
+		<title>数据读取</title>
+		<para>数据读取操作通过调用Scanner来实现，按照功能职责的不同，Scanner可划分成两种：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>其中KeyValueScanner用于实现具体的数据定位及查询功能</para>
+				<para>针对不同的存储媒介，HBase声明了两种KeyValueScanner实现，其中StoreFileScanner用于检索HFile数据，而MemStoreScanner用于检索内存数据。在检索过程中MemStoreScanner主要是遍历CellSkipListSet集合(参考MemStore实现)，而StoreFileScanner则通过HFileScanner来做数据读取(具体可参考HFile读取章节)。</para>
+				<para>在类结构上KeyValueScanner是基于组合模式来进行设计的，其中MemStoreScanner和StoreFileScanner充当个体元素，负责检索内存和HFile；而KeyValueHeap充当集合元素，其内部封装了一个KeyValueScanner列表，表示要检索的数据存在于多个存储媒介之中，在执行数据检索之前需要首先对这些KeyValueScanner进行排序处理，来决定先从哪一个Scanner进行读取。排序规则是通过KVScannerComparator类来封装的，具体逻辑如下：</para>
+				<para>(1)首先获取每个Scanner将要检索的第一条KeyValue数据</para>
+				<para>由于每个Scanner都对应一个数据指针，用于指向它所检索的当前位置，因此可从该位置进行数据读取，来获取其将要检索到的第一条KeyValue数据。</para>
+				<para>(2)然后对这些KeyValue进行比较，以此来决定排序先后</para>
+				<para>比较规则是通过KVComparator类来封装的：首先比较rowkey值，然后依次比较columnFamily、columnQualifier、timestamp和type，最后比较mvcc。</para>
+				<para>经过排序处理后，并不表示这些Scanner的检索顺序就一成不变了，每当检索完一条KeyValue数据之后便需要对这些Scanner进行重新排序处理，以确保在多个HFile中所检索的数据是有序的(具体可参考KeyValueHeap类的next实现)。如果某个Scanner已经读取到了最后一条数据，将其从列表中移除。</para>
+			</listitem>
+			<listitem>
+				<para>InternalScanner主要用于封装KeyValueScanner的使用，通过组装不同的KeyValueScanner来实现指定区间的数据查询功能</para>
+				<para>如StoreScanner用于查询指定列簇中的数据，而RegionScanner用于查询指定Region中的数据，它们都实现了InternalScanner接口。</para>
+			</listitem>
+		</itemizedlist>
+		<para>ClientService在响应客户端的读请求操作时主要是通过访问RegionScanner来实现的，具体流程如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先构建RegionScanner</para>
+				<para>在构建RegionScanner之前，确保当前Region的写锁没有被抢占，否则线程将进入等待状态，如果等待时间超过1分钟，系统将会抛出异常(代码参考startRegionOperation方法)：</para>
+				<blockquote><para>failed to get a lock in {waitTime} ms. regionName= ...</para></blockquote>
+				<para>同时还要确保目标Region能够正常对外提供服务，没有处于Recovering状态。</para>
+				<para>RegionScanner的构建是通过HRegion的getScanner方法来实现的，其会首先判断出客户端将要访问哪些列簇(通过Scan对象)，然后分别针对每一个列簇构建StoreScanner，最后将所有的StoreScanner整合到KeyValueHeap中进行统一查询，因此RegionScanner的构建便可细化到每个StoreScanner的构建上。</para>
+				<para>StoreScanner实现了InternalScanner接口，即其内部的查询逻辑是借助于KeyValueScanner来实现的(这里为KeyValueHeap)，具体的构建逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先针对每一个StoreFile构建StoreFileScaner，并将其加入scaners集合。</para></listitem>
+					<listitem><para>针对MemStore构造MemStoreScaner，同样加入scaners集合。</para></listitem>
+					<listitem>
+						<para>对scaners集合进行过滤处理，只保留符合以下要求的StoreFileScaner记录(代码逻辑参考KeyValueScanner类的shouldUseScanner方法)。</para>
+						<para>(1)文件TTL没有过期；</para>
+						<para>(2)文件中含有指定区间的数据记录(区间通过Scan对象的startKey和endKey来确定)；</para>
+						<para>(3)文件满足布隆过滤器的判断要求(具体参考布隆过滤器章节)。</para>
+						<tip>只有在执行get查询时才会真正启用布隆过滤器的校验逻辑，具体可参考StoreFile.Reader.passesBloomFilter方法的实现。</tip>
+					</listitem>
+					<listitem>
+						<para>根据客户端所提供的查询条件将scaners集合中的所有Scanner定位到目标位置上(代码参考StoreScanner类的seekScanners方法)。</para>
+						<para>MemStoreScanner的定位主要是遍历CellSkipListSet集合，而StoreFileScaner的定位则是通过引用HFileScanner来实现的(具体参考HFile读取章节)。需要注意的是如果HBase开启了并发定位功能(hbase.storescanner.parallel.seek.enable参数控制)，则所有Scanner的定位是采用并行的逻辑进行处理的，HBase会为每一个Scanner开启ParallelSeekHandler线程，并将其提交到线程池中进行处理，线程池所允许的最大线程数是通过hbase.storescanner.parallel.seek.threads参数来设置的，默认为10个。</para>
+					</listitem>
+					<listitem><para>将scaners集合中的所有Scanner整合到KeyValueHeap中，并通过KVScannerComparator进行排序处理。</para></listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>通过RegionScanner进行数据查询</para>
+				<para>执行查询之前首先判断客户端是否已经断开连接，如果步骤1执行缓慢，那么客户端有可能出现执行超时的情况，从而将连接进行关闭，出现该情况以后，服务端将放弃处理，并抛出以下异常：</para>
+				<blockquote><para>Aborting on region {region} , call {scanner} after {time} ms, since caller disconnected</para></blockquote>
+				<para>如果没有超时则通过其内部所封装的KeyValueHeap进行数据读取，并使用Filter对所读取到的数据进行过滤，如果满足客户端所声明的过滤条件则将其加入results集合(通过populateResult方法)。</para>
+			</listitem>
+			<listitem>
+				<para>最后将RegionScanner进行关闭，并将查询结果返还给客户端。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>数据写入</title>
+		<para>HBase的数据写入逻辑主要是通过ClientService的mutate方法来封装的，在执行数据写入之前需要首先对目标RegionServer进行如下判断处理：</para>
+		<para>(1)确保RegionServer正处于线上工作状态；</para>
+		<para>(2)确保RegionServer中所有Memstore的总大小没有超过使用阀值，如果条件不满足将会对数据总量最大的Memstore执行flush操作。</para>
+		<para>如果以上约束条件满足，开始根据MutateRequest来定位目标Region，并对目标Region做如下判断处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>判断Region是否为primary</para>
+				<para>由于只有primary支持写操作，因此如果访问的是Region副本，系统将抛出region is read only异常。</para>
+			</listitem>
+			<listitem>
+				<para>Region的Memstore使用情况是否已经超过目标阀值</para>
+				<para>如果大小超过hbase.hregion.memstore.flush.size * hbase.hregion.memstore.block.multiplier系统将抛出RegionTooBusyException异常，异常信息大致如下：</para>
+				<blockquote><para>Above memstore limit, regionName=${region}, server=${server}, memstoreSize=${size}, blockingMemStoreSize=${blockSize}</para></blockquote>
+			</listitem>
+		</orderedlist>
+		<para>以上判断条件满足后开始根据Mutation的操作类型来决定其执行行为。</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>如果是Put或者Delete操作</para>
+				<para>该类型的Mutation是采用批量的方式进行处理的，处理过程主要是调用HRegion的batchMutate方法，方法在执行过程中会进行分批迭代，每次迭代只处理部分Mutation，直至所有Mutation执行结束。</para>
+				<tip>在1.1.0版本之前，写操作处理存在如下bug：如果要写入的KeyValue记录不在目标Region的区间范围内，会导致batchMutate方法进入无限循环(HBASE-13471)，从而导致目标Region无法被正常关闭(因为在执行关闭操作之前需要首先对写锁进行抢占，而在执行写操作的时候，目标读锁已被写线程优先占有)。这样在对目标Region执行负载均衡、合并拆分等操作时将会产生问题。</tip>
+				<para>正常情况下，每次迭代的处理过程大致如下(代码参考HRegion的doMiniBatchMutate方法)：</para>
+				<orderedlist>
+					<listitem>
+						<para>首先尝试获取所有Mutation对应的行锁(RowLock)</para>
+						<para>HBase的事务处理是限制到行级别的，在执行行数据写入之前需要对目标行锁进行抢占(参考读写一致性章节)，成功获取到行锁之后将其加入acquiredRowLocks集合，需要注意的是在流程能够进入下一个步骤之前，acquiredRowLocks集合中至少要包含一条数据。否则线程将会被阻塞，直至成功获取第一个行锁为止(或等待时间超过hbase.rowlock.wait.duration参数阀值，此时系统将抛出异常)。</para>
+						<para>针对已获取到行锁的Mutation操作，继续执行接下来的处理逻辑。</para>
+					</listitem>
+					<listitem>
+						<para>更新Mutation数据的时间戳信息</para>
+						<para>在时间差异问题处理上，可通过hbase.hregion.keyvalue.timestamp.slop.millisecs参数来指定服务端所能忍受的最大时间差异范围。如果客户端晚于服务端的时间达到该参数阀值，系统将抛出以下异常：</para>
+						<blockquote><para>Timestamp for KV out of range ${cell} (too.new=${timestampSlop})</para></blockquote>
+						<para>否则将Mutation中每个Cell的时间戳信息修改为服务器的当前时间。</para>
+					</listitem>
+					<listitem>
+						<para>将数据写入Memstore，通过applyFamilyMapToMemstore方法</para>
+					</listitem>
+					<listitem>
+						<para>将操作记录写入WAL日志</para>
+						<para>记录操作日志的前提是Mutation的durability属性不为SKIP_WAL，在执行API调用时，客户端可通过Mutation的setDurability方法对该枚举值进行合理指定。如不指定则默认为USE_DEFAULT，表示使用表格元数据中的定义。</para>
+						<tip>为了确保同一份数据在两个不同存储媒介(Memstore和WAL)中的写入顺序相同，在步骤3开始之前需要对update锁进行抢占，待步骤4运行结束以后在将该update锁进行释放，从而确保Memstore和WAL的写入一致性。</tip>
+					</listitem>
+					<listitem>
+						<para>对新写入的WAL数据执行sync(txid)操作，将其flush到硬盘</para>
+						<para>sync逻辑可参考FSHLog.SyncRunner线程的run方法，如果sync失败会将当前HLog关闭，然后开启新的HLog进行数据写入。需要注意的是在1.2.0版本之前，如果在sync操作失败的同时，有flush操作正在执行，那么将有可能导致FlushHandler线程阻塞，并不断打印“requesting flush for region”日志，为此社区提供了jira修复(详细参考HBASE-14317和HBASE-13971)。</para>
+						<para>如果WAL写入失败，需要对Memstore执行回滚操作，将数据还原成写入之前的状态，这部分逻辑主要是通过rollbackMemstore方法来封装的。</para>
+					</listitem>
+					<listitem>
+						<para>将新写入的数据暴露给客户端进行读取，通过MultiVersionConsistencyControl的advanceMemstore方法，具体逻辑可参考Memstore的读写一致性章节</para>
+					</listitem>
+					<listitem>
+						<para>最后调用协处理器进行收尾处理，至此当前迭代顺利结束</para>
+					</listitem>
+				</orderedlist>
+				<para>每次迭代之后，需要对Memstore的数据量大小进行重新的判断，看是否有必要执行flush操作。然后继续进行下一次的迭代处理，直至所有Mutation执行结束。</para>
+			</listitem>
+			<listitem>
+				<para>如果是Append操作</para>
+				<para>Append用于向已有记录追加新的数据信息，比如某个单元格之前的信息为Hello，执行append操作后，新信息为HelloWorld(如果append值为World)。执行append操作前首先尝试获取RegionLock，如果1分钟获取不到系统将抛出异常，1分钟时间是通过如下方法计算得出的：</para>
+				<programlisting>
+min(
+  hbase.ipc.client.call.purge.timeout, 
+  hbase.busy.wait.duration * min(1, hbase.hregion.memstore.block.multiplier)
+)
+				</programlisting>
+				<para>其次，append操作是采用Nonce进行管理的，以此来防止append操作重复提交从而造成数据冗余(详细可参考Nonce管理章节)。最后，调用HRegion的append方法将目标数据追加到指定记录上，方法的执行逻辑大致如下：</para>
+				<orderedlist>
+					<listitem><para>首先尝试获取目标记录的行锁以及Region的update锁；</para></listitem>
+					<listitem><para>通过Scanner来获取目标记录在执行append操作前的数据信息，为了便于引用这里称之为oldRow；</para></listitem>
+					<listitem>
+						<para>对每一个将要新增的Cell进行判断，看其之前是否存在于oldRow中</para>
+						<para>如果存在，将新Cell信息追加到已有Cell下(包括value和Tag)，同时修改Cell的时间戳信息为当前时间；如果不存在，当作是新数据来处理。</para>
+					</listitem>
+					<listitem><para>将目标数据写入Memstore并记录WAL(如果durability不为SKIP_WAL)；</para></listitem>
+					<listitem><para>最后释放所有目标操作占据的锁，并将新数据暴露给客户端访问。</para></listitem>
+				</orderedlist>
+			</listitem>
+		</itemizedlist>
+	</section>
+</section>

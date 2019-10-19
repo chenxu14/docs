@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Leader选举机制</title>
+	<para>
+		在执行数据同步阶段(Synchornazation)，Leader首先向Follower群组进行学习，获取其中最大的zxid所对应的历史事务信息，并将其作为自己的初始历史信息，然后在广播给Follower群组去进行数据同步.
+		而如果被选举出的Leander本身包含最大的zxid，那么便省去了Leader学习的过程，只需广播自己的历史信息便可.
+		因此，我们可以在Leader选举的算法上做特殊的处理，使其选举zxid最大的节点作为Leader.
+	</para>
+	<para>Zookeeper Server结构图如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/leader-election.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>ZooKeeper Server的启动是通过QuorumPeer线程来实现的，线程主要执行了以下操作：</para>
+	<orderedlist>
+		<listitem>加载ZKDatabase数据库到内存；</listitem>
+		<listitem>开启ServerSocket来与Client进行通信；</listitem>
+		<listitem>开启DatagramSocket用来执行Leader选举；</listitem>
+	</orderedlist>	
+	<para>
+		ServerSocket由NIOServerCnxn.Factory线程负责创建，用来和Client进行通信(采用TCP协议，通过nio的方式)。
+		DatagramSocket由QuorumPeer.ResponderThread线程负责创建，用来和其他Server进行交互(UDP协议)，实现Leader选举。
+		因此，在配置Zookeeper的时候，需要配置两个地址信息：用于和客户端交互的地址和用于Leader选举的地址。
+	</para>
+	<para>Leader在选举的过程中，不一定需要所有的Server进行参与(这样会降低选举效率)，对此Zookeeper声明了两种类型的Server：PARTICIPANT和OBSERVER，OBSERVER类型的Server不参与投票选举。</para>
+	<para>QuorumPeer执行LeaderElection的触发点是自己所在的Server进入了LOOKING状态，选举过程是通过Election接口的lookForLeader方法来实现的。</para>
+	<tip>
+		<para>ZookeeperServer的状态有四种：LOOKING(寻找Leader)、FOLLOWING(跟随Leader)、LEADING(自己作为Leader)和OBSERVING(监听Leader)。</para>	
+	</tip>
+	<para>Zookeeper内置了3中Election的实现类：LeaderElection、FastLeaderElection和AuthFastLeaderElection。</para>
+	<para>LeaderElection的处理逻辑如下：</para>
+	<orderedlist>
+		<listitem>首先默认将选票投给自己。</listitem>
+		<listitem>
+			<para>然后，通过udp协议获取其他Server的投票。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/leader-election2.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>与其他Server的交互是通过DatagramSocket来完成的，其中：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>xid为随机的身份认证串，如果请求的xid与返回的xid不相等，则放弃处理。</para></listitem>
+					<listitem><para>serverId为用户配置的机器id。</para></listitem>
+					<listitem><para>leaderId表示该Server将选票投给了哪一台Server。</para></listitem>
+					<listitem><para>zxid是Server本地记录的最大事务编号。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+			<para>Server在设置leaderId的时候遵循以下规则：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>如果自身处于LEADING状态或LOOKING状态，将leaderId设置成自己的serverId(将选票投给了自己)；</para></listitem>
+					<listitem><para>如果处于OBSERVING状态，则不设置(OBSERVER类型的Server不参与投票)；</para></listitem>
+					<listitem><para>如果处于FOLLOWING状态，则设置成已选举出的Leader的serverId。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>汇总投票结果，将汇总信息赋予ElectionResult实体。</para>
+			<para>在汇总之前，首先会过滤无效选票(被选举的server已不在服务群组)，ElectionResult共有4个成员变量，含义如下：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>vote：拥有最大zxid的server(如果多个sevrer的zxid同时为最大，则vote为serverId最大的server)；</para></listitem>
+					<listitem><para>count:vote所获得的投票数量；</para></listitem>
+					<listitem><para>winner:获得最多投票的server；</para></listitem>
+					<listitem><para>winningCount：winner获得的投票数。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>基于汇总信息判断最后选举出的Leader。</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>如果winningCount占所有Server的绝大多数(winner获得了绝大多数Server的投票)，则选举winner为Leader；</para></listitem>
+					<listitem><para>否则选举vote为Leader(拥有最大zxid的server为Leader)。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+		</listitem>
+		<listitem>选举结束更新自身的状态</listitem>
+	</orderedlist>
+	<tip>
+		<para>注意：基于上述算法，新选举出的Leader可能并不含有最大的zxid，</para>
+		<para>
+			出现原因：Leader在广播事务的时候，有一台Follower收到了数据包并在本地更新了事务日志，而这个时候Leader和收到数据包的Follower同时宕机，服务集群开始进行新的Leader选举，
+			选举结束后，假设没有新的事务生成，而之前宕掉的Server重新加入了服务集群，便导致Follower的zxid大于Leader的zxid。
+			如果出现这种情况，在做数据同步的时候，比zxid大的事务将被舍弃。参考：<link>Http://zookeeper.apache.org/doc/r3.2.2/zookeeperInternals.html#sc_leaderElection</link>
+		</para>
+	</tip>
+</section>

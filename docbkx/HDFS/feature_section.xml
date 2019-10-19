@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>功能应用</title>
+	<xi:include href="federation_section.xml" />
+	<xi:include href="qjm_section.xml" />
+	<section>
+		<title>文件快照</title>
+		<para></para>
+	</section>
+	<section>
+		<title>使用限额</title>
+		<para></para>
+	</section>
+	<section>
+		<title>DistCp拷贝</title>
+		<para>拷贝命令：hadoop distcp [option] source target</para>
+		<tip>同版本集群拷贝数据可使用hdfs协议，不同版本需要在source端使用hftp协议，此时需要在target端执行拷贝任务，并且target集群的每个节点需要知道source集群的host环境，同时还要确保执行拷贝任务的用户具有source集群的读权限和target集群的写权限。</tip>
+		<para>可用参数如下：</para>
+		<para>-p[rbugp]：文件拷贝后需保留的信息(r表示备份数，b表示块大小，u表示文件所属用户，g表示所属用户组，p表示权限)；</para>
+		<para>-i：指定该参数后，如果mapTask出错，其错误日志将保留下来，而不会被其他TaskAttempt覆盖掉，同时一个Map任务的出错并不阻碍整个Job的运行(如不指定该参数，Map出错后会尝试杀死剩余的Map)；</para>
+		<para>-log：指向日志文件的输出目录(注：如果日志目录有冲突会引发租约过期异常，因此在执行多项拷贝任务时，最好为它们指向不同的日志输出目录)；</para>
+		<para>-m：指定map任务数量，如果采用dynamic拷贝策略，默认map数为20，如果采用uniformsize拷贝策略，默认map数为min(total_bytes/bytes.per.map,20*num_task_trackers)，其中bytes.per.map默认值为256M；</para>
+		<para>-overwrite：如果目标地址出现同名文件则覆盖；</para>
+		<para>-update：如果目标地址出现同名文件，并且文件大小不相同则覆盖；</para>
+		<para>-f：封装源文件列表的文件；</para>
+		<para>-filelimit：限制源文件的个数；</para>
+		<para>-sizelimit：限制源文件的总大小；</para>
+		<para>-delete：删除目标路径存在但是源路径不存在的文件。</para>
+		<para>-skipcrccheck：跳过签名校验过程；</para>
+		<para>-strategy：拷贝策略，共有两种dynamic和uniformsize(默认)；</para>
+		<para>-bandwidth：限制每个Map任务的传输带宽；</para>
+		<para>-atomic：加入该参数后，会将拷贝过程原子化，要么全部拷贝成功，要不全部拷贝失败，处理方式是先将源文件拷贝到目标集群的一个临时文件夹下(可通过-tmp参数指定)，如果拷贝成功在移至目标文件夹；</para>
+		<para>-mapredSslConf：SSL配置文件；</para>
+		<para>-async：以异步的方式执行DistCp命令，任务启动后从控制台退出。</para>
+		<tip>拷贝过程中，如果源文件发生了变动(其他用户对该文件执行了写操作、文件被删除等)，拷贝过程将失败。另外，由于拷贝过成功中是以文件为单位的，文件大小的不同会导致map执行时间也不一样，因此需要关闭推测执行功能，将mapred.speculative.execution属性设置为false；</tip>
+		<section>
+			<title>拷贝策略</title>
+			<para>最新的DistCp组件支持两种拷贝策略，分别是：dynamic和uniformsize，拷贝策略的不同主要体现在以下几个方面：</para>
+			<blockquote>
+				<para>1.输入源切片处理方式不同；</para>
+				<para>2.文件拷贝校验时段不同。</para>
+			</blockquote>
+			<para>一、uniformsize策略</para>
+			<para>该策略是distcp最为原始的策略，在不修改配置的情况下DistCp默认采用。主要工作模式是这样的：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先在作业执行前对要拷贝的文件进行校验</para>
+					<para>假设拷贝命令指定了-update参数，程序会首先判断目标文件夹是否存在同名文件，如果存在比较源文件和目标文件的大小是否相同，如果相同则将该文件从拷贝列表中移除。按此方式，如果所有的待拷贝文件全部从拷贝列表中移除的话，那么拷贝作业是不会被执行的。</para>
+				</listitem>
+				<listitem>
+					<para>文件校验通过后将待拷贝的文件按照大小来均匀切片，切片逻辑是通过UniformSizeInputFormat类来实现的。</para>
+					<para>比如有3个待拷贝文件FileA(2G)、FileB(1G)和FileC(1G)，如果DistCp开启了两个map任务，则其中一个会处理FileA的拷贝，而另外一个处理FileB和FileC的拷贝。</para>
+				</listitem>
+			</orderedlist>
+			<tip>该方式最不好的一点是，如果小文件偏多，会拖累整个作业的拷贝进度，假设系统中存在一个1G的大文件(fileA)和1000个1M的小文件，并且开启了两个map任务(mapA和mapB)，则mapA会处理fileA的拷贝，mapB会处理1000个小文件的拷贝，这时候就会出现mapB拖后腿的情况，因为文件在拷贝后需要执行备份和创建元数据的操作，如果小文件偏多，这个过程累积起来是很长的。</tip>
+			<para>二、dynamic策略</para>
+			<para>针对uniformsize策略的处理缺陷，DistCp声明了dynamic策略，该策略的处理方式如下：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="70%" scalefit="1" fileref="../media/hdfs/dynamic.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<orderedlist>
+				<listitem>
+					<para>首先将待拷贝的文件按照数量来均匀切片，切片逻辑通过DynamicInputFormat类来封装；</para>
+					<para>切片成功后会产生很多chunk文件，这些chunk文件的数量通常会远大于map任务的数量。</para>
+				</listitem>
+				<listitem>
+					<para>Map任务通过DynamicRecordReader来读取未处理的chunk，获取其中待拷贝的文件列表；</para>
+				</listitem>
+				<listitem>
+					<para>执行拷贝前对文件进行相关校验：</para>
+					<blockquote>
+						<para>目标目录是否存在同名文件；</para>
+						<para>如果存在同名文件，文件大小是否相同；</para>
+						<para>文件同名且大小相同，比对签名是否相同(没有声明-skipcrccheck参数的情况下)；</para>
+					</blockquote>
+				</listitem>
+				<listitem>
+					<para>指定chunk中的待拷贝文件处理完成后，map任务会接着获取新的chunk来进行处理，这样确保了运行较快的map能够拷贝更多的文件，防止单个map拖慢整个作业进度的情况。</para>
+				</listitem>
+			</orderedlist>
+			<tip>与uniformsize策略相比，拷贝文件的校验操作是在Map端执行的，而不是在作业初始化的时候，这样做的好处是加快了整个作业初始化的速度，并且分散了文件的校验操作到多台机器上去进行。</tip>
+		</section>
+	</section>
+	<xi:include href="balancer_section.xml" />
+</section>

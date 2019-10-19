@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>NMContainer状态机</title>
+	<para>NMContainer状态机主要用于封装NM视角每个Container的运行状态，状态转换图如下所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/nmcontainer-lifecycle.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>NMContainer状态转变是由ContainerEventType事件触发的，状态转移信息如下所示：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->LOCALIZING</para>
+			<para>触发事件：INIT_CONTAINER</para>
+			<blockquote><para>通过ContainerManager服务的startContainers方法启动部署Container时触发</para></blockquote>
+			<para>回调处理：通过RequestResourcesTransition类来封装。</para>
+			<blockquote>
+			<orderedlist>
+				<listitem><para>触发AuxServicesEvent事件，事件类型为CONTAINER_INIT，使辅助服务做相应处理；</para></listitem>
+				<listitem><para>触发AuxServicesEvent事件，事件类型为APPLICATION_INIT，将serviceData(构造ContainerLaunchContext时指定)传递给辅助服务进行处理。</para></listitem>
+				<listitem><para>触发LocalizationEvent事件，事件类型为INIT_CONTAINER_RESOURCES，下载Container运行所依赖的资源到本地(详细参考ResourceLocalizationService服务)。</para></listitem>
+			</orderedlist>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：LOCALIZING-->LOCALIZED</para>
+			<para>触发事件：RESOURCE_LOCALIZED(Container依赖的每一个资源被成功下载后都会触发该事件)</para>
+			<para>回调处理：通过LocalizedTransition类来封装。</para>
+			<blockquote>
+				<para>如果Container状态机是正常提交任务开启的，触发ContainersLauncherEvent事件(事件类型为LAUNCH_CONTAINER)，开始处理Container的加载操作(通过开启ContainerLaunch线程)。</para>
+				<para>如果Container状态机是通过recover操作开启的，并且目标Container进程已经加载，触发RECOVER_CONTAINER事件，开始处理Container恢复逻辑(通过开启RecoveredContainerLaunch线程)。</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：LOCALIZED-->RUNNING</para>
+			<para>触发事件：CONTAINER_LAUNCHED(Container成功加载后触发，参考ContainersLauncher服务)</para>
+			<para>回调处理：通过LaunchTransition类来封装。</para>
+			<blockquote><para>触发ContainerStartMonitoringEvent事件，通过ContainersMonitor来监控目标Container的资源使用情况。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->KILLING</para>
+			<para>触发事件：KILL_CONTAINER</para>
+			<blockquote><para>NM处理RM心跳过来的Container时触发，如果该Container在RM端已经运行结束。</para></blockquote>
+			<para>回调处理：通过KillTransition类来封装。触发ContainersLauncherEvent事件，事件类型为CLEANUP_CONTAINER，执行对Container的清理操作(杀死进程、删除pid文件)。</para>
+			<tip>
+				<para>hadoop在2.6.0及之前的版本中，对Container的kill操作存在比较严重的BUG(详细参考YARN-3678)，如果yarn.nodemanager.sleep-delay-before-sigkill.ms参数值大于0(默认为250毫秒)，那么在杀死目标Container时会首先对其执行`kill -15`操作来让其自然退出，待休眠250毫秒之后在重新执行`kill -9`操作来将其强制退出。如果在休眠的250毫秒时间内目标Container的pid被其他进程或线程抢占，那么便会产生进程误杀的现象。解决办法主要有以下几种：</para>
+				<para>1.将yarn.nodemanager.sleep-delay-before-sigkill.ms参数设置为0，不执行DelayKill，而直接强制杀死。</para>
+				<para>2.在执行`kill -9`前判断目标进程是否为当前Container，如果不是则放弃kill操作。</para>
+			</tip>
+		</listitem>
+		<listitem>
+			<para>状态转换：KILLING | RUNNING-->EXITED_WITH_SUCCESS</para>
+			<para>触发事件：CONTAINER_EXITED_WITH_SUCCESS</para>
+			<blockquote><para>Container运行结束或被杀死时触发该事件，参考ContainersLauncher服务。</para></blockquote>
+			<para>回调处理：通过ExitedWithSuccessTransition类来封装。</para>
+			<blockquote>
+			<para>处理内容主要是对Container执行清理操作，代码参考ContainerLaunch类的cleanupContainer方法。</para>
+			<orderedlist>
+				<listitem>
+					<para>首先杀死Container进程(如果其仍在运行)，并删除pid文件；</para>
+				</listitem>
+				<listitem>
+					<para>然后清理Container工作目录，通过触发CLEANUP_CONTAINER_RESOURCES事件(参考ResourceLocalizationService服务)。</para>
+				</listitem>
+			</orderedlist>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：EXITED_WITH_SUCCESS-->DONE</para>
+			<para>触发事件：CONTAINER_RESOURCES_CLEANEDUP(Container成功清理后触发该事件)</para>
+			<para>回调处理：通过ContainerDoneTransition类来封装。</para>
+			<blockquote>
+			<orderedlist>
+				<listitem><para>触发ApplicationEvent事件，事件类型为APPLICATION_CONTAINER_FINISHED，使Application状态机进行相关处理；</para></listitem>
+				<listitem><para>触发ContainersMonitorEvent事件，事件类型为STOP_MONITORING_CONTAINER，使ContainersMonitor服务进行相关处理；</para></listitem>
+				<listitem><para>触发LogHandlerEvent事件，事件类型为CONTAINER_FINISHED，使LogHandler服务进行相关处理；</para></listitem>
+				<listitem><para>触发AuxServicesEvent事件，事件类型为CONTAINER_STOP，使辅助服务进行相关处理。</para></listitem>
+			</orderedlist>
+			</blockquote>
+		</listitem>
+	</itemizedlist>
+</section>

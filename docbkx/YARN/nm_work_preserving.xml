@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>NM状态恢复</title>
+	<section>
+		<title>LocalizedResource恢复</title>
+		<para>在Conainer加载启动之前需要首先从HDFS上下载其运行所需要的资源，每一个资源的获取过程是通过LocalizedResource状态机实例来进行描述的。为了确保已下载成功的资源不会在NM重启后状态丢失，需要预先将这些状态机实例保存下来，待NM重启后在进行恢复处理。</para>
+		<para>以下两种情况会触发目标资源的状态保存操作。</para>
+		<orderedlist>
+			<listitem>
+				<para>已确定好了目标资源的本地存储路径，正准备开始下载(代码参考LocalResourcesTracker类的getPathForLocalization方法)。</para>
+				<para>此时会调用NMStateStoreService服务的startResourceLocalization方法，向目标LevelDB中添加Localization记录，记录的key值取决于目标资源的类型：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>如果是public类型的资源，key值为Localization/public/started/&lt;local_path></para></listitem>
+					<listitem><para>如果是private类型的资源，key值为Localization/private/&lt;user>/filecache/started/&lt;local_path></para></listitem>
+					<listitem><para>如果是application资源，key值为Localization/private/&lt;user>/appcache/&lt;applicationId>/started/&lt;local_path></para></listitem>
+				</itemizedlist>
+				<para>记录的value值是通过protobuf来进行序列化处理的，相关的protocol声明如下(具体的描述参考ResourceLocalizationService服务章节)：</para>
+				<programlisting>
+message LocalResourceProto {
+   optional URLProto resource = 1;
+   optional int64 size = 2;
+   optional int64 timestamp = 3;
+   optional LocalResourceTypeProto type = 4;
+   optional LocalResourceVisibilityProto visibility = 5;
+   optional string pattern = 6; 
+}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>目标资源已被成功下载到本地(代码逻辑参考LocalResourcesTrackerImpl类的handle方法)。</para>
+				<para>此时会调用NMStateStoreService服务的finishResourceLocalization方法进行处理。方法执行后，会首先删除LevelDB中与目标资源对应的started记录，然后将其替换成completed记录，记录的key值与started记录相类似，只不过将“started”字符串替换成“completed”。记录的value值同样采用protobuf进行序列化处理，相关的protocol声明如下：</para>
+				<programlisting>
+message LocalizedResourceProto {
+   optional LocalResourceProto resource = 1;
+   optional string localPath = 2;
+   optional int64 size = 3;
+}
+				</programlisting>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>恢复逻辑</title>
+			<para>ContainerManager服务启动后开始尝试对之前运行的LocalizedResource状态机实例进行恢复处理，整个恢复过程是通过调用其recover方法来实现的，大致流程如下：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先从LevelDB中获取所有之前保存的资源记录。</para>
+					<para>获取过程是通过调用NMStateStoreServic服务的loadLocalizationState方法来实现的。</para>
+				</listitem>
+				<listitem>
+					<para>创建LocalResourcesTracker用来跟踪步骤1中每个资源记录的获取情况。</para>
+					<para>在ResourceLocalizationService内部共封装了3种类型的LocalResourcesTracker，分别用来跟踪public、private和application类型资源的获取情况。其中，public类型的LocalResourcesTracker是在ResourceLocalizationService服务启动的时候进行构建的，全局只有一个。而private和application类型的LocalResourcesTracker需要针对具体的用户和App单独进行构建，构建过程可参考ResourceLocalizationService服务的recoverLocalizedResources方法。</para>
+				</listitem>
+				<listitem>
+					<para>针对步骤1所获取的每条资源记录重新构造资源申请，并通过触发ResourceRecoveredEvent事件来使跟踪它的LocalResourcesTracker进行回调处理。</para>
+					<para>LocalResourcesTracker收到事件以后会重新构造出LocalizedResource状态机实例，并对其触发RECOVERED事件，使其过渡到LOCALIZED状态。状态转换期间会执行RecoveredTransition钩子函数，以便将localPath和size属性设置成数据库中所记录的值。这样，所有之前运行的LocalizedResource状态机实例便可还原，但是在还原过程中产生了一个新的问题：目标状态机在还原前可能处于INIT或DOWNLOADING状态，但当还原操作执行以后，全都处在了LOCALIZED状态(与之前的状态并不一致)。</para>
+					<para>为此ResourceLocalizationService服务进行了如下处理(代码参考其recoverTrackerResources方法)：如果步骤1中所获取的目标资源记录是started记录而不是completed记录(资源并未成功下载)，将之前的下载结果进行清理(删除其下载过程中的临时数据)，并在LocalResourcesTracker类中对REQUEST事件进行拦截处理(所有资源下载操作都会对其触发REQUEST事件来进行申请)，判断目标资源在本地是否存在，如果不存在则重新进行下载(构造新的LocalizedResource状态机实例，并将之前的删除)。详细逻辑可参考LocalResourcesTracker类的handle方法。</para>
+				</listitem>
+			</orderedlist>
+			<para>至此，所有之前运行的LocalizedResource状态机实例便可成功还原。</para>
+		</section>
+		<section>
+			<title>状态清理</title>
+			<para>资源记录在LevelDB中并不是一直新增而不清理的，那样会使还原过程产生很多无谓的操作，当满足以下任意场景时开始对资源记录进行清理。</para>
+			<orderedlist>
+				<listitem>
+					<para>任务正常结束，开始清理Application运行资源(代码参考ResourceLocalizationService类的handleDestroyApplicationResources方法)。</para>
+				</listitem>
+				<listitem>
+					<para>资源丢失，或本地化失败后需要重新下载，此时需要将以前的资源记录删除(代码参考LocalResourcesTrackerImpl类的removeResource方法)。</para>
+				</listitem>
+			</orderedlist>
+			<para>清理操作主要是调用NMStateStoreServic服务的removeLocalizedResource方法，方法执行后会删除LevelDB中与目标资源对应的started记录和completed记录。</para>
+		</section>
+	</section>
+	<section>
+		<title>Application恢复</title>
+		<orderedlist>
+			<listitem>
+				<para>状态保存</para>
+				<para>Application的状态保存操作主要发生在如下两个阶段：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Application状态机被初始化的时候(代码逻辑可参考ContainerManagerImpl类的startContainerInternal方法)。</para>
+					</listitem>
+					<listitem>
+						<para>LogHandler处理完APPLICATION_STARTED事件后(代码逻辑参考AppLogInitDoneTransition实现)，这时会将目标Application有关日志聚合相关的配置进行保存。</para>
+					</listitem>
+				</itemizedlist>
+				<para>保存操作主要是通过调用NMStateStoreService服务的storeApplication方法来实现的，方法执行后会将如下Key/Value数据保存至LevelDB中：其中key值为ContainerManager/applications/$appId，而value值采用protobuf进行序列化处理，相关的protocol声明如下：</para>
+				<programlisting>
+message ContainerManagerApplicationProto {
+  optional ApplicationIdProto id = 1;
+  optional string user = 2;
+  optional bytes credentials = 3;
+  repeated ApplicationACLMapProto acls = 4;
+  //有关日志聚合的相关配置
+  optional LogAggregationContextProto log_aggregation_context = 5;
+  optional int64 appLogAggregationInitedTime = 6 [ default = -1 ];
+}
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>状态恢复</para>
+				<para>同LocalizedResource类似，Application的状态恢复发生在ContainerManager服务启动之后(具体参考其recover方法)。</para>
+				<para>恢复过程中会首先调用NMStateStoreService服务的loadApplicationsState方法，来将待恢复的Application状态机从levelDB中加载出来，然后针对每一个待恢复的Application，调用recoverApplication方法进行处理：处理过程主要是构造新的Application状态机实例，并将其加入NM的上下文环境中，然后触发INIT_APPLICATION事件使其进行相应的处理，以便还原出作业的acl信息以及日志聚合信息。</para>
+			</listitem>
+			<listitem>
+				<para>状态清理</para>
+				<para>状态清理操作发生在日志聚合成功或失败之后(代码参考AppLogsAggregatedTransition类实现)，这时会将目标Application从NMStateStore中移除，通过调用NMStateStoreService服务的removeApplication方法。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>NMContainer恢复</title>
+		<section>
+			<title>状态保存</title>
+			<para>NMContainer的状态保存操作主要发生在如下几个阶段：</para>
+			<orderedlist>
+				<listitem>
+					<para>NM收到StartContainerRequest请求后(代码参考ContainerManager服务的startContainerInternal方法)。</para>
+					<para>此时会调用NMStateStoreService服务的storeContainer方法将目标Request进行保存，记录的key值为ContainerManager/containers/$containerId/request，value值采用protobuf进行序列化，相关protocol声明如下：</para>
+					<programlisting>
+message StartContainerRequestProto {
+  optional ContainerLaunchContextProto container_launch_context = 1;
+  optional hadoop.common.TokenProto container_token = 2;
+}
+					</programlisting>
+					<para>主要封装了Container的启动环境(参考ContainerLaunchContext类)以及Token信息。</para>
+				</listitem>
+				<listitem>
+					<para>Container进程成功加载之前(代码参考ContainerLaunch线程的launchContainer方法)。</para>
+					<para>此时会调用NMStateStoreService服务的storeContainerLaunched方法将目标Container的加载状态进行保存，所保存记录的key值为key值为ContainerManager/containers/$containerId/launched，value值为空的字节数组。</para>
+				</listitem>
+				<listitem>
+					<para>Container进程运行结束后(代码参考ContainerLaunch线程以及RecoveredContainerLaunch线程)。</para>
+					<para>此时会调用NMStateStoreService服务的storeContainerCompleted方法将目标Container的exitcode进行保存，所保存记录的key值为key值为ContainerManager/containers/$containerId/exitcode，value值为目标Container的退出代码。</para>
+				</listitem>
+				<listitem>
+					<para>对Container执行清理操作前(代码参考ContainerLaunch线程的cleanupContainer方法)。</para>
+					<para>此时会调用NMStateStoreService服务的storeContainerKilled方法将目标Container的kill状态进行保存，所保存记录的key值为ContainerManager/containers/$containerId/killed，value值为空的字节数组。</para>
+				</listitem>
+				<listitem>
+					<para>Container被AM强制杀死前(代码参考ContainerManager服务的stopContainerInternal方法)。</para>
+					<para>此时同样会去调用NMStateStoreService服务的storeContainerKilled方法将目标Container的kill状态进行保存。</para>
+				</listitem>
+				<listitem>
+					<para>Container的运行诊断信息发生变动时(代码参考ContainerImpl的addDiagnostics方法)。</para>
+					<para>此时会调用NMStateStoreService服务的storeContainerDiagnostics方法将Container的诊断信息进行保存，所保存记录的key值为ContainerManager/containers/$containerId/diagnostics，value值为诊断信息。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>状态恢复</title>
+			<para>NMContainer的状态恢复逻辑发生在LocalizedResource和Application的状态恢复之后，具体可参考ContainerManagerImpl服务的recover方法，整个恢复过程大致如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>遍历每一个待恢复的Container及其在LevelDB中所记录的所有状态记录，并根据这些记录来构造与Container相对应的RecoveredContainerState对象用于封装其之前的运行状态(代码可参考NMStateStoreService服务的loadContainersState方法)。</para>
+				</listitem>
+				<listitem>
+					<para>针对每一个RecoveredContainerState执行recoverContainer方法来将目标Container的状态进行恢复，具体细节如下：</para>
+					<orderedlist>
+						<listitem>
+							<para>首先构造NMContainer状态机实例并将其加入NM的上下文环境中，同时触发INIT_CONTAINER事件使其进行相应处理。</para>
+							<para>回调处理逻辑是通过RequestResourcesTransition类来封装的，其会首先判断目标待恢复的Container是否之前已经运行结束，如果是直接调用sendFinishedEvents方法将新开启的Container状态机实例切换至DONE状态，否则开始下载Container运行所依赖的资源。</para>
+						</listitem>
+						<listitem>
+							<para>获取依赖资源</para>
+							<para>Container运行所依赖的资源是通过LocalizedResource状态机来封装的，这些状态机实例是先于NMContainer状态机之前进行恢复处理的(具体参考LocalizedResource恢复章节)，因此Container在获取这些依赖资源的时候有可能不需要再次从HDFS下载，如果其之前已被下载到本地。</para>
+						</listitem>
+						<listitem>
+							<para>加载或激活Container进程</para>
+							<para>如果Container进程之前并未加载开始按照正常的流程对其执行加载操作；如果其之前已经加载则需要对其进行激活处理(具体判断可参考ContainerImpl类的sendLaunchEvent方法)，激活操作是通过RecoveredContainerLaunch线程来开启的，具体实现细节如下：</para>
+							<para>(1)首先触发CONTAINER_LAUNCHED事件将目标NMContainer状态机切换至Running状态；</para>
+							<para>(2)将目标Container进程的pid文件路径加入到ContainerExecutor服务的pidFiles集合(通过调用其activateContainer方法)；</para>
+							<para>(3)等待目标Container运行结束并获取其exitcode，通过ContainerExecutor服务的reacquireContainer方法；</para>
+							<para>(4)根据exitcode来决定Container状态机接下来的处理流程，如果code值为0触发CONTAINER_EXITED_WITH_SUCCESS事件，否则触发CONTAINER_EXITED_WITH_FAILURE事件。</para>
+							<tip>在NM重启完成之前，有可能会存在Container进程运行结束的情况，但这并不影响目标Container的恢复逻辑，因为其exitcode会写入到相应的文件中，通过读取该文件便可获取目标Container的运行结果，从而决定状态机之后的流程走向。</tip>
+						</listitem>
+					</orderedlist>
+				</listitem>
+			</itemizedlist>
+		</section>
+		<section>
+			<title>状态清理</title>
+			<para>状态清理操作发生在Container运行结束之后，在NM与RM的每次心跳过程中，NM端会统计当前有哪些Container已经运行结束，在将这些Container汇报到RM端的同时调用NMStateStoreService服务的removeContainer方法来删除LevelDB中所有关于目标Container的状态记录(代码参考NodeStatusUpdater服务的addCompletedContainer方法)。</para>
+		</section>
+	</section>
+</section>

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	
+	<title>version-1版本</title>
+	<para>HFile是参照谷歌的SSTable存储格式来设计的，在V1版本中其存储结构如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="88%" scalefit="1" fileref="../media/hbase/hfile-architecture.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>由图片可以看出HFile由如下数据片段组成的：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>DataBlock</para>
+			<para>保存在HFile中的表格数据是分块存储的，每个数据块的大小默认为64KB，存储着一些key/value键值对信息。其中key用于定位单元格，value表示单元格中的数据.</para>
+			<para>HFile在创建时，其数据块的大小是可人为指定的，但并不代表它的值可以任意指定：</para>
+			<blockquote><para>首先数据块的大小一定要大于每个key/value键值对的大小，要保证每个数据块至少可以存储一条记录；</para></blockquote>
+			<blockquote><para>其次数据块的大小也不要过于偏高，这样虽然可以存储更多的键值对信息但同时也会降低数据的检索效率，因为数据块中的记录在检索时是从第一条开始遍历的，记录越多遍历的平均时间也就越长。</para></blockquote>
+			<para>实际开发中，需要根据键值对的平均大小来做考量，比如，如果键值对的平均大小为100字节，则blocksize可以指定成16KB，平均存储160条记录。</para>
+		</listitem>
+		<listitem>
+			<para>Data Index</para>
+			<para>HFile针对DataBlock提供数据索引功能，索引数据保存在内存里。</para>
+			<para>同等数据量下，</para>
+				<blockquote><para>数据块越大-->能够存储的键值对越多-->需要的数据块个数越少-->索引量越低；</para></blockquote>
+			<para>反之，</para>
+				<blockquote><para>数据块越小-->能够存储的键值对越少-->需要的数据块个数越多-->索引量越高；</para></blockquote>
+			<para>由于索引数据保存在内存里，因此索引量的增加会提高数据的检索效率，但同时也会消耗内存。如何在时间和空间上做取舍需要开发人员去衡量。</para>
+			<para>存储在内存中的索引数据，每条记录的key值是它所引向的DataBlock中第一条记录的key值，因此有效降低key值的长度可以节省内存资源，key的最大长度为64KB，但通常在10~100字节之间最为理想。拿应用举例：如果HFile为1GB，DataBlock为64KB，则需要15600条索引记录(1GB/64KB)，如果key的平均长度是64字节，那么大概只需要1.2M内存(15600*80)来保存这些索引数据。</para>
+		</listitem>
+		<listitem>
+			<para>MetaBlock</para>
+			<para>元数据信息块，保存用户自定义的元数据信息</para>
+		</listitem>
+		<listitem>
+			<para>Meta Index</para>
+			<para>元数据块索引，作用同Data-Index相似。</para>
+		</listitem>
+		<listitem>
+			<para>FileInfo</para>
+			<para>文件元数据信息，同时也可以保存用户自定义的元数据。</para>
+		</listitem>
+		<listitem>
+			<para>Trailer</para>
+			<para>Trailer是所有数据片段的索引，记录了每一个数据片段在HFile中的偏移量，其信息是保存在内存里的，通过它可以降低数据的寻址时间。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/hfile-trailer.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+		</listitem>
+	</itemizedlist>
+</section>

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region加载</title>
+	<para>Region加载操作是在HMaster端触发的，HMaster端完成Region的分配逻辑以后，会在Zookeeper中创建对应的启动节点，节点路径为/hbase/region-in-transition/{regionName}，数据内容为RegionTransition对象。节点创建成功以后，HMaster会将待部署的Region发送到目标RegionServer端进行加载，RPC请求的发送是通过ServerManager类的sendRegionOpen方法来实现的，RegionServer端收到请求消息以后会首先判断目标Region的当前状态，然后在进行针对性的处理(代码逻辑参考RSRpcServices类的openRegion方法)。</para>
+	<orderedlist>
+		<listitem>
+			<para>如果状态显示其正在当前RegionServer上执行下线操作，则放弃这次上线申请，并返回FAILED_OPENING响应给HMaster。</para>
+			<para>处理办法是从Zookeeper中读取出目标启动节点，并从中解析出RegionTransition对象，然后将其eventType属性值修改为RS_ZK_REGION_FAILED_OPEN。状态修改后HMaster端会进行相应的回调处理来决定是否对目标Region进行重新分配(参考Region分配章节)。</para>
+		</listitem>
+		<listitem>
+			<para>如果状态显示其正处于上线过程中则忽略这次上线申请。</para>
+		</listitem>
+		<listitem>
+			<para>如果状态显示其已经在目标RegionServer上加载，返回ALREADY_OPENED响应给HMaster。</para>
+			<para>HMaster端收到响应后会执行如下处理(代码逻辑参考AssignmentManager类的processAlreadyOpenedRegion方法)：首先删除Zookeeper中对应的启动节点，然后将META表格和内存中的Region状态标记为OPEN。</para>
+		</listitem>
+		<listitem>
+			<para>否则开始对目标Region执行加载操作。</para>
+			<para>加载逻辑是通过OpenRegionHandler线程来封装的，线程运行过程中会进行如下处理：</para>
+			<para>(1)首先从启动节点中读取出RegionTransition对象，并将其eventType属性值修改为RS_ZK_REGION_OPENING，节点状态修改后HMaster会进行相应的回调处理，将META表和内存中的Region状态标记为OPENING；</para>
+			<para>(2)然后开始调用HRegion的openHRegion方法，对目标Region进行加载，加载细节参考下一章节；</para>
+			<para>(3)最后更新META表格中目标Region的访问地址，并修改启动节点的状态为RS_ZK_REGION_OPENED，节点状态修改后HMaster端会进行相应的回调处理来将META表和内存中的Region标记成OPEN状态，并开启OpenedRegionHandler线程来删除Zookeeper中对应的启动节点，至此目标Region成功被加载。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>加载细节</title>
+		<para>Region的启动加载过程主要是通过执行HRegion的openHRegion方法来实现的，加载过程中会执行如下处理操作：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先遍历Region的每一个列簇，检测集群是否支持目标列簇所声明的压缩和加密算法。</para>
+				<para>压缩算法在定义表格时可通过COMPRESSION属性进行声明，可选的算法有LZO、GZ、SNAPPY、LZ4或者NONE(默认配置，表示不启用压缩)。</para>
+				<para>加密算法可通过ENCRYPTION属性进行声明，目前可选的算法只有AES，如果不设置表示不启用加密功能。如果加密功能启用，还需要对相关密钥进行校验，密钥信息是通过ENCRYPTION_KEY属性来声明的，如不指定HBase会随机生成。</para>
+			</listitem>
+			<listitem>
+				<para>其次，需要判断当前环境是否可以对以下目标类进行加载。</para>
+				<para>(1)用于Region拆分的实现策略类</para>
+				<para>可通过SPLIT_POLICY标签来声明，或通过hbase.regionserver.region.split.policy配置参数。</para>
+				<para>(2)表格启用的协处理器类</para>
+				<para>验证目标类能否被加载的同时还会对协处理器的声明规范以及优先级进行校验(优先级不能低于0)。</para>
+			</listitem>
+			<listitem>
+				<para>以上校验通过后开始对目标Region执行初始化操作，初始化过程如下：</para>
+				<para>(1)首先调用协处理器的preOpen方法，在Region加载前进行相应的拦截处理。</para>
+				<para>(2)在Region的存储目录下生成.regioninfo文件，用来保存Region的基本信息。</para>
+				<para>信息内容采用protobuf进行序列化，相关的protocol声明如下：</para>
+				<programlistingco>
+					<programlisting>
+message RegionInfo {
+   required uint64 region_id = 1; <co id="co.load.regionId" linkends="co.note.load.regionId"/>
+   required TableName table_name = 2; <co id="co.load.tableName" linkends="co.note.load.tableName"/>
+   optional bytes start_key = 3; <co id="co.load.startKey" linkends="co.note.load.startKey"/>
+   optional bytes end_key = 4; <co id="co.load.endKey" linkends="co.note.load.endKey"/>
+   optional bool offline = 5; <co id="co.load.offline" linkends="co.note.load.offline"/>
+   optional bool split = 6; <co id="co.load.split" linkends="co.note.load.split"/>
+   optional int32 replica_id = 7 [default = 0]; <co id="co.load.replicaId" linkends="co.note.load.replicaId"/>
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.load.regionId" arearefs="co.load.regionId"><para>目标Region的唯一标识，一般为创建时的时间戳信息；</para></callout>
+						<callout id="co.note.load.tableName" arearefs="co.load.tableName"><para>region所属的表格名称；</para></callout>
+						<callout id="co.note.load.startKey" arearefs="co.load.startKey"><para>记录到该Region中的最小rowkey值；</para></callout>
+						<callout id="co.note.load.endKey" arearefs="co.load.endKey"><para>记录到该Region中的最大rowkey值；</para></callout>
+						<callout id="co.note.load.offline" arearefs="co.load.offline"><para>Region是否已经下线；</para></callout>
+						<callout id="co.note.load.split" arearefs="co.load.split"><para>Region是否已经被拆分；</para></callout>
+						<callout id="co.note.load.replicaId" arearefs="co.load.replicaId"><para>Region的副本id，1.0版本后HBase开始支持Region副本功能；</para></callout>
+					</calloutlist>
+				</programlistingco>
+				<para>文件生成后，可通过HRegionInfo的parseFrom方法进行解析，从而还原出HRegionInfo对象。</para>
+				<para>(3)初始化Region中的每一个Store。</para>
+				<para>针对每个列簇构造HStore对象，并加入stores集合，同时比较每个Store的lastSequenceId，取出最大值作为当前Region的sequenceId。HStore在构造过程中会对其内部的StoreFile进行加载来开启其Reader流实例(代码参考其loadStoreFiles方法)。加载过程是并行处理的，线程数可通过hbase.hstore.open.and.close.threads.max参数来指定，默认值为1。</para>
+				<para>(4)如果该Region不为primary，将其标记为只读状态，否则进行如下处理：</para>
+				<para>清理Region的tmp子目录，splits子目录和merges子目录。并在path/to/region/recovered.edits目录下新建seqid文件，文件名当前Region的sequenceId。</para>
+				<para>(5)最后调用协处理器，执行postOpen处理。</para>
+			</listitem>
+			<listitem>
+				<para>Region初始化成功后，还需记录其启动日志到HLog中去。</para>
+				<para>HLog除了可以记录Region的写操作日志外，还可记录Region的启动和关闭日志(通过WALUtil类的writeRegionEventMarker方法)，日志内容同样采用protobuf进行序列化，消息类型为RegionEventDescriptor：</para>
+				<programlisting>
+message RegionEventDescriptor {
+   enum EventType {
+      REGION_OPEN = 0;
+      REGION_CLOSE = 1;
+   }
+   required EventType event_type = 1;
+   required bytes table_name = 2;
+   required bytes encoded_region_name = 3;
+   optional uint64 log_sequence_number = 4;
+   repeated StoreDescriptor stores = 5;
+   optional ServerName server = 6;  // Server who opened the region
+}
+message StoreDescriptor {
+   required bytes family_name = 1; //relative to region dir
+   required string store_home_dir = 2; // relative to store dir
+   repeated string store_file = 3; 
+}
+				</programlisting>
+			</listitem>
+		</orderedlist>
+		<para>至此，目标Region成功被加载，可以提供线上服务。</para>
+	</section>
+</section>

@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Spark On HBase</title>
+	<section>
+		<title>安全认证</title>
+		<para>spark对外提供了ServiceCredentialProvider接口用来解决服务访问安全认证相关的逻辑，可通过实现该接口来完成对指定服务的Token注入。比如针对spark访问hbase应用场景，spark内部封装了HBaseCredentialProvider用来获取与HBase有关的服务Token。</para>
+		<para>在现实应用场景中，运行spark作业的hadoop集群和部署hbase的hadoop集群有可能并不是同一个集群，如果对部署hbase的hadoop集群有访问需求，同样需要在客户端事先获取其对应的服务Token，再将Token序列化到driver端和executor端。为此我们可声明自己的ServiceCredentialProvider实现，核心代码逻辑如下：</para>
+		<programlistingco>
+			<programlisting>
+import org.apache.spark.deploy.yarn.security.ServiceCredentialProvider;
+import scala.Option;
+...
+public class HadoopCredentialProvider implements ServiceCredentialProvider {
+  private static final Log LOG = LogFactory.getLog(MTCredentialProvider.class);
+  private Set&lt;String> clusters = new HashSet&lt;>();
+  @Override
+  public Option&lt;Object> obtainCredentials(Configuration conf, SparkConf sparkConf,
+      Credentials creds) {
+    try {
+      conf.addResource("spark-hbase.xml"); <co id="co.spark.hbase.cusconf" linkends="co.note.spark.hbase.cusconf"/>
+      String tables = conf.get("hbase.spark.tables");
+      String clusterEnv = conf.get("hbase.spark.env");
+      if (clusterEnv == null || "".equals(clusterEnv)) {
+        throw new IOException(
+          "hbase.spark.env must set in spark-hbase.xml, value is STAGING or PROD.");
+      }
+      boolean isTest = !"PROD".equalsIgnoreCase(clusterEnv);
+      if (tables == null || "".equals(tables.trim())) {
+        throw new IOException("hbase.client.hottable must set in spark-hbase.xml.");
+      }
+      LOG.info("conf tables : " + tables + ", hadoop env : " + clusterEnv);
+      for (String tableName : tables.split(",")) {
+        String clusterName = isTest ? Constants.CLUSTER_STAGING : ConfUtil
+            .getTableInfo(tableName).getClusterName();
+        Properties clusterProp = ConfUtil.getClusterEnv(clusterName);
+        if (!clusters.contains(clusterName)) { // not init yet
+          Configuration hadoopConf = new Configuration(false); <co id="co.spark.hbase.conf" linkends="co.note.spark.hbase.conf"/>
+          ConfUtil.prop2HdfsConf(clusterProp, hadoopConf);
+          ConfUtil.prop2HBaseConf(clusterProp, hadoopConf);
+          StringWriter confStr = new StringWriter();
+          hadoopConf.writeXml(confStr);
+          confStr.close();
+          LOG.info("hadoop conf info for " + clusterName + " : " + confStr.toString());
+          FileSystem fs = FileSystem.get(hadoopConf);
+          Token&lt;?> hdfsToken = fs.getDelegationToken(UUID.randomUUID().toString()); <co id="co.spark.hbase.nntoken" linkends="co.note.spark.hbase.nntoken"/>
+          creds.addToken(hdfsToken.getService(), hdfsToken);
+          try (Connection conn = ConnectionFactory.createConnection(hadoopConf,
+              new SecureHadoopUser(UserGroupInformation.getLoginUser()))) {
+            Token&lt;?> hbaseToken = TokenUtil.obtainToken(conn); <co id="co.spark.hbase.token" linkends="co.note.spark.hbase.token"/>
+            creds.addToken(hbaseToken.getService(), hbaseToken);
+          }
+          clusters.add(clusterName);
+        }
+      }
+    } catch (IOException e) {
+      LOG.error("obtain hadoop's delegation token failed.", e);
+    }
+    return Option.empty();
+  }
+  @Override
+  public boolean credentialsRequired(Configuration conf) {
+    return true;
+  }
+  @Override
+  public String serviceName() {
+    return "hadoop";
+  }
+}
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.spark.hbase.cusconf" arearefs="co.spark.hbase.cusconf"><para>从自定义的配置文件中加载如下信息(文件需要在classpath路径下)：要访问的表格名称及集群环境；</para></callout>
+				<callout id="co.note.spark.hbase.conf" arearefs="co.spark.hbase.conf"><para>构建出目标环境的Configuration，包括hdfs配置及hbase配置；</para></callout>
+				<callout id="co.note.spark.hbase.nntoken" arearefs="co.spark.hbase.nntoken"><para>获取目标hdfs集群的DelegationToken并将其注入到客户端环境；</para></callout>
+				<callout id="co.note.spark.hbase.token" arearefs="co.spark.hbase.token"><para>获取目标hbase集群的服务Token并将其注入到客户端环境。</para></callout>
+			</calloutlist>
+		</programlistingco>
+		<para>ServiceCredentialProvider主要是通过java的spi机制进行加载的，为此需要在classpath下添加META-INF/services/org.apache.spark.deploy.yarn.security.ServiceCredentialProvider文件，并将我们自定义的服务类名添加到该配置文件中去。</para>
+	</section>
+	<section>
+		<title>交互方式</title>
+		<para>针对spark访问hbase应用需求，社区发布了hbase-connectors工程来简化我们的开发成本。通过该工程，我们可以按如下方式来与HBase进行交互。</para>
+		<orderedlist>
+			<listitem>
+				<para>通过sparkSql查询遍历hbase表格</para>
+				<programlistingco>
+					<programlisting>
+import org.apache.hadoop.hbase.spark.HBaseContext
+import org.apache.hadoop.hbase.spark.HBaseRDDFunctions._
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.DataFrame
+import org.apache.hadoop.hbase.TableName
+import org.apache.hadoop.hbase.HBaseConfiguration
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.hbase.spark.datasources.HBaseTableCatalog
+
+object SparkSQLDemo {
+  val TABLE_NAME = "TestTable";
+  val cat = s"""{ <co id="co.spark.sql.catalog" linkends="co.note.spark.sql.catalog"/>
+      |"table":{"namespace":"default", "name":"TestTable"},
+      |"rowkey":"key",
+      |"columns":{
+      |"uid":{"cf":"rowkey", "col":"key", "type":"string"}, <co id="co.spark.sql.id" linkends="co.note.spark.sql.id"/>
+      |"name":{"cf":"info", "col":"name", "type":"string"}
+      |}
+      |}""".stripMargin
+  def main(args: Array[String]) {
+    val sparkConf = new SparkConf().setAppName("SparkSQLDemo")
+    val sc = new SparkContext(sparkConf)
+    val hconf: Configuration = ConfUtil.initHBaseConf(TABLE_NAME) <co id="co.spark.sql.env" linkends="co.note.spark.sql.env"/>
+    val hbaseContext = new HBaseContext(sc, hconf)
+    val sqlContext = new SQLContext(sc)
+
+    import sqlContext.implicits._
+    def withCatalog(cat: String): DataFrame = { <co id="co.spark.sql.df" linkends="co.note.spark.sql.df"/>
+      sqlContext
+        .read
+        .options(Map(HBaseTableCatalog.tableCatalog->cat))
+        .format("org.apache.hadoop.hbase.spark")
+        .load()
+    }
+
+    val df = withCatalog(cat)
+    df.registerTempTable("TempTable")
+    val c = sqlContext.sql("select * from TempTable where name = 'zhangsan'")
+    c.show()
+  }
+}
+					</programlisting>
+				</programlistingco>
+				<calloutlist>
+					<callout id="co.note.spark.sql.catalog" arearefs="co.spark.sql.catalog" ><para>首先定义出表格的schema信息，以便通过sql对其进行查询；</para></callout>
+					<callout id="co.note.spark.sql.id" arearefs="co.spark.sql.id" ><para>针对主键字段，列族需要指定成rowkey；</para></callout>
+					<callout id="co.note.spark.sql.env" arearefs="co.spark.sql.env" ><para>构建目标HBase集群的配置环境，包括ZK地址、端口以及认证信息；</para></callout>
+					<callout id="co.note.spark.sql.df" arearefs="co.spark.sql.df" ><para>针对目标HBase表格构建DataFrame，以便通过sql对其进行查询。</para></callout>
+				</calloutlist>
+			</listitem>
+			<listitem>
+				<para>实时写入RDD数据到HBase</para>
+				<programlistingco>
+					<programlisting>
+object SparkPutDemo {
+  def main(args: Array[String]) {
+    val TABLE_NAME = "TestTable";
+    val conf = new SparkConf().setAppName("SparkPutDemo")
+    val sc = new SparkContext(conf)
+    val hconf: Configuration = ConfUtil.initHBaseConf(TABLE_NAME);
+    val hbaseContext = new HBaseContext(sc, hconf)
+    val rdd = sc.parallelize(Array(
+        (Bytes.toBytes("1"), // rowkey
+            Array((Bytes.toBytes("info"), //column
+            Bytes.toBytes("name"),
+            Bytes.toBytes("zhangsan")))),
+    ))
+    rdd.hbaseBulkPut(hbaseContext, TableName.valueOf(TABLE_NAME),
+      (putRecord) => {
+        val put = new Put(putRecord._1)
+        putRecord._2.foreach((putValue) => put.addColumn(putValue._1,
+            putValue._2, putValue._3))
+        put
+      })
+  }
+}
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>bulkload导入RDD数据到HBase</para>
+				<programlistingco>
+					<programlisting>
+import org.apache.hadoop.hbase.spark.KeyFamilyQualifier
+import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles
+...
+object SparkBulkloadDemo {
+  def main(args: Array[String]) {
+    val TABLE_NAME = "TestTable"
+    val conf = new SparkConf().setAppName("SparkBulkloadDemo")
+    val sc = new SparkContext(conf)
+    val hconf = ConfUtil.initHadoopEnv(TABLE_NAME);
+    val stagingDir = hconf.get("hbase.spark.bulkload.staging")
+    val hbaseContext = new HBaseContext(sc, hconf)
+    val rdd = sc.parallelize(Array(
+        (Bytes.toBytes("1"), // rowkey
+            Array((Bytes.toBytes("info"), //column
+            Bytes.toBytes("name"), Bytes.toBytes("zhangsan")))),
+    ))
+    rdd.hbaseBulkLoad(hbaseContext, TableName.valueOf(TABLE_NAME),
+      t => {
+        val rowKey = t._1
+        val family:Array[Byte] = t._2(0)._1
+        val qualifier = t._2(0)._2
+        val value = t._2(0)._3
+        val keyFamilyQualifier= new KeyFamilyQualifier(rowKey, family, qualifier)
+        Seq((keyFamilyQualifier, value)).iterator
+      }, stagingDir)
+
+    new LoadIncrementalHFiles(hconf).run(Array(stagingDir, TABLE_NAME))
+  }
+}
+					</programlisting>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

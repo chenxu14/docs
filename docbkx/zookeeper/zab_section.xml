@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Zab协议描述</title>
+	<para>同样以应用实例来演示Zab协议的工作方式。</para>
+	<para>首先，Follower向新选举出的Leader发送本地记录的curEpoch信息。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/zab.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>
+		当Leader收到大部分Follower发送过来的epoch信息时,开始汇总这些epoch，并得到其中的最大值epochMax。
+		然后，Leader会新生成一个epoch’，使得epoch’> epochMax，并发送给Follower群组。
+	</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/zab2.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>因为epoch’> epoch，所以Follower接受并记录Leader的请求信息，赋予curEpoch，同时将本地存储的history信息(zxid,trans)返回给Leader。</para>
+	<tip>
+		<para>与Paxos算法描述相比较：curEpoch相当于prepareResponse；history相当于acceptResponse；而(zxid,trans)相当于(n,v).</para>
+		<para>所不同的是，zab在对n与v的处理上更为特殊一些：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>zxid是由两部分组成的，分别是epoch和counter，在比较大小的时候先比较epoch，然后在比较counter。</para></listitem>
+			<listitem><para>而v的处理上不再是数据单体，而是一个集合(封装所有的历史事务信息)。</para></listitem>
+		</itemizedlist>
+	</tip>
+	<para>当Leader收到绝大多数Follower的响应信息后，开始执行Paxos算法的accept阶段：</para>
+	<orderedlist>
+		<listitem>汇总接收到的响应值，提取最大请求编号对应的value：(zxid’,trans’)；</listitem>
+		<listitem>
+			<para>对Follower群组广播该value。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/zab3.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+		</listitem>
+	</orderedlist>
+	<para>上面提到过，zxid由两部分组成，分别是epoch和counter，Follower收到Leader发送过来的请求后，首先从zxid中解析出epoch，判断其与curEpoch是否相等。</para>
+	<blockquote>
+		<para>若相等，则修改history为Leader传递过来的信息(zxid’,trans’)；</para>
+		<para>若不相等，执行最开始时的操作，向Leader发送epoch’。</para>
+	</blockquote>
+	<para>最终完成数据同步的操作。</para>
+	<para>结合官方给出的数据流图不难发现：zab的前两个阶段主要还是应用了Paxos算法来完成数据同步，同步之后如果Leader不出现异常则不再依赖Paxos算法，而是用一种类似与two-phrase commit的方式来实现Broadcast。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/zab4.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<tip>
+		<para>Zookeeper的原子广播与二段提交也有明显的不同之处：不要求所有Follower执行成功，只需绝大多数执行通过便可，因为Zookeeper集群是一种水平扩充(每个server节点存的数据相同)，而不是垂直扩充(需要确保整体数据的完整性)。</para>
+	</tip>
+	<para>使用多实例Paxos算法也可以实现集群一致性的要求，但zab算法降低了集群节点的通信次数，因为它只用一个Paxos实例，关键在于算法所传递的value不是单体，而是一个有序集合。</para>
+</section>

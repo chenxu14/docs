@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>副本重新分配</title>
+	<para>当集群扩容以后，需要将之前的topic分区副本部分移植到新扩容的机器上以实现整个集群的负载均衡，此时便可借助于kafka提供的kafka-reassign-partitions.sh脚本来实现。</para>
+	<section>
+		<title>操作步骤</title>
+		<orderedlist>
+			<listitem>
+				<para>首先创建topics-to-move.json文件用于封装副本分布需要做调整的Topic</para>
+				<para>文件的格式为：{"topics":[{"topic": "foo"},{"topic": "foo1"}],"version":1}</para>
+			</listitem>
+			<listitem>
+				<para>执行如下命令用于生成调整后的Topic分布情况。</para>
+				<programlisting>
+./bin/kafka-reassign-partitions.sh --generate 
+    --topics-to-move-json-file path/to/topics-to-move.json 
+    --broker-list &lt;brokerId>,&lt;brokerId>... 
+    --zookeeper &lt;host>:2181
+				</programlisting>
+				<para>然后将命令生成的字符串保存到topics-reassignment.json文件中。</para>
+			</listitem>
+			<listitem>
+				<para>使用如下命令对topics-reassignment.json中的分区做重新调整。</para>
+				<programlisting>
+./bin/kafka-reassign-partitions.sh --execute 
+    --reassignment-json-file path/to/topics-reassignment.json
+    --zookeeper &lt;host>:2181
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>使用如下命令对调整情况做校验处理</para>
+				<programlisting>
+./bin/kafka-reassign-partitions.sh --verify 
+    --reassignment-json-file path/to/topics-reassignment.json
+    --zookeeper &lt;host>:2181
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>扩容过程</title>
+		<para>执行execute脚本命令之后，会将topics-reassignment.json文件中的内容写入到ZK的/admin/reassign_partitions节点。与此同时KafkaController正在对该节点中的数据做监控处理，数据内容发生变动以后开始执行如下操作。</para>
+		<para>为便于描述，首先声明如下变量：</para>
+		<blockquote>
+			<para>(1)RAR：用于表示调整后的副本分区情况；</para>
+			<para>(2)OAR：用于表示调整前的副本分区情况；</para>
+			<para>(3)AR：用于表示当前的副本分区情况。</para>
+		</blockquote>
+		<para>然后对topics-reassignment.json文件中的每个分区记录执行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先执行如下操作：AR = RAR + OAR</para>
+				<para>并将AR保存到ZK的/brokers/topics/$topic/partitions/$partition/state节点中。</para>
+			</listitem>
+			<listitem><para>发送LeaderAndIsr请求到每个分区副本</para></listitem>
+			<listitem><para>将 RAR - OAR 中的分区副本标记为NewReplica状态</para></listitem>
+			<listitem><para>等待RAR中的所有数据与leader同步(在ISR列表里)</para></listitem>
+			<listitem><para>将RAR中的分区副本标记为OnlineReplica状态</para></listitem>
+			<listitem><para>执行如下设置：AR = RAR</para></listitem>
+			<listitem><para>从RAR中选出一个新的Leader</para></listitem>
+			<listitem><para>将 OAR - RAR 中的分区副本标记为OfflineReplica状态</para></listitem>
+			<listitem><para>将 OAR - RAR 中的分区副本标记为NonExistentReplica状态</para></listitem>
+			<listitem><para>将AR写入ZK的/brokers/topics/$topic/partitions/$partition/state节点中</para></listitem>
+			<listitem><para>更新ZK的/admin/reassign_partitions节点，删除当前所遍历的分区记录。</para></listitem>
+			<listitem><para>发送update metadata请求到每个broker。</para></listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>已知问题</title>
+		<para>当扩容过程进入步骤1时，由于KAFKA-1382中所描述的问题，导致目标ZK节点无法被更新，从而触发不了ReassignedPartitionsIsrChangeListener的回调处理操作。</para>
+	</section>
+	<section>
+		<title>潜在风险</title>
+		<para>扩容过程中，新分配的副本需要从Leader中同步数据，如果topic数据量比较大会占用一定的带宽，从而使应用出现延迟。</para>
+	</section>
+</section>

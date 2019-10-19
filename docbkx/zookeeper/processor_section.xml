@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>请求处理器链</title>
+	<para>服务端收到客户端的请求后，调用处理器链来对request进行处理。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/requestprocessor.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>Zookeeper共有3种类型的Server(Leader、Follower和Observer)，不同的Server拥有不同的处理器链。</para>
+	<orderedlist>
+		<listitem>
+			<para>Leader</para>
+			<para>PrepRequestProcessor --> ProposalRequestProcessor --> CommitProcessor --> Leader.ToBeAppliedRequestProcessor --> FinalRequestProcessor。</para>
+		</listitem>
+		<listitem>
+			<para>Follower</para>
+			<para>FollowerRequestProcessor --> CommitProcessor --> FinalRequestProcessor。</para>
+		</listitem>
+		<listitem>
+			<para>Observer</para>
+			<para>ObserverRequestProcessor --> CommitProcessor --> FinalRequestProcessor。</para>
+		</listitem>
+	</orderedlist>
+	<para>按照功能职责的不同，每个处理器的作用描述如下：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>FollowerRequestProcessor</para>
+			<para>只有Follower会用到该处理器，其作用是将request添加到CommitProcessor处理器的请求队列中，然后判断请求类型，如果是写请求或同步请求，则转发给Leader进行处理。</para>
+		</listitem>
+		<listitem>
+			<para>PreRequestProcessor</para>
+			<para>只有Leader会用到该处理器，其作用是：</para>
+			<blockquote>
+				<orderedlist>
+					<listitem>为request初始化事务信息，包括(zxid,TxnRecord和TxnHeader)；</listitem>
+					<listitem>将request转发给ProposalRequestProcessor。</listitem>
+				</orderedlist>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>ProposalRequestProcessor</para>
+			<para>Leader会收到3种类型的请求，如图所示：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/request-type.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>该处理器可以判断请求类型：</para>
+			<orderedlist>
+				<listitem>如果是Follower的同步请求，则调用Leader类的processSync方法进行数据同步；</listitem>
+				<listitem>如果是客户端的读请求，则将request添加到CommitProcessor的请求队列中；</listitem>
+				<listitem>如果是客户端的写请求，同样先将request添加到CommitProcessor的请求队列中。然后调用Leader类的propose方法，将request广播给Follower(原子广播第一阶段)，最后将request转发给SyncRequestProcessor，将事务日志记录在本地</listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>SyncRequestProCessor</para>
+			<para>Leader和Follower都会用到该处理器，它的作用是将写操作日志记录到本地(通过ZKDatabase的append方法)，如果日志文件足够大，则调用ZooKeeperServer类的takeSnapshot方法重新生成数据库快照，和新的日志文件(通过ZKDatabase的rollLog方法)。</para>
+		</listitem>
+		<listitem>
+			<para>AckRequestProcessor</para>
+			<para>事务日志成功记录以后，Leader通过该处理器发送ack响应给自己。</para>
+		</listitem>
+		<listitem>
+			<para>SendAckRequestProcessor</para>
+			<para>事务日志成功记录以后，Follower通过该处理器发送ack响应给Leader。当Leader收到绝大多数server发送过来的ack响应时，开始提交事务，进入原子广播的第二阶段。</para>
+		</listitem>
+		<listitem>
+			<para>CommitProcessor</para>
+			<para>该处理器主要封装了两个队列：请求队列和提交队列，客户端的任何请求都会添加到“请求队列”，而“提交队列”只记录原子广播第一阶段通过的request(具体参考Zookeeper的原子广播机制)。</para>
+			<para>遍历请求队列，如果是读请求，则直接转交给下一个处理器进行处理；如果是写请求，Zookeeper要确保写操作日志已被大多数Server记录下来，否则不会将request转交给下一个处理器进行处理。实现方法是遍历提交队列，看提交队列中是否有request与请求队列中的request相对应(sessionid属性和cxid属性相同)，如果没有，则一直等待，以此来确保事务提交的顺序性。</para>
+		</listitem>
+		<listitem>
+			<para>FinalProcessor</para>
+			<para>提交事务(通过ZKDatabase的processTxn方法)，将新数据写入内存，返回response给客户端。</para>
+		</listitem>
+	</itemizedlist>
+</section>

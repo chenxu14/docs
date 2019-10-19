@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用cgroup</title>
+	<section>
+		<title>cgroup简介</title>
+		<para>cgroups是ControlGroups的缩写，是Linux内核提供的一种可以限制、记录、隔离进程组所使用的物理资源(如：cpu,memory,IO等等)的机制。最初由google的工程师提出，后来被整合进Linux内核。</para>
+		<para>在linux内部cgroup是基于目录的方式进行组织的，如下所示：</para>
+		<programlistingco>
+			<programlisting>
+mount_path
+   |__Subsystem
+         |__ControlGroup
+               |__child_group
+			</programlisting>
+		</programlistingco>
+		<para>其中根目录为cgroup的挂载点，默认为/cgroup。</para>
+		<para>二级目录为subsystem，也称之为资源控制器(ResourceController)，Linux对外声明了10种不同类型的资源控制器分别用于管理与其对应的资源，如：cpu、内存、磁盘及网络IO等。</para>
+		<para>subsystem的子目录为资源控制组，每个subsystem由多个控制组构成，并且这些控制组之间呈单一的继承关系，子控制组会继承父控制组的相关属性。每个控制组相当于是一个进程队列，用于控制其内部每个进程的使用资源，每个控制组的元数据信息是以文件的形式进行组织的，文件名即为属性名，文件内容为其对应的属性值。</para>
+		<section>
+			<title>CPU控制组</title>
+			<para>CPU控制组需要部署到cpu的资源控制器下面，默认的挂载路径为/cgroup/cpu，其对cpu资源的控制可采用两种方式来实现：</para>
+			<orderedlist>
+				<listitem>
+					<para>基于公平调度的方式</para>
+					<para>为所有控制组指定不同大小的权重信息，如果cpu的资源使用率达到饱和，则权重值较大的控制组，其内部的进程可以使用较多的cpu资源。而如果cpu的资源使用率还没有达到饱和，则控制组中的进程可以使用任意空闲的cpu资源，即使其资源使用率已经超过了当初为其分配的阀值。</para>
+					<para>控制组的权重信息是通过cpu.shares文件进行指定的，默认值为1024。如果cpu资源控制器下有两个控制组(group_A和group_B)，group_A的权重值为1024，group_B的权重值为4096，则group_A中的进程可使用20%的cpu资源，而group_B中的进程可使用80%的cpu资源。</para>
+				</listitem>
+				<listitem>
+					<para>限制使用上限的方式</para>
+					<para>每个控制组的cpu使用上限是通过如下公式计算得出的：</para>
+					<blockquote><para>uperLimit = quota / period</para></blockquote>
+					<para>其中quota值从cpu.cfs_quota_us文件中读取，而period值从cpu.cfs_period_us文件中读取。如果cpu.cfs_quota_us的文件内容为200000，而cpu.cfs_period_us的文件内容为1000000，则该控制组中所有进程的cpu使用上限不能超过20%。</para>
+					<tip>uperLimit的上限并不是100%，如果cpu.cfs_quota_us值为200000，而cpu.cfs_period_us值为100000，则目标控制组中的进程能够使用的cpu上限为200%，也即2个cpu的资源。</tip>
+				</listitem>
+			</orderedlist>
+			<para>CPU控制组的目录结构如下所示：</para>
+			<programlistingco>
+				<programlisting>
+cpu_group
+   |__cpu.shares            控制组的权重信息
+   |__cpu.cfs_period_us     资源统计周期，用于计算控制组的cpu使用上限
+   |__cpu.cfs_quota_us      资源配额大小，用于计算控制组的cpu使用上限
+   |__cpu.stat              统计控制组的运行状态信息
+   |__cgroup.procs          当前控制组中有哪些进程
+   |__notify_on_release     控制组中没有进程的时候是否进行回调处理
+   |__&lt;child_group>         子控制组
+				</programlisting>
+			</programlistingco>
+		</section>
+		<section>
+			<title>blkio控制组</title>
+			<para>blkio控制组用于限制每个进程的磁盘IO资源，同CPU控制组类似，其对目标资源的限制也采用两种方式进行实现。</para>
+			<orderedlist>
+				<listitem>
+					<para>基于公平调度的方式</para>
+					<para>权重值通过blkio.weight文件进行封装，取值范围在100到1000之间。</para>
+				</listitem>
+				<listitem>
+					<para>限制使用上限的方式</para>
+					<para>使用上限可以通过多种纬度进行设置，包括：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>blkio.throttle.read_bps_device：限制每秒可从磁盘读取的最大字节数</para></listitem>
+						<listitem><para>blkio.throttle.read_iops_device：限制每秒可执行磁盘读取的最多次数</para></listitem>
+						<listitem><para>blkio.throttle.write_bps_device：限制每秒可向磁盘写入的最大字节数</para></listitem>
+						<listitem><para>blkio.throttle.write_iops_device：限制每秒可执行磁盘写入的最多次数</para></listitem>
+						<listitem><para>blkio.throttle.io_serviced：限制指定操作最多可执行的次数</para></listitem>
+						<listitem><para>blkio.throttle.io_service_bytes：限制指定操作的最大吞吐量</para></listitem>
+					</itemizedlist>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>net_cls控制组</title>
+			<para>net_cls控制组主要用于限制每个进程可使用的网络IO流量，在实现上主要借助于Linux的TrafficController组件，通过net_cls.classid配置来向TrafficController标明目标packets是从哪一个控制组中发出的，然后对每个控制组的优先级进行比较，从而决定处理的先后顺序。</para>
+		</section>
+	</section>
+	<section>
+		<title>与YARN的集成</title>
+		<para>在YARN框架中，Container进程的启动主要是借助于ContainerExecutor服务来实现的，该服务接口对外声明了以下实用方法：</para>
+		<blockquote>
+			<para>(1)startLocalizer：从HDFS中下载Container运行所依赖的资源。</para>
+			<para>(2)launchContainer：执行Container的启动脚本来完成其加载操作。</para>
+		</blockquote>
+		<para>另外，YARN框架还对外声明了两种ContainerExecutor的实现类，分别是DefaultContainerExecutor和LinuxContainerExecutor。如若启用cgroup功能，则必须使用LinuxContainerExecutor进行处理(通过yarn.nodemanager.container-executor.class配置参数进行指定)。LinuxContainerExecutor在实现上主要借助于一个C语言脚本来完成其业务逻辑，拿launchContainer方法为例，方法在执行过程中会调用如下shell语句：</para>
+		<programlistingco>
+			<programlisting>
+shell> /path/to/container-executor ${runAsUser} ${appUser} 1 \
+     > ${appId} ${containerId} ${containerWorkDir} ${cotainerScript} ${tokens} ${pid} \
+     > ${localDirs} ${logDirs} cgroups=/cgroup/cpu/hadoop-yarn/${container_id}/tasks
+			</programlisting>
+		</programlistingco>
+		<para>为了对目标Container的资源使用进行隔离限制，在Container加载启动前，需首先初始化与其对应的cgroup资源控制组，这部分逻辑是通过CgroupsLCEResourcesHandler进行封装的，具体处理如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先创建目标控制组，用于控制Container能够使用的cpu资源</para>
+				<para>控制组的路径为/cgroup/cpu/hadoop-yarn/${container_id}</para>
+				<tip>截至目前为止(hadoop2.7)，YARN框架通过cgroup只实现了CPU资源的使用隔离功能，而磁盘IO资源的隔离功能虽已有patch，但并没有集成到trunk中去，其在实现上主要是基于cgroup的blkio子系统来进行控制的。网络IO的隔离功能目前只有设计文档，并无具体实现，详细可参考YARN-2139和YARN-2140。</tip>
+			</listitem>
+			<listitem>
+				<para>然后为目标控制组设定权重</para>
+				<para>权重信息是通过如下方法计算得出的：(weight = vcore * 1024)，其中vcore为调度器分配给Container的cpu数量。在计算出权重信息以后，将其写入/cgroup/cpu/hadoop-yarn/${container_id}/cpu.shares文件中。</para>
+				<tip>在2.6版本之前，YARN对cpu资源的限制是采用公平调度的策略进行实现的，而2.6版本之后又引入了限制使用上限的方式，可通过yarn.nodemanager.linux-container-executor.cgroups.strict-resource-usage配置参数来表明该限制是否开启，详细可参考YARN-2531。</tip>
+			</listitem>
+		</orderedlist>
+		<para>控制组创建成功以后，开始执行Container的加载操作，并将Container的进程id写入到/cgroup/cpu/hadoop-yarn/${container_id}/tasks文件中，至此成功完成与目标控制组的绑定逻辑。</para>
+		<para>Container运行结束以后，需要对其所在控制组进行清理，清理办法是删除/cgroup/cpu/hadoop-yarn/${container_id}目录，这部分逻辑同样是由CgroupsLCEResourcesHandler类进行封装的，通过其deleteCgroup方法。</para>
+	</section>
+	<section>
+		<title>启用步骤</title>
+		<orderedlist>
+			<listitem>
+				<para>cgroup安装</para>
+				<para>cgroup可使用yum安装源进行安装，命令如下：</para>
+				<blockquote><para>yum install libcgroup</para></blockquote>
+				<para>安装成功后，可通过修改/etc/cgconfig.conf对cgroup进行配置，再通过如下命令进行启动：</para>
+				<blockquote><para>service cgconfig start</para></blockquote>
+				<para>服务启动后，会自动完成相关目录的挂载操作，默认的根挂载点为/cgroup。</para>
+			</listitem>
+			<listitem>
+				<para>hadoop配置</para>
+				<para>在yarn-site.xml文件中添加如下配置项：</para>
+				<programlistingco>
+					<programlisting>
+&lt;property>
+  &lt;name>yarn.nodemanager.container-executor.class&lt;/name> <co id="co.cgroup.executor.class" linkends="co.note.cgroup.executor.class"/>
+  &lt;value>org.apache.hadoop.yarn.server.nodemanager.LinuxContainerExecutor&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.group&lt;/name> <co id="co.cgroup.executor.group" linkends="co.note.cgroup.executor.group"/>
+  &lt;value>hadoop&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.path&lt;/name> <co id="co.cgroup.executor.path" linkends="co.note.cgroup.executor.path"/>
+  &lt;value>/path/to/hadoop/bin/container-executor&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.resources-handler.class&lt;/name> <co id="co.cgroup.executor.res" linkends="co.note.cgroup.executor.res"/>
+  &lt;value>
+    org.apache.hadoop.yarn.server.nodemanager.util.CgroupsLCEResourcesHandler
+  &lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.cgroups.hierarchy&lt;/name> <co id="co.cgroup.executor.hierarchy" linkends="co.note.cgroup.executor.hierarchy"/>
+  &lt;value>/hadoop-yarn&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.cgroups.mount&lt;/name> <co id="co.cgroup.executor.mount" linkends="co.note.cgroup.executor.mount"/>
+  &lt;value>false&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.cgroups.mount-path&lt;/name> <co id="co.cgroup.executor.mountpath" linkends="co.note.cgroup.executor.mountpath"/>
+  &lt;value>/cgroup&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.nonsecure-mode.local-user&lt;/name> <co id="co.cgroup.executor.localuser" linkends="co.note.cgroup.executor.localuser"/>
+  &lt;value>yarn&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.container-executor.os.sched.priority.adjustment&lt;/name> <co id="co.cgroup.executor.adjustment" linkends="co.note.cgroup.executor.adjustment"/>
+  &lt;value>0&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.cgroups.delete-timeout-ms&lt;/name> <co id="co.cgroup.executor.clear" linkends="co.note.cgroup.executor.clear"/>
+  &lt;value>1000&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.resource.percentage-physical-cpu-limit&lt;/name> <co id="co.cgroup.executor.limit" linkends="co.note.cgroup.executor.limit"/>
+  &lt;value>100&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>yarn.nodemanager.linux-container-executor.cgroups.strict-resource-usage&lt;/name> <co id="co.cgroup.executor.strict" linkends="co.note.cgroup.executor.strict"/>
+  &lt;value>false&lt;/value>
+&lt;/property>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.cgroup.executor.class" arearefs="co.cgroup.executor.class">
+							<para>使用LinuxContainerExecutor类进行处理，该类会使用container-executor脚本来执行Container资源本地化及加载操作；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.group" arearefs="co.cgroup.executor.group">
+							<para>要与container-executor.cfg配置文件中的属性值相同；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.path" arearefs="co.cgroup.executor.path">
+							<para>container-executor脚本的存储路径；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.res" arearefs="co.cgroup.executor.res">
+							<para>使用CgroupsLCEResourcesHandler来初始化cgroup资源配置；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.hierarchy" arearefs="co.cgroup.executor.hierarchy">
+							<para>所有的Container控制组隶属于该目录下；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.mount" arearefs="co.cgroup.executor.mount">
+							<para>是否启用挂载操作，`service cgconfig start`命令已实现挂载功能，因此设置为false即可；</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.mountpath" arearefs="co.cgroup.executor.mountpath">
+							<para>cgroup的根挂载点。</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.localuser" arearefs="co.cgroup.executor.localuser">
+							<para>在没有启用security的情况下，Container进程是通过该用户来启动的(默认为nobody)。</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.adjustment" arearefs="co.cgroup.executor.adjustment">
+							<para>通过`nice -n [num]`命令来改变目标进程的运行优先级。</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.clear" arearefs="co.cgroup.executor.clear">
+							<para>Container运行结束后会清理其所在cgroup中的控制组，如果清理失败会继续重试，直至所耗用时间达到该参数值为止(默认为1秒)。</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.limit" arearefs="co.cgroup.executor.limit">
+							<para>所有Containers能够使用的cpu总资源上限，默认为100，表示可以使用全部的cpu资源，这时将解除cpu资源限制(将cfs_quota_us文件内容设置为-1)。如果cpu数为24，该参数值为50，则所有的Containers最多可使用12个cpu (50 * 24 / 100)。</para>
+						</callout>
+						<callout id="co.note.cgroup.executor.strict" arearefs="co.cgroup.executor.strict">
+							<para>是否对每个Container能够使用的cpu资源上限做限制。</para>
+						</callout>
+					</calloutlist>
+				</programlistingco>			
+			</listitem>
+			<listitem>
+				<para>准备工作</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>编译container-executor</para>
+						<para>hadoop自带的container-executor脚本是32位的，如在64位环境下使用需重新编译，命令如下：</para>
+						<blockquote><para>mvn package -Pnative -DskipTests -Dcontainer-executor.conf.dir=/etc</para></blockquote>
+						<para>其中container-executor.conf.dir属性用于指向container-executor.cfg文件的存放位置，需要注意的是该文件的所有祖先目录只能是root用户具备写权限，而其他用户只能读取。</para>
+						<para>编译成功后，使用如下命令对文件执行授权(root用户执行)：</para>
+						<blockquote>
+							<para>chmod 600 container-executor.cfg</para>
+							<para>chown root:hadoop container-executor</para>
+							<para>chmod 4750 container-executor</para>
+						</blockquote>
+						<tip>
+							<para>当执行container-executor脚本时，脚本会首先判断执行用户所在用户组是否与container-executor.cfg配置文件中yarn.nodemanager.linux-container-executor.group的属性值相同，如果不同则放弃接下来的处理，因此需要对container-executor脚本的所属用户组进行合理的指定。</para>
+							<para>如果集群是非安全模式，那么脚本的执行是通过指定用户来进行操作的；而如果集群启用了Security，则脚本要通过具体的App提交用户来执行，这种情况比较麻烦，由于脚本在处理用户/用户组关系映射上没有采用LDAP的方式，因此需要在每台NM节点上创建指定的用户组，并将每一个能够提交App的用户加入到该组中去。</para>
+						</tip>
+					</listitem>
+					<listitem>
+						<para>设置release_agent用于清理控制组</para>
+						<para>hadoop在2.4.0版本中已经提供了控制组的自动清理功能，但如果采用的是2.2.0版本还需手动进行设置，可借助与cgroup的release_agent功能来实现。</para>
+						<para>(1)首先开启notify_on_release功能</para>
+						<blockquote><para>echo 1 > /cgroup/cpu/notify_on_release</para></blockquote>
+						<para>(2)设置release_agent，当控制组中没有进程的时候进行删除处理</para>
+						<blockquote>
+							<para>echo 'rmdir /cgroup/cpu/$1' > /usr/local/bin/remove-empty-cpu-cgroup.sh</para>
+							<para>chmod u+x /usr/local/bin/remove-empty-cpu-cgroup.sh</para>
+							<para>echo '/usr/local/bin/remove-empty-cpu-cgroup.sh' > /cgroup/cpu/release_agent</para>
+						</blockquote>
+					</listitem>
+					<listitem>
+						<para>创建hadoop-yarn控制组</para>
+						<blockquote>
+							<para>mkdir /cgroup/cpu/hadoop-yarn</para>
+							<para>chown -R hadp:hadoop /cgroup/cpu/hadoop-yarn</para>
+						</blockquote>
+						<para>控制组的名称(hadoop-yarn)要与yarn.nodemanager.linux-container-executor.cgroups.hierarchy属性值相同，owner为NM进程的启动用户及所属用户组。</para>
+					</listitem>
+					<listitem>
+						<para>在hadoop-yarn控制组下创建临时控制组</para>
+						<para>由于启用了release_agent功能，当hadoop-yarn控制组为空的时候该控制组也会自动删除，为了阻止这种情况发生使用如下命令创建临时控制组，并禁用notify_on_release功能。</para>
+						<blockquote>
+							<para>mkdir /cgroup/cpu/hadoop-yarn/useless</para>
+							<para>chown -R hadp:hadoop /cgroup/cpu/hadoop-yarn/useless</para>
+							<para>echo 0 > /cgroup/cpu/hadoop-yarn/useless/notify_on_release</para>
+						</blockquote>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

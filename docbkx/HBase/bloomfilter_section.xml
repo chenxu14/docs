@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>布隆过滤器功能</title>
+	<para>布隆过滤器的主要功能是用于检测目标元素是否存在于指定集合之中，它的优点是在空间效率和查询时间上都远远优于一般算法，但也存在着相应的缺点，那便是有一定的误识别率以及删除困难。布隆过滤器的工作方式大致是这样的：</para>
+	<para>首先需要准备一个bit数组(BitArray)用来封装集合元素的hash信息；</para>
+	<para>其次需要准备一些hash函数，通过这些hash函数可将集合中的所有元素均匀映射到每一个BitArray存储索引上；</para>
+	<tip>采用多个hash函数的原因是为了降低容错率，因为不同的元素经过相同的hash处理后，其hash值有可能相同，而如果同时采用多个hash函数，那么所有hash值都相同的可能性便会大大降低。</tip>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>当向集合中新增元素时，执行如下处理：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/blom-fileter.png"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>使用预定义的hash函数(h1、h2、h3和h4)对新增元素(e)逐一进行hash处理，并将产生的hash值作为BitArray的存储索引，将该存储位置对应的bit元素赋值为1。</para>
+		</listitem>
+		<listitem>
+			<para>当想检测某个元素在集合中是否存在时，同样使用事先预定义的函数对该元素逐一进行hash处理，如果所有的hash值对应的BitArray存储都为1，那么该元素有可能存在于目标集合中(不排除误报)，而如果出现了部分hash值对应的BitArray存储值为0，那么该元素在目标集合中一定不存在(如图所示，元素w没有存在于目标集合中)。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/blom-fileter2.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+		</listitem>
+	</itemizedlist>
+	<section>
+		<title>过滤器实现</title>
+		<para>在HBase应用中，布隆过滤器的主要用途是用于判断要检索的数据记录是否存放于指定的HFile文件中，从而过滤掉无用的HFile文件来提升整个查询的命中效率。在新版本中，布隆过滤器主要采用CompoundBloomFilter类进行实现。</para>
+		<para>由布隆过滤器的工作模式可以看到其内部主要使用BitArray(位数组)来存储所有集合元素的hash映射信息，然而当集合中元素不断增长时，便需要增加该位数组的长度来降低每次判断的误报率。虽然在空间允许的情况下，BitArray理论上可以无限扩充，但同时也会带来负面的影响：</para>
+		<blockquote>
+			<para>首先，位数组长度过大，会降低数据的寻址时间；</para>
+			<para>其次，数据的加载操作需要更长的时间，从而降低了RegionServer的启动效率。</para>
+		</blockquote>
+		<para>为此，CompoundBloomFilter采用如下方式进行处理：</para>
+		<orderedlist>
+			<listitem><para>将BitArray进行分块(chunk)存储，每一块数据作为布隆过滤器的存储单元而存在，负责映射指定区间的数据集信息；</para></listitem>
+			<listitem>
+				<para>对所有的chunk数据创建布隆索引，以便通过索引数据来遍历出要检索的数据是通过哪一个chunk块进行映射处理的。</para>
+				<para>由于HFile在生成前，所有写入到其中的KeyValue数据都是经过排序处理的，因此HFile可以看作是一个有序的数据集合，而针对它所映射的chunks也可看作是一个有序的列表。所以我们可以很容易的针对这些chunks来创建有序索引，以便通过它来判断要检索的数据是通过哪个chunk块进行映射处理的。</para>
+				<para>如下图所示，假如我们想判断key4500这条记录是否存在于HFile文件中，首先通过布隆索引定位到该记录是通过chunk2来进行映射处理的，然后在chunk2中进行判断，看该数据记录所映射的hash索引位置上的bit值是否全部为1，如果不是说明该记录不存在。</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/blom-fileter3.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>在执行布隆数据加载操作时，只将索引数据加载到内存，在根据使用需要定位到相应的chunk块进行判断处理，从而加快了整个RegionServer的启动效率。</para>
+			</listitem>
+		</orderedlist>
+		<para>每个chunk的功能逻辑是通过ByteBloomFilter类来封装的，其对内封装了如下属性信息：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>byteSize</para>
+				<para>通过它可计算出每个布隆块(chunk)所使用位数组的长度(byteSize*8)，其值主要通过io.storefile.bloom.block.size参数来指定，默认为128kb。</para>
+			</listitem>
+			<listitem>
+				<para>hashCount</para>
+				<para>hash函数的使用个数，通过如下方法计算得出：</para>
+				<blockquote><para>Math.ceil(-Math.log(容错率)/Math.log(2))</para></blockquote>
+				<para>其中容错率通过io.storefile.bloom.error.rate参数来指定，默认为0.01，此时需要7个hash函数。</para>
+			</listitem>
+			<listitem>
+				<para>maxKeys</para>
+				<para>每个chunk所能映射的key的最大数量，通过如下方法计算得出：</para>
+				<para>-位数组长度/hash函数个数 * Math.log(1 - Math.exp(Math.log(容错率)/hash函数个数))</para>
+				<para>默认情况下，每个chunk可映射大概11万的数据记录，如果当前chunk所映射的元素个数已达到maxKeys使用上限值，则HBase会开启一个全新的chunk来对其进行接管，然后将上一个chunk数据写入到HFile进行保存。</para>
+			</listitem>
+			<listitem>
+				<para>hashType</para>
+				<para>hbase对外声明了3种类型的hash函数，分别是jenkins、murmur(默认使用)和murmur3，可通过hbase.hash.type属性参数来指定使用哪一种。</para>
+			</listitem>
+			<listitem>
+				<para>bloom</para>
+				<para>类型为ByteBuffer，表示位数组所占用的字节空间，在执行chunk持久化操作时，主要是将该数据写入到HFile中。</para>
+			</listitem>
+		</itemizedlist>
+		<para>同时，其还对外声明了contains方法用于检测当前trunk是否包含有指定区间的数据记录，以及add方法用于向当前trunk添加新的记录信息。</para>
+	</section>
+	<section>
+		<title>布隆数据生成</title>
+		<para>布隆数据的生成逻辑主要通过CompoundBloomFilterWriter类进行封装。在构建StoreFile.Writer对象时会级联创建出CompoundBloomFilterWriter对象实例，并将其注入到HFile.Writer的inlineBlockWriters集合中，以便向HFile写入布隆数据。</para>
+		
+	</section>
+	<section>
+		<title>配置参数</title>
+		<orderedlist>
+			<listitem>
+				<para>io.storefile.bloom.enabled</para>
+				<para>是否启用布隆过滤器的功能，默认为true。</para>
+			</listitem>
+			<listitem>
+				<para>io.storefile.bloom.error.rate</para>
+				<para>布隆过滤器所允许的误报率，默认为0.01。</para>
+			</listitem>
+			<listitem>
+				<para>io.storefile.bloom.max.fold</para>
+				<para>Increases the given byte size of a Bloom filter until it can be folded by the given factor(默认值为7)</para>
+			</listitem>
+			<listitem>
+				<para>io.storefile.bloom.block.size</para>
+				<para>布隆数据块的大小(默认为128kb)，通过它来计算位数组长度。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.hash.type</para>
+				<para>元素映射所采用的hash函数类型，可选类型包括：jenkins、murmur(默认使用)和murmur3。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

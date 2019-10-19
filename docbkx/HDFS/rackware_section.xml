@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用机架感知</title>
+	<para>hadoop对外声明了两种机架感知的实现策略，分别是ScriptBasedMapping和TableMapping，如果采用ScriptBasedMapping需要手动定义脚本(shell、python等)来实现ip到rack的映射逻辑，而使用TableMapping只需将配置引向一个两列的数据文件即可(第一列为ip，第二列为rack，列之间用空格进行分离)。</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>ScriptBasedMapping</para>
+			<programlisting>
+在core-site.xml文件中定义如下配置项：
+&lt;property>
+  &lt;name>net.topology.node.switch.mapping.impl&lt;/name>
+  &lt;value>org.apache.hadoop.net.ScriptBasedMapping&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>net.topology.script.file.name&lt;/name>
+  &lt;value>/path/to/rack-awareness.sh&lt;/value>
+&lt;/property>
+
+其中rack-awareness.sh文件内容如下：
+#!/bin/sh
+HADOOP_CONF=/path/to/hadoop/etc/hadoop
+while [ $# -gt 0 ] ; do
+    nodeArg=$1
+    exec&lt; ${HADOOP_CONF}/topology.data
+    result=""
+    while read line ; do
+        ar=( $line )
+        if [ "${ar[0]}" = "$nodeArg" ] ; then
+            result="${ar[1]}"
+        fi
+    done
+    shift
+    if [ -z "$result" ] ; then
+        echo -n "/default-rack "
+    else
+        echo -n "$result "
+    fi
+done
+
+数据文件topology.data格式如下：
+ip1 rackA
+ip2 rackB
+...
+			</programlisting>
+		</listitem>
+		<listitem>
+			<para>TableMapping</para>
+			<programlisting>
+&lt;property>
+  &lt;name>net.topology.node.switch.mapping.impl&lt;/name>
+  &lt;value>org.apache.hadoop.net.TableMapping&lt;/value>
+&lt;/property>
+&lt;property>
+  &lt;name>net.topology.table.file.name&lt;/name>
+  &lt;value>/path/to/topology.data&lt;/value>
+&lt;/property>
+			</programlisting>
+			<para>TableMapping目前并不支持机架配置动态刷新功能，修改topology.data文件以后还需重启NameNode才可将机架信息更细至最新状态，对此社区正在做改进处理(HADOOP-8292)。</para>
+		</listitem>
+	</itemizedlist>
+</section>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>服务体系</title>
+	<para>Hadoop在Service的设计上采用了组合模式，Service接口声明了服务的生命周期方法，AbstractService是所有服务的抽象类，CompositeService是组合服务的基类，类结构图如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/yarn/service-class.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>同时Service在交互上还使用了监听器模式，可通过registerServiceListener方法来为服务指定监听者，当服务的生命周期状态发生变化时，会对这些监听者进行通知。</para>
+</section>

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	
+	<title>数据存储</title>
+	<para>Zookeeper在存储上使用自定义的内存数据库，由 snapshot + commitLog 组成：</para>
+	<blockquote>
+		<para>Snapshot是当前数据库的快照信息，持久化存储在硬盘上；</para>
+		<para>commitLog用来记录当前数据库的操作日志。</para>
+	</blockquote>
+	<para>Server启动的时候，首先将snapshot加载到内存，然后执行commiLog所记录的日志操作，从而使内存数据达到最新的状态。这也是内存数据库普遍的实现方法。</para>
+	<figure id='zookeeper.datastore'>
+		<title>Zookeerper数据存储</title>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/datastore.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+	</figure>
+	<para>数据库加载到内存之后。所有的读操作全部从内存中获取；而写操作一方面要更新Memory，同时还要将操作日志记录到commitLog，为了确保了下一次数据加载的完整性。</para>
+	<para>
+		然而，随着数据库使用时间的增长，日志文件会变得愈加庞大，带来的后果是文件的读写性能开始下降。因此，Zookeeper会在适当的时候生成新的日志文件(通过ZKDatabase的rollLog方法)，
+		并基于现有的memory存储产生新的快照(通过ZookeeperServer的takeSnapshot方法)。
+	</para>
+	<para>
+		生成新的快照和日志文件之后，并不意味着之前的日志文件便可以删除了，所有的日志操作都是需要保留下来的，因为他是Zookeeper数据同步和Leader选举的关键所在(每条日志记录都有编号并且是递增排序的，
+		Leader选举的时候会选举拥有最大事务编号的Server，而数据同步的时候主要是同步缺失的日志记录)
+	</para>
+	<para>另外，内存数据库还普遍存在另外一个问题，由于所有数据都是存储在内存里的，因此十分消耗系统资源，解决方法有两种：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>一种是限制数据量的大小，比如Zookeeper建议是每个DataNode所存储的数据不要超过1M，只存储数据的状态而不是内容；</para>
+			</listitem>
+			<listitem>
+				<para>还有一种方法是为数据指定过期时间，从而将使用频率较低的数据定期移除内存(memcached可实现这种方式)。</para>
+			</listitem>
+		</itemizedlist>
+	</blockquote>
+</section>

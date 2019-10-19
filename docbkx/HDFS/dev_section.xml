@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>开发运维</title>
+	<section>
+		<title>常用命令</title>
+		<orderedlist>
+			<listitem>
+				<para>hdfs dfsadmin [option]</para>
+				<blockquote>
+					<para>[-report]:打印文件系统的使用信息和datanode信息；</para>
+					<para>[-safemode enter | leave | get | wait]:安全模式操作；</para>
+					<para>[-allowSnapshot &lt;snapshotDir>]:为snapshotDir开启快照功能；</para>
+					<para>[-disallowSnapshot &lt;snapshotDir>]:关闭snapshotDir的快照功能；</para>
+					<para>[-saveNamespace]:合并fsimage和editlog形成新的fsimage，同时重置editlog；</para>
+					<para>[-rollEdits]:</para>
+					<para>[-restoreFailedStorage true|false|check]:</para>
+					<para>[-refreshNodes]:刷新dfs.hosts和dfs.hosts.exclude配置；</para>
+					<para>[-finalizeUpgrade]:完成hdfs升级操作(DN和NN删除version目录)；</para>
+					<para>[-metasave file]:保存meta(block备份信息,磁盘使用信息)到hadoop.log.dir下</para>
+					<para>[-refreshServiceAcl]:刷新hadoop-policy.xml配置；</para>
+					<para>[-refreshUserToGroupsMappings]:</para>
+					<para>[-refreshSuperUserGroupsConfiguration]:刷新hadoop.proxyuser.super.groups</para>
+					<para>[-printTopology]:打印集群拓扑结构(rack和machine)；</para>
+					<para>[-refreshNamenodes datanodehost:port]:联盟环境下刷洗每个datanode所连接的namenode</para>
+					<para>[-deleteBlockPool datanode-host:port blockpoolId [force]]:</para>
+					<para>[-setQuota &lt;quota> &lt;dirname>...]:使用限额配置(限制文件数量)；</para>
+					<para>[-setSpaceQuota &lt;quota> &lt;dirname>...]:使用限额配置(限制文件大小)；</para>
+					<para>[-clrQuota &lt;dirname>...]:清除限额配置；</para>
+					<para>[-clrSpaceQuota &lt;dirname>...]:清除限额配置；</para>
+					<para>[-setBalancerBandwidth &lt;bandwidth in bytes per second>]:</para>
+					<para>[-fetchImage &lt;local directory>]:将NN的数据快照保存到本地。</para>
+				</blockquote>
+			</listitem>
+			<listitem>
+				<para>hdfs haadmin [option]</para>
+				<blockquote>
+					<para>[-transitionToActive &lt;serviceId>]:将serviceId对应的NN切换到Active状态；</para>
+					<para>[-transitionToStandby &lt;serviceId>]:将serviceId对应的NN切换到Standby状态；</para>
+					<para>[-failover [--forcefence][--forceactive]&lt;serviceId>&lt;serviceId>]:执行热切</para>
+					<para>[-getServiceState &lt;serviceId>]:获取serviceId对应NN的当前状态；</para>
+					<para>[-checkHealth &lt;serviceId>]:检测serviceId对应的NN是否健康。</para>
+				</blockquote>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>DataNode扩充</title>
+		<orderedlist>
+			<listitem>
+				<para>首先修改dfs.hosts配置，加入新机器的host，如果该host在dfs.hosts.exclude配置中，将其移除，然后执行以下命令对host配置进行刷新：</para>
+				<blockquote>
+					<para>hdfs dfsadmin -refreshNodes</para>
+				</blockquote>
+			</listitem>
+			<listitem>
+				<para>在集群已有机器上拷贝一份hadoop配置到新机器，用如下命令启动DataNode进程：</para>
+				<blockquote>
+					<para>hadoop-daemon.sh start datanode</para>
+				</blockquote>
+			</listitem>
+			<listitem>
+				<para>将新host写入slaves配置文件中，以便集群重启后能够识别新host。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<xi:include href="ldap_section.xml" />
+	<xi:include href="compression_section.xml" />
+	<xi:include href="rackware_section.xml" />
+	<xi:include href="cms_section.xml" />
+	<xi:include href="qjm_dev.xml" />
+	<section>
+		<title>自定义NN路由逻辑</title>
+		<para>HA模式下，NN默认的路由逻辑是通过ConfiguredFailoverProxyProvider类来实现的，该类的处理逻辑比较简单，将所有的NN代理服务放置在同一数组中，然后顺序访问数组中的每一个元素，如果访问出错则捕获异常并继续下一个元素，直至访问的元素是ActiveNN为止。</para>
+		<para>这种处理方式存在一个弊端，如果ActiveNN节点恰好是数组中的最后一个元素，那么便会增加许多额外的路由逻辑；其次，如果Standby节点正处于安全模式(比如刚刚经过重启)，而客户端恰好先路由到该节点，那么整个应用将会被阻塞，直至StandBy节点脱离安全模式才会继续处理接下来的路由。</para>
+		<para>因此，非常有必要对整个路由逻辑进行修改，让客户端首先判断出哪一台机器节点是ActiveNN(可通过之前编写的自定义RPC服务来实现)，然后在对指定的节点进行连接来免去不必要的路由过程，具体实现代码如下：</para>
+		<programlistingco>
+			<programlisting>
+package org.apache.hadoop.hdfs.server.namenode.ha;
+public class CustomFailoverProxyProvider&lt;T> implements FailoverProxyProvider&lt;T>{
+   private static final Log LOG = LogFactory.getLog(CustomFailoverProxyProvider.class);
+   private final Class&lt;T> xface;
+   private String activeNN;
+   private FailoverProviderProtocol failoverProvider;
+   private T proxy;
+   private Configuration conf;
+   private List&lt;String> hosts = new ArrayList&lt;String>();
+   private String curhost;
+
+   public CustomFailoverProxyProvider(Configuration conf, URI uri, Class&lt;T> xface){
+      this.xface = xface;
+      Configuration copyConf = new HdfsConfiguration(conf);
+      copyConf.setInt("ipc.client.connect.max.retries", 1);
+      this.conf = copyConf;
+      String[] hosts = conf.getStrings("dfs.failover.provider.host", "127.0.0.1:8018");
+      this.hosts.addAll(Arrays.asList(hosts));
+      initFailoverProvider();
+   }
+
+   private void initFailoverProvider() { <co id="co.route.failoverprovider" linkends="co.note.route.failoverprovider"/>
+      int index=new Random().nextInt(hosts.size());
+      curhost = hosts.get(index);
+      InetSocketAddress bindAddr = NetUtils.createSocketAddr(curhost);
+      SocketFactory factory = NetUtils.getDefaultSocketFactory(conf);
+      int timeout = conf.getInt("dfs.failover.provider.timeout", 5000);
+      try {
+         failoverProvider = new FailoverProviderProtocolClientSideTranslatorPB(bindAddr, 
+            conf, factory, timeout);
+      } catch (IOException e) {
+         e.printStackTrace();
+         hosts.remove(curhost);
+         initFailoverProvider();
+      }
+   }
+
+   @Override
+   public void close() throws IOException { <co id="co.route.close" linkends="co.note.route.close"/>
+      if(proxy != null){
+         if(proxy instanceof Closeable){
+            ((Closeable)proxy).close();
+         }else{
+            RPC.stopProxy(proxy);
+         }
+      }
+   }
+
+   @Override
+   public T getProxy() { <co id="co.route.getProxy" linkends="co.note.route.getProxy"/>
+      String tempNN = null;
+      try{
+         for(int i=0;i&lt;3;i++){
+            tempNN = failoverProvider.getActiveNN();
+            if(tempNN != null){
+               activeNN = tempNN;
+               InetSocketAddress activeAddress = NetUtils.createSocketAddr(tempNN);
+               this.proxy = NameNodeProxies.createNonHAProxy(conf, activeAddress, xface, 
+                  UserGroupInformation.getCurrentUser(), false).getProxy();
+               break;
+            }else{
+               wait(1000);
+            }
+         }
+      } catch (AccessControlException e) {
+         e.printStackTrace();
+      } catch (IOException e) {
+         LOG.error("can not access "+curhost+",try another host again!", e);
+         hosts.remove(curhost);
+         initFailoverProvider();
+         getProxy();
+      } catch (InterruptedException e) {
+         e.printStackTrace();
+      }
+      return proxy;
+   }
+
+   @Override
+   public void performFailover(T currentProxy) { <co id="co.route.failover" linkends="co.note.route.failover"/>
+      String tempNN = null;
+      try {
+         for(int i=0;i&lt;3;i++){
+            tempNN = failoverProvider.getActiveNN();
+            if(tempNN != null &amp;&amp; !tempNN.equals(activeNN)){
+               activeNN = tempNN;
+               InetSocketAddress activeAddress = NetUtils.createSocketAddr(tempNN);
+               this.proxy = NameNodeProxies.createNonHAProxy(conf, activeAddress, xface, 
+                  UserGroupInformation.getCurrentUser(), false).getProxy();
+               break;
+            }else{
+               wait(1000);
+            }
+         }
+      } catch (AccessControlException e) {
+         e.printStackTrace();
+      } catch (IOException e) {
+         LOG.error("can not access "+curhost+",try another host again!", e);
+         hosts.remove(curhost);
+         initFailoverProvider();
+         performFailover(currentProxy);
+      } catch (InterruptedException e) {
+         e.printStackTrace();
+      }
+   }
+
+   @Override
+   public Class&lt;T> getInterface() {
+      return xface;
+   }
+
+}
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.route.failoverprovider" arearefs="co.route.failoverprovider"><para>初始化FailoverProvider代理服务(参考自定义RPC服务章节)，通过它来获取当前的ActiveNN；</para></callout>
+				<callout id="co.note.route.close" arearefs="co.route.close"><para>客户端退出的时候关闭代理服务；</para></callout>
+				<callout id="co.note.route.getProxy" arearefs="co.route.getProxy"><para>getProxy方法获取当前ActiveNN的代理服务，获取不到则进入等待，最多等待3秒；</para></callout>
+				<callout id="co.note.route.failover" arearefs="co.route.failover"><para>执行热切时通过FailoverProvider重新获取ActiveNN的通信地址，然后构造其代理服务。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

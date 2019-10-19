@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RPC远程服务</title>
+	<para>RPC是一种通过网络从远程计算机程序上请求服务，而不需要了解底层网络技术的协议，在Hadoop框架中，RPC应用是通过引擎来封装的，引擎结构如图所：</para>
+	<figure id='rpc.engine'>
+		<title>RPC引擎结构</title>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/common/RPC-Engine.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+	</figure>
+	<para>引擎由Client和Server两部分组成，Server端封装了具体的服务，Client端通过远程通信的方式引用这些服务.</para>
+	<para>Client与Server的通信是以nio的方式进行的：</para>
+	<blockquote>
+		<para>首先，Client将方法的执行信息序列化到request里，然后将request发送给Server；</para>
+		<para>Server端收到请求后对其执行反序列化操作，从中获取方法的执行信息并在本地执行；</para>
+		<para>最后将执行结果序列化到response里返回给Client，以此实现服务的远程调用逻辑。</para>
+		<para>针对序列化操作，不同的RPC引擎采用不同的机制来处理，其中ProtobufRpcEngine使用的是Google的Protobuf组件，而WritableRpcEngine使用的是hadoop自定义的序列化组件。</para>
+	</blockquote>
+	<para>Server端组件的构建可通过RPC.Builder类来实现，该类在设计上使用了java的构建者模式，通过不同的方法来逐步构建服务。</para>
+	<para>而针对客户端组件，引擎还对外声明了getProxy方法用来返回Server端所支持的服务代理，代理服务主要使用了java的动态代理机制，拦截方法的同时通过Client来调用远端服务</para>
+	<blockquote>
+		<para>Client.call(RpcKind rpcKind, Writable rpcRequest, ConnectionId remoteId)</para>
+	</blockquote>
+	<para>通过以上处理，代理对象具备了通信功能，但是对用户透明，开发人员只需调用功能API而无需知道底层的通信逻辑。</para>
+</section>

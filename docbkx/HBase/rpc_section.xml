@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RPC通信功能</title>
+	<para>无论是HMaster与RegionServer的心跳通信还是Client与RegionServer的读写通信都是基于自定义的RPC引擎来实现的。在1.1.0版本之前，通信管道主要基于protobuf的BlockingRpcChannel来构建(阻塞式通信)，而从1.1.0版本之后，HBase引入了另外一种通信模式，通过实现protobuf的RpcChannel来实现异步通信(详细参考HBASE-12684)。不管基于哪一种方式进行通信，服务端的处理逻辑都是相同的，只是在客户端的处理上存在差异。</para>
+	<section>
+		<title>服务端</title>
+		<para>服务端的处理逻辑主要通过RpcServer来封装，按照功能职责的不同，RpcServer可划分成3大组件，其中：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>Listener负责监听客户端的连接请求</para>
+				<para>在Listener的内部主要封装着一个ServerSocketChannel以及多个Reader线程，其中ServerSocketChannel主要负责接收客户端的连接请求，请求被响应前，会暂存于等待队列中，等待队列的长度通过hbase.ipc.server.listen.queue.size参数来设置(默认为128)。针对每个已建立的连接，系统还会实时检测其空闲时间，如果空闲时间超过2秒(即2秒内客户端没有再次通过该连接来发送请求，并且之前的请求操作已经处理完毕)，系统会将该连接进行关闭，时间阈值是通过hbase.ipc.client.connection.maxidletime参数来控制的。</para>
+				<para>当请求信息到达后，其会派遣合适的Reader进行读取(基于轮训的方式来使每个Reader的负载能够均衡)，Reader线程的数量是通过hbase.ipc.server.read.threadpool.size参数来指定的，默认为10个，线程启动后会进入阻塞状态直至客户端请求操作的到来。客户端向服务端发送的通信报文是按照一定格式进行组织的，如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/rpc-1.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<orderedlist>
+					<listitem>
+						<para>当客户端与服务端进行初次握手时，其会向服务端发送RPCHeader报文，以便服务端能够对客户端的连接请求做校验处理(代码可参考RpcClientImpl.Connection类的writeConnectionHeaderPreamble方法以及AsyncRpcChannel类的createPreamble方法)。</para>
+						<para>如果校验结果满足以下规则，说明该请求操作是合法的：</para>
+						<para>(1)前4个字节信息为HBas；</para>
+						<para>(2)第5个字节(VERSION信息)的值为0；</para>
+						<para>(3)在没有启用security的情况下(hbase.security.authentication属性值不为kerberos)，第6个字节的值为80。</para>
+					</listitem>
+					<listitem>
+						<para>接着，客户端会向服务端发送ConnectionHeader报文，通过它来封装客户端所请求的服务(代码参考RpcClientImpl.Connection类的writeConnectionHeader方法)。</para>
+						<para>ConnectionHeader是通过使用protobuf来完成序列化处理的，其protocol声明如下：</para>
+						<programlisting>
+message ConnectionHeader {
+    optional UserInformation user_info = 1;
+    optional string service_name = 2;
+    optional string cell_block_codec_class = 3;
+    optional string cell_block_compressor_class = 4;
+}
+						</programlisting>
+						<para>服务端收到该请求消息之后，可通过其service_name属性来判断客户端所要访问的服务名称，从而定位到具体的服务。</para>
+					</listitem>
+					<listitem>
+						<para>确定了具体的服务之后，客户端便可持续向服务端发送Request报文，通过它来定位将要执行服务的哪一个方法。</para>
+						<para>方法名称是通过RequestHeader来封装的，其属于Request报文的一部分，如图所示：</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/rpc-2.png"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>RequestHeader同样是采用protobuf进行序列化处理，其protocol声明如下：</para>
+						<programlisting>
+message RequestHeader {
+    optional uint32 call_id = 1;
+    optional RPCTInfo trace_info = 2;
+    optional string method_name = 3;
+    optional bool request_param = 4;
+    optional CellBlockMeta cell_block_meta = 5;
+    optional uint32 priority = 6;
+}
+						</programlisting>
+						<para>其method_name属性用于定位将要执行的方法名称，方法参数是通过Param报文来封装的，除此之外，客户端还可向服务端传递一些KeyValue数据(比如Replication功能会用到这些数据)，这些数据会序列化到CellBlock报文里。Reader线程读取到这些信息后开始构造CallRunner对象，并将其赋予空闲的Handler进行处理。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>Handler负责处理客户端的请求操作</para>
+				<para>从服务端的角度观察，客户端的所有请求都可封装成CallRunner对象，如果把Reader看做是CallRunner的生产者，那么Handler便是消费者。为了加快服务端的响应效率，RpcServer是允许同时存在多个消费者的，以此来并发消费所有的CallRunner产品。然而CallRunner产品在所有的消费者之间应当如何做到合理分配？这主要是通过RpcScheduler来调度的。HBase对外声明了两种RpcScheduler的功能实现类，其中HMaster使用的是FifoRpcScheduler，而HRegionServer使用的SimpleRpcScheduler。</para>
+				<orderedlist>
+					<listitem>
+						<para>FifoRpcScheduler</para>
+						<para>基于线程池来消费所有的CallRunner产品，CallRunner的消费顺序采用FIFO原则(按照产出的先后顺序依次进行消费)，针对每个CallRunner产品，系统都会开启一个Handler线程负责对其进行消费处理，线程池所能允许的最大并发数是由具体的服务来对外进行声明的，如HMaster默认情况下允许25个并发Handler(通过hbase.master.handler.count参数进行设置)。</para>
+					</listitem>
+					<listitem>
+						<para>SimpleRpcScheduler</para>
+						<para>采用该策略进行调度处理以后，系统会根据不同的请求类型将所有的CallRunner产品划分成3组：</para>
+						<para>(1)如果其封装的请求是基于meta表格的操作，将其划分到priorityExecutor组里；</para>
+						<para>(2)如果其封装的请求是基于用户表格的操作，将其划分到callExecutor组里；</para>
+						<para>(3)如果其封装的是replication请求，将其划分到replicationExecutor组里。</para>
+						<para>然后为每一个产品组分配数量不等的Handler，让Handler只消费指定组中的产品。不同的产品组所分配的Handler数量同样是由具体的服务来对外声明的，拿HRegionServer举例：</para>
+						<para>分配给priorityExecutor组的Handler数量通过hbase.regionserver.metahandler.count参数来指定，默认为10个；</para>
+						<para>分配给callExecutor组的Handler数量通过hbase.regionserver.handler.count参数来指定，默认为30个；</para>
+						<para>分配给replicationExecutor组的Handler数量通过hbase.regionserver.replication.handler.count参数来指定，默认为3个。</para>
+						<para>每一个产品组还可细分成多个产品队列，默认情况下每个产品组只包含一个产品队列。这样产品组中的所有Handler都会去竞争该队列中的资源，为了防止竞争惨烈的情况发生，可将每一个产品组划分成多个产品队列，让每个Handler只去抢占指定队列中的资源。在HRegionServer中，可通过如下方法来计算callExecutor组可以划分成多少个产品队列：</para>
+						<para>Math.max(1,hbase.regionserver.handler.count*hbase.ipc.server.callqueue.handler.factor)</para>
+						<para>其中hbase.ipc.server.callqueue.handler.factor属性值默认为0，即在默认情况下只将该产品组划分成一个产品队列。</para>
+						<para>单个产品队列的容量并不是按需使用无限增长的，HBase对其长度及空间大小都做了相应的阈值控制，其中：</para>
+						<para>hbase.ipc.server.max.callqueue.length用于限制产品队列的长度(默认为handler数乘以10)</para>
+						<para>hbase.ipc.server.max.callqueue.size用于限制产品队列的空间大小(默认为1G)</para>
+						<para>成功将CallRunner产品分配给Handler之后，该Handler开始对其进行消费处理，消费过程主要是通过调用RpcServer的call方法来执行指定服务的相应方法，并通过Responder将方法的执行结果返回给客户端。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>Responder负责将服务端的处理结果返回给客户端</para>
+				<para>服务端返回给客户端的通信报文是按照如下格式进行组织的：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/rpc-3.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>其中ResponseHeader是采用protobuf进行序列化的，其protocol声明如下：</para>
+				<programlisting>
+message ResponseHeader {
+    optional uint32 call_id = 1;
+    optional ExceptionResponse exception = 2;
+    optional CellBlockMeta cell_block_meta = 3;
+}
+				</programlisting>
+				<para>其内部主要封装了服务端的执行异常信息，以及CellBlock的元数据信息；Result用于封装执行方法的返回结果，其序列化方法需要根据具体的返回值类型来做决定；CellBlock用于封装服务端所返回的KeyValue数据(如scan操作的查询结果)。</para>
+			</listitem>
+		</itemizedlist>
+	</section>
+	<section>
+		<title>客户端</title>
+		<para>客户端的功能逻辑主要通过RpcClient来封装，针对该服务接口HBase提供了两种类型的功能实现，分别为RpcClientImpl(用于阻塞式通信)和AsyncRpcClient(用于异步通信)。采用哪一种通信方式可通过hbase.rpc.client.impl参数来进行声明，然后通过调用RpcClientFactory类的createClient方法进行构建。</para>
+		<section>
+			<title>阻塞式通信</title>
+			<para>目前为止，所有HBase内部的通信都是基于阻塞式进行设计的，通信管道采用BlockingRpcChannelImplementation来实现，该类在功能上实现了protobuf的BlockingRpcChannel接口，可通过RpcClient的createBlockingRpcChannel方法进行获取。</para>
+			<para>在通信过程中，客户端向服务端发送请求信息之后，将会进入循环等待状态，直至服务端返回执行结果(代码可参考RpcClientImpl.Connection类的waitForWork方法)如果等待时间超过了2分钟(通过hbase.ipc.client.connection.minIdleTimeBeforeClose参数指定)，客户端将抛出以下异常并将当前链接进行关闭：idle connection closed with $size pending request(s)</para>
+			<para>阻塞式通信的过程用代码描述大致如下(拿ClientService举例)：</para>
+			<programlistingco>
+				<programlisting>
+RpcClient rpcClient = new RpcClientImpl(conf, clusterId); <co id="co.rpc.client.clusterId" linkends="co.note.rpc.client.clusterId"/>
+BlockingRpcChannel channel = 
+    rpcClient.createBlockingRpcChannel(serverName <co id="co.rpc.client.servername" linkends="co.note.rpc.client.servername"/>, user <co id="co.rpc.client.user" linkends="co.note.rpc.client.user"/>, rpcTimeout <co id="co.rpc.client.timeout" linkends="co.note.rpc.client.timeout"/>);
+ClientService.BlockingInterface stub = ClientService.newBlockingStub(channel);
+stub.get(controller, request);
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.rpc.client.clusterId" arearefs="co.rpc.client.clusterId" ><para>首先构建RpcClient，其中clusterId属性可从Zookeeper的/hbase/hbaseid节点中读取；</para></callout>
+					<callout id="co.note.rpc.client.servername" arearefs="co.rpc.client.servername" ><para>serverName用于定位服务端地址，可通过ServerName.valueOf("${host},${port},${startCode}")方法来构建，如ServerName.valueOf("localhost,60020,1422961250317")；</para></callout>
+					<callout id="co.note.rpc.client.user" arearefs="co.rpc.client.user" ><para>user为客户端的请求用户，可通过User.getCurrent()来获取；</para></callout>
+					<callout id="co.note.rpc.client.timeout" arearefs="co.rpc.client.timeout" ><para>rpcTimeout为rpc请求的超时时间。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>而服务端可通过如下代码来发布服务：</para>
+			<programlistingco>
+				<programlisting>
+List&lt;BlockingServiceAndInterface> services = 
+    new ArrayList&lt;BlockingServiceAndInterface>();
+services.add(new BlockingServiceAndInterface(
+    ClientService.newReflectiveBlockingService(regionServer), <co id="co.rpc.server.service" linkends="co.note.rpc.server.service"/>
+    ClientService.BlockingInterface.class));
+RpcServer rpcServer = new RpcServer(serverInstance <co id="co.rpc.server.instance" linkends="co.note.rpc.server.instance"/>, name <co id="co.rpc.server.name" linkends="co.note.rpc.server.name"/>, services <co id="co.rpc.server.services" linkends="co.note.rpc.server.services"/>, 
+    isa <co id="co.rpc.server.isa" linkends="co.note.rpc.server.isa"/>, conf, scheduler <co id="co.rpc.server.scheduler" linkends="co.note.rpc.server.scheduler"/>);
+rpcServer.start();
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.rpc.server.service" arearefs="co.rpc.server.service"><para>构造ClientService实例，通过其newReflectiveBlockingService方法，方法参数为RSRpcServices实例，其实现了ClientService.BlockingInterface接口；</para></callout>
+					<callout id="co.note.rpc.server.instance" arearefs="co.rpc.server.instance"><para>serverInstance为服务进程实例，这里为HRegionServer；</para></callout>
+					<callout id="co.note.rpc.server.name" arearefs="co.rpc.server.name"><para>name为服务进程名称；</para></callout>
+					<callout id="co.note.rpc.server.services" arearefs="co.rpc.server.services"><para>services为服务进程中包含的服务列表；</para></callout>
+					<callout id="co.note.rpc.server.isa" arearefs="co.rpc.server.isa"><para>isa为服务的通信地址；</para></callout>
+					<callout id="co.note.rpc.server.scheduler" arearefs="co.rpc.server.scheduler"><para>scheduler为rpc请求调度器，目前有两种实现：FifoRpcScheduler和SimpleRpcScheduler。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</section>
+		<section>
+			<title>异步通信</title>
+			<para>异步通信功能是从1.1.0版本开始引入的，通信管道采用RpcChannelImplementation来实现，不同于BlockingRpcChannelImplementation直接基于Socket进行通信，RpcChannelImplementation的通信过程是基于Netty进行构建的，所采用的ChanelHandler包括：</para>
+			<itemizedlist>
+				<listitem>
+					<para>LengthFieldBasedFrameDecoder</para>
+					<para>Netty框架所提供的Handler，通过它来确定消息frame的大小，其中前8个字节为目标消息的长度(long类型)。</para>
+				</listitem>
+				<listitem>
+					<para>AsyncServerResponseHandler</para>
+					<para>从Server端返回的IO流中解析出Response报文。</para>
+				</listitem>
+			</itemizedlist>
+			<para>整个异步通信的过程用代码描述大致如下(详细参考TestAsyncIPC测试类)：</para>
+			<programlistingco>
+				<programlisting>
+AsyncRpcClient client = RpcClientFactory.createClient(conf, clusterId); <co id="co.rpc.async.client" linkends="co.note.rpc.async.client"/>
+RpcChannel channel = client.createRpcChannel(serverName, user, rpcTimeout); <co id="co.rpc.async.chanel" linkends="co.note.rpc.async.chanel"/>
+channel.callMethod(method, new PayloadCarryingRpcController(), param, <co id="co.rpc.async.call" linkends="co.note.rpc.async.call"/>
+    resultType, new RpcCallback&lt;Message>() {
+  @Override
+  public void run(Message result) {
+    // TODO callback
+  }
+});
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.rpc.async.client" arearefs="co.rpc.async.client"><para>客户端首先构建AsyncRpcClient对象实例，对象在实例化过程中会创建出Netty的Bootstrap应用实例，用来与服务端建立连接。</para></callout>
+					<callout id="co.note.rpc.async.chanel" arearefs="co.rpc.async.chanel"><para>然后创建RpcChannelImplementation实例并将其加入缓冲区以便于重复使用，异步通信逻辑主要通过它来进行封装。</para></callout>
+					<callout id="co.note.rpc.async.call" arearefs="co.rpc.async.call">
+						<para>调用RpcChannelImplementation类的callMethod方法来对目标RPC服务进行引用。</para>
+						<para>方法在执行过程中会将逻辑跳转到AsyncRpcClient类的callMethod方法，该方法的执行逻辑大致如下：</para>
+						<orderedlist>
+							<listitem>
+								<para>首先创建出AsyncRpcChannel管道实例。</para>
+								<para>管道实例在构造过程中会去调用Bootstrap的connect方法来对目标Server端进行连接，连接成功后开始发送RPCHeader报文以及ConnectionHeader报文。</para>
+							</listitem>
+							<listitem>
+								<para>然后针对AsyncRpcChannel管道实例执行callMethod方法。</para>
+								<para>方法在执行过程中会构建Request报文并将其发送到服务端，然后返回AsyncCall实例供客户端执行callback操作。AsyncCall主要继承至Netty的DefaultPromise类实例，可通过为其添加listener来进行异步的回调处理，listener的处理逻辑大致如下(代码参考AsyncRpcClient类的callMethod方法)：首先判断目标AsyncCall是否执行成功，如果执行成功直接调用RpcCallback来进行接下来的处理(其run方法参数为目标服务方法的返回值)，否则将抛出错误异常。</para>
+							</listitem>
+						</orderedlist>
+					</callout>
+				</calloutlist>
+			</programlistingco>
+		</section>
+	</section>
+	<section>
+		<title>配置参数</title>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>服务端相关配置如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>hbase.ipc.server.listen.queue.size</para>
+						<para>存放连接请求的等待队列长度,默认与ipc.server.listen.queue.size参数值相同，为128个。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.tcpnodelay</para>
+						<para>是否在TCP通信过程中启用Nagle算法，默认不启用。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.tcpkeepalive</para>
+						<para>是否启用TCP的keepalive机制，通过心跳包来判断连接是否断开，默认启用。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.read.threadpool.size</para>
+						<para>Reader线程数，默认为10个。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.max.callqueue.size</para>
+						<para>单个消费队列所允许的存储空间上限(默认为1GB)，超过该上限客户端会抛出以下异常：</para>
+						<para>Call queue is full, is ipc.server.max.callqueue.size too small?</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.max.callqueue.length</para>
+						<para>单个消费队列的长度限制，默认值为10倍的Handler数。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.callqueue.handler.factor</para>
+						<para>该参数用于决定消费队列的个数。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.callqueue.read.share</para>
+						<para>读Handler数占总Handler数的比例。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.warn.response.time</para>
+						<para>服务端处理请求的响应时间大于该参数阈值时，打印responseTooSlow日志，默认值为10000毫秒。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.warn.response.size</para>
+						<para>服务端的返回数据量大于该参数阈值时，打印responseTooLarge日志，默认值为100kb。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.server.fallback-to-simple-auth-allowed(false)</para>
+						<para></para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.max.request.size(256M)</para>
+						<para></para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.client.idlethreshold(4000)</para>
+						<para></para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>客户端相关配置如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>hbase.ipc.ping.interval</para>
+						<para>客户端与服务端的心跳时间间隔，以及Socket的默认读写超时时间(HBase的其他一些参数会覆盖该值，如hbase.rpc.timeout)。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.client.rpc.codec</para>
+						<para>CellBlock报文内容的编码/解码器，默认与hbase.client.default.rpc.codec的参数值相同，为org.apache.hadoop.hbase.codec.KeyValueCodec。</para>
+						<para>如果将hbase.client.default.rpc.codec设置成空字符串，并且不对hbase.client.rpc.codec参数进行设置，则在rpc通信过程中将不在使用CellBlock报文对KeyValue进行序列化，而是将其序列化到protobuf的message里(Param或Result)。</para>
+						<tip>在1.1.4之前的版本中，put操作默认不采用CellBlock报文，为此HBase进行了相关修复(HBASE-15198)，修复内容只针对客户端来生效。</tip>
+					</listitem>
+					<listitem>
+						<para>hbase.client.rpc.compressor</para>
+						<para>CellBlock报文内容的压缩/解压缩算法，默认不采用压缩。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.socket.timeout</para>
+						<para>客户端尝试与服务端建立连接的超时时间，默认与ipc.socket.timeout相同为20秒。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.timeout</para>
+						<para>客户端对RegionServer的rpc请求超时时间。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.client.pause</para>
+						<para>Socket连接失败后，会休眠一段时间，然后在重新连接，该参数用于指定休眠多久，默认为0.1秒。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.client.connect.max.retries</para>
+						<para>当客户端与服务端的连接出现错误时，通过该参数来指定重试次数，默认为0(不重试)。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.client.connection.maxidletime</para>
+						<para>客户端与服务端的连接空闲时间超过2倍的该参数值时(即指定时间范围内，服务端没有收到客户端的任何请求，并且之前的请求也都全部处理结束)，系统会将该连接进行关闭，参数值默认为1000毫秒。</para>
+					</listitem>
+					<listitem>
+						<para>hadoop.rpc.socket.factory.class.default</para>
+						<para>SocketFactory实现类，默认为org.apache.hadoop.net.StandardSocketFactory，其createSocket方法会创建SocketChannel用于NIO通信。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>异步通信相关配置：</para>
+				<orderedlist>
+					<listitem>
+						<para>hbase.rpc.client.impl</para>
+						<para>所采用的通信管道实现类，默认为org.apache.hadoop.hbase.ipc.AsyncRpcClient。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.client.threads.max</para>
+						<para>Netty Client端的处理线程数，默认由Netty框架决定(2倍的process数)。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.client.nativetransport</para>
+						<para>是否基于epoll方式进行通信，只限于linux系统，默认为false。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.rpc.client.globaleventloopgroup</para>
+						<para>是否客户端的所有连接公用一个EventLoopGroup，默认为true。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.client.operation.timeout</para>
+						<para>构造Netty的Bootstrap时，通过该参数来指定客户端的连接超时时间，Bootstrap的构建可参考AsyncRpcClient的构造函数。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.ipc.client.connect.max.retries</para>
+						<para>Bootstrap连接失败后的重试次数，默认不重试。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.client.pause</para>
+						<para>Bootstrap每次连接失败后的重试间隔，默认为100毫秒。</para>
+					</listitem>
+				</orderedlist>
+			</listitem>
+		</itemizedlist>
+	</section>
+</section>

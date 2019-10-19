@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RMContainer状态机</title>
+	<para>RMContainer从ResourceManager的角度封装了Container的状态信息，其状态转换是通过内部的状态机来实现的，转换流程如下图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/container-lifecycle.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->ALLOCATED</para>
+			<para>触发事件：START</para>
+			<blockquote>
+				<para>调度器成功分配Container时触发该事件，代码参考FSAppAttempt类的allocate方法。</para>
+			</blockquote>
+			<para>回调处理：通过ContainerStartedTransition类来封装。</para>
+			<blockquote>
+				<para>触发RMAppAttemptEvent事件，事件类型为CONTAINER_ALLOCATED，使RMAppAttempt状态机做相应处理。</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：ALLOCATED-->ACQUIRED</para>
+			<para>触发事件：ACQUIRED</para>
+			<blockquote>
+				<para>调度器将新分配的Container发送至申请端时触发，如果是AMContainer则申请端为RMAppAttempt；如果是TaskContainer则申请端为AM。</para>
+			</blockquote>
+			<para>回调处理：通过AcquiredTransition类来封装。</para>
+			<blockquote>
+				<para>通过ContainerAllocationExpirer来监控该Container的存活状态，截至该Container成功加载为止；同时触发RMAppAttemptEvent事件，事件类型为CONTAINER_ACQUIRED，将该Container的部署节点添加到RMAppAttempt的指定集合中去。</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：ACQUIRED-->RUNNING</para>
+			<para>触发事件：LAUNCHED</para>
+			<blockquote><para>调度器处理NM心跳过来的Container时触发，如果该Container已成功加载。</para></blockquote>
+			<para>回调处理：通过LaunchedTransition类来封装。</para>
+			<blockquote><para>将该Container从ContainerAllocationExpirer的监控中移除，通过调用其unregister方法。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->COMPLETED</para>
+			<para>触发事件：FINISHED</para>
+			<blockquote><para>调度器处理NM心跳过来的Container时触发，如果该Container已运行结束。</para></blockquote>
+			<para>回调处理：通过FinishedTransition类来封装。</para>
+			<blockquote><para>触发RMAppAttemptEvent事件，事件类型为CONTAINER_FINISHED，使RMAppAttempt状态机做相应处理。</para></blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：RUNNING-->KILLED</para>
+			<para>触发事件：KILL</para>
+			<blockquote><para>调度器处理完APP_ATTEMPT_REMOVED事件时触发或Container所在NM从集群中移除时触发。</para></blockquote>
+			<para>回调处理：通过KillTransition类来封装。</para>
+			<blockquote><para>触发RMNodeEvent事件，事件类型为CLEANUP_CONTAINER，使RMNode状态机做相应处理。</para></blockquote>
+		</listitem>
+	</itemizedlist>
+</section>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Task状态机</title>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：NEW-->SCHEDULED</para>
+			<para>触发事件：T_SCHEDULE</para>
+			<para>回调处理：</para>
+			<orderedlist>
+				<listitem><para>创建TaskAttempt实例，开始尝试Task部署，通过触发TaskAttemptEventType.TA_SCHEDULE事件；</para></listitem>
+				<listitem><para>触发JobHistoryEvent事件，事件类型为TASK_STARTED，将事件信息持久化到文件中。</para></listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+</section>

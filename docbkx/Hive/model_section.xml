@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>数据模型</title>
+	<para>按照粒度的由大到小来排序，Hive数据模型可划分成以下几个部分：</para>
+	<orderedlist>
+		<listitem>
+			<para>Database</para>
+			<para>同关系数据库类似用来存储表格定义。</para>
+		</listitem>	
+		<listitem>
+			<para>Table</para>
+			<para>Hive中的Table有两种类型，分别是managed-table和external-table，删除external-table的时候只删除表格的元数据信息而不清空表格的内容，删除managed-table的时候清空所有数据。</para>
+		</listitem>
+		<listitem>
+			<para>Partition</para>
+			<para>Partition相当于对表格的水平切片信息，这样做有利于数据的局部处理。</para>
+		</listitem>	
+		<listitem>
+			<para>Bucket</para>
+			<para>Bucket是更细粒度的切片信息，Partition是由多个Bucket构成的。</para>
+		</listitem>	
+	</orderedlist>
+</section>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>序列化操作</title>
+	<para>序列化操作主要是将结构化的对象数据转换成字节数组以此来实现数据的远程传递，反序列化操作则是将这些字节数组翻译成原始对象。hadoop在序列化方面没有延续java的处理方式，而是自定义了一套序列化组件，组件类结构如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../../media/common/Serial-Class.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<section>
+		<title>Writable</title>
+		<para>Writable是所有对象序列化服务的接口，该接口主要使用了DataOutput和DataInput来实现java私有类型和字节数组相互转换的功能，由此看出Hadoop的序列化组件也是和Java绑定的。</para>
+		<tip><para>在MapReduce应用中Writable实例是易变的，经常被重复使用。</para></tip>
+	</section>
+	<section>
+		<title>WritableComparable</title>
+		<para>WritableComparable接口除了实现序列化功能之外，还实现了比对功能(通过继承java的Comparable接口)。因此该类型通常作为MapReduce的key值来使用，以此来实现sort排序功能。Hadoop针对java的私有类型都做了封装处理，这些封装类全部实现WritableComparable接口，如下图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata fileref="../../media/common/Writable-Class.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>针对几个比较常用的实现类，序列化处理逻辑如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>VLongWritable</para>
+				<para>序列化操作主要调用了WritableUtils的writeVLong方法，其方法处理逻辑是这样的：</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>RawComparator</title>
+		<para>为了提高排序操作的性能和便捷性，Hadoop对外声明了RawComparator接口，以此来实现基于字节流的排序功能，而无需在人为将字节流转换成对象去比较。该接口继承至java的Comparator接口。</para>
+		<para>WritableComparator作为RawComparator的实现类主要有以下功能：</para>
+		<blockquote><para>(1)作为超类声明了RawComparator的默认处理方式：将字节数组反序列化成对象，在调用对象的compare方法执行比较；</para></blockquote>
+		<blockquote><para>(2)充当RawComparator注册表功能，提供了静态方法define用于向容器中注册RawComparator的实现类，同时还提供了get方法，返回WritableComparable对应的RawComparator。</para></blockquote>
+	</section>
+</section>

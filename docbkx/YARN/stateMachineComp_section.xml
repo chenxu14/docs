@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>状态机组件</title>
+	<section>
+		<title>ResourceManager视角</title>
+		<xi:include href="app_lifecycle.xml" />
+		<xi:include href="appAttemp_lifecycle.xml" />
+		<xi:include href="container_lifecycle.xml" />
+		<xi:include href="node_lifecycle.xml" />
+	</section>
+	<section>
+		<title>NodeManager视角</title>
+		<xi:include href="nmapp_lifecycle.xml" />
+		<xi:include href="nmcontainer_lifecycle.xml" />
+		<xi:include href="localizedres_lifecycle.xml" />
+	</section>
+</section>

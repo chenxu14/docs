@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用CMS垃圾回收器</title>
+	<para>namenode是使用内存比较多的进程之一，如果使用串行回收会造成长时间的应用阻塞，导致进程不能稳定对外提供服务。在HA模式下，更是有可能由于健康检测超时而触发fencing隔离，导致namenode无故宕掉。因此，非常有必要启用CMS作为垃圾回收器，让进程持续稳定的对外提供服务。</para>
+	<para>启用方法：修改hadoop-env.sh文件中以下配置项信息(机器环境为128G内存、32cpu)。</para>
+	<programlistingco>
+		<programlisting>
+export HADOOP_NAMENODE_OPTS="-Dhadoop.security.logger=${HADOOP_SECURITY_LOGGER:-INFO,RFAS} 
+    -Dhdfs.audit.logger=${HDFS_AUDIT_LOGGER:-INFO,NullAppender} 
+    -server -Xmx96g -Xms96g <co id="co.jvm.xmx" linkends="co.note.jvm.xmx"/>
+    -Xmn20g <co id="co.jvm.xmn" linkends="co.note.jvm.xmn"/>
+    -XX:PermSize=1g -XX:MaxPermSize=1g <co id="co.jvm.perm" linkends="co.note.jvm.perm"/>
+    -XX:MaxDirectMemorySize=2g <co id="co.jvm.nio" linkends="co.note.jvm.nio"/>
+    -XX:+UseConcMarkSweepGC <co id="co.jvm.cms" linkends="co.note.jvm.cms"/>
+    -XX:ParallelGCThreads=25 <co id="co.jvm.thread" linkends="co.note.jvm.thread"/>
+    -XX:CMSInitiatingOccupancyFraction=70 <co id="co.jvm.fraction" linkends="co.note.jvm.fraction"/>
+    -XX:+UseCMSCompactAtFullCollection <co id="co.jvm.compact" linkends="co.note.jvm.compact"/>
+    -XX:+CMSParallelRemarkEnabled <co id="co.jvm.remark" linkends="co.note.jvm.remark"/>
+    -XX:CMSFullGCsBeforeCompaction=2 <co id="co.jvm.compact.num" linkends="co.note.jvm.compact.num"/>
+    -XX:+CMSScavengeBeforeRemark <co id="co.jvm.chunk" linkends="co.note.jvm.chunk"/>
+    -XX:+CMSClassUnloadingEnabled 
+    -XX:+DisableExplicitGC <co id="co.jvm.explicit" linkends="co.note.jvm.explicit"/>
+    -XX:MaxTenuringThreshold=100 <co id="co.jvm.threshold" linkends="co.note.jvm.threshold"/>
+    -Dcom.sun.management.jmxremote
+    -Xloggc:/path/to/gc.log -verbose:gc <co id="co.jvm.verbose" linkends="co.note.jvm.verbose"/>
+    -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+PrintGCApplicationStoppedTime 
+    -XX:+PrintGCApplicationConcurrentTime -XX:+PrintTenuringDistribution"
+		</programlisting>
+		<calloutlist>
+			<callout id="co.note.jvm.xmx" arearefs="co.jvm.xmx"><para>对内存最大值与最小值设置成相同的值；</para></callout>
+			<callout id="co.note.jvm.xmn" arearefs="co.jvm.xmn"><para>设置新生代内存大小为20G；</para></callout>
+			<callout id="co.note.jvm.perm" arearefs="co.jvm.perm"><para>设置永久代内存大小为1G；</para></callout>
+			<callout id="co.note.jvm.nio" arearefs="co.jvm.nio"><para>设置nio直接缓冲区的最大大小为2G；</para></callout>
+			<callout id="co.note.jvm.cms" arearefs="co.jvm.cms"><para>使用CMS作为垃圾回收器；</para></callout>
+			<callout id="co.note.jvm.thread" arearefs="co.jvm.thread"><para>并行收集器的线程数，通过该值计算ParallelCMSThreads，计算公式(ParallelGCThreads+3)/4)；</para></callout>
+			<callout id="co.note.jvm.fraction" arearefs="co.jvm.fraction"><para>对内存使用70%的时候触发老年代回收；</para></callout>
+			<callout id="co.note.jvm.compact" arearefs="co.jvm.compact"><para>执行FullGC时对年老代的压缩，防止内村碎片的产生；</para></callout>
+			<callout id="co.note.jvm.remark" arearefs="co.jvm.remark"><para>开启并行标记来降低标记停顿；</para></callout>
+			<callout id="co.note.jvm.compact.num" arearefs="co.jvm.compact.num"><para>FullGc执行多少次后开始对内村进行压缩，0表示每次都压缩；</para></callout>
+			<callout id="co.note.jvm.chunk" arearefs="co.jvm.chunk">
+				<para>在CMS进入remark阶段之前确保触发一次minorGc，以便于新生代内存中执行chunk划分操作(执行minorGc后，对象的内存地址是顺序排列的，便于chunk的划分)。在通过并行的方式来标记每一个chunk；</para>
+				<para>参考https://blogs.oracle.com/jonthecollector/entry/did_you_know</para>
+			</callout>
+			<callout id="co.note.jvm.explicit" arearefs="co.jvm.explicit"><para>禁用System.gc()功能；</para></callout>
+			<callout id="co.note.jvm.threshold" arearefs="co.jvm.threshold">
+				<para>有两种情况可以使新生代内存转移到旧生代：</para>
+				<orderedlist>
+					<listitem>
+						<para>对象在新生代中经过MaxTenuringThreshold次回收后依然存活；</para>
+					</listitem>
+					<listitem>
+						<para>minorGC触发后，新生代内存中存活对象的总大小大于(Survivor*TargetSurvivorRatio/100)时，对age最大的内存对象进行回收，其中Survivor默认占新生代总内存的1/10(可通过SurvivorRatio来设置)，而TargetSurvivorRatio默认为50。</para>
+					</listitem>
+				</orderedlist>
+				<para>需要额外注意的是如果MaxTenuringThreshold>15表示忽略第一种情况。</para>
+			</callout>
+			<callout id="co.note.jvm.verbose" arearefs="co.jvm.verbose"><para>gc输出重定向到指定日志文件中。</para></callout>
+		</calloutlist>
+	</programlistingco>
+	<para>gc.log的日志输出如下：</para>
+	<programlistingco>
+		<programlisting>
+......
+Total time for which application threads were stopped: 0.1378870 seconds <co id="co.jvmverbose.stop" linkends="co.note.jvmverbose.stop"/>
+Application time: 60.1425690 seconds <co id="co.jvmverbose.concurrent" linkends="co.note.jvmverbose.concurrent"/>
+2014-10-20T14:35:26.722+0800: 1885083.122: [GC 1885083.122: [ParNew
+Desired survivor size 751599616 bytes, new threshold 16 (max 100) <co id="co.jvmverbose.tenuring" linkends="co.note.jvmverbose.tenuring"/>
+- age   1:   40827184 bytes,   40827184 total
+- age   2:   28071968 bytes,   68899152 total
+- age   3:    5642232 bytes,   74541384 total
+- age   4:    2789128 bytes,   77330512 total
+- age   5:    4128208 bytes,   81458720 total
+- age   6:    4397544 bytes,   85856264 total
+- age   7:    5372432 bytes,   91228696 total
+- age   8:    3841376 bytes,   95070072 total
+- age   9:    3984008 bytes,   99054080 total
+- age  10:    1745880 bytes,  100799960 total
+- age  11:    2912944 bytes,  103712904 total
+- age  12:    3076792 bytes,  106789696 total
+- age  13:    1718568 bytes,  108508264 total
+- age  14:    2075728 bytes,  110583992 total
+- age  15:   55723608 bytes,  166307600 total
+: 11940717K->199902K(13212096K), 0.1684370 secs] 45886578K->34145763K(99195328K), 
+0.1686220 secs]
+......
+2014-11-20T16:58:31.235+0800: 21524.166: [CMS-concurrent-mark-start]
+2014-11-20T16:58:31.387+0800: 21524.318: [CMS-concurrent-mark: 0.152/0.152 secs]
+    [Times: user=1.26 sys=0.20, real=0.15 secs]
+2014-11-20T16:58:31.387+0800: 21524.318: [CMS-concurrent-preclean-start]
+2014-11-20T16:58:31.410+0800: 21524.341: [CMS-concurrent-preclean: 0.023/0.023 secs]
+    [Times: user=0.07 sys=0.02, real=0.02 secs] 
+2014-11-20T16:58:31.410+0800: 21524.341: [CMS-concurrent-abortable-preclean-start]
+2014-11-20T16:58:33.423+0800: 21526.353: [CMS-concurrent-abortable-preclean: 
+    2.012/2.012 secs] [Times: user=6.68 sys=2.42, real=2.02 secs] 
+2014-11-20T16:58:33.516+0800: 21526.447: [CMS-concurrent-sweep-start]
+....
+2014-11-20T16:58:40.871+0800: 21533.802: [CMS-concurrent-sweep: 7.199/7.355 secs]
+    [Times: user=26.47 sys=8.96, real=7.35 secs] 
+2014-11-20T16:58:40.871+0800: 21533.802: [CMS-concurrent-reset-start]
+2014-11-20T16:58:40.965+0800: 21533.896: [CMS-concurrent-reset: 0.095/0.095 secs]
+    [Times: user=0.23 sys=0.22, real=0.10 secs] 
+		</programlisting>
+		<calloutlist>
+			<callout id="co.note.jvmverbose.stop" arearefs="co.jvmverbose.stop"><para>PrintGCApplicationStoppedTime配置项的输出数据，表示在执行minorGc期间系统应用的阻塞时间；</para></callout>
+			<callout id="co.note.jvmverbose.concurrent" arearefs="co.jvmverbose.concurrent"><para>PrintGCApplicationConcurrentTime配置项的输出数据，表示系统距离上一次暂停之后所持续运行的时间；</para></callout>
+			<callout id="co.note.jvmverbose.tenuring" arearefs="co.jvmverbose.tenuring"><para>PrintTenuringDistribution配置项的输出数据，用来打印每个age阶段的新生代内存大小，如果总大小大于DesiredSurvivorSize，将age为15的内存数据转移到老年代。</para></callout>
+		</calloutlist>
+	</programlistingco>
+</section>

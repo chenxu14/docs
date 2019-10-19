@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<book version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<bookinfo>
+    	<title>HBase</title>
+    	<author>
+      		<firstname>陈</firstname>
+      		<surname>旭</surname>
+      		<affiliation>
+        		<address><email>444080606@qq.com</email></address>
+      		</affiliation>
+    	</author>
+    	<copyright>
+      		<year>2015</year>
+      		<holder role="mailto:444080606@qq.com">444080606@qq.com</holder>
+    	</copyright>
+    	<releaseinfo>书籍归作者所有，请尊重产权，未经允许不得用于商业。</releaseinfo>
+  	</bookinfo>
+	<chapter>
+		<title>体系结构</title>
+		<para>如果只是单纯的将框架作为黑盒来使用，那么只需要知道其对外声明的API接口。而如果想要对一个框架进行深入学习，那么首先应该观察它的体系结构，以便对框架的整体实现能有一个抽象的认识，然后在对具体的组件进行深入钻研，从而知道每一个组件都对外声明了哪些服务，并且怎样在已有服务的基础上进行功能扩展。本书便是沿着以上思路进行撰写，希望读者通过对本书的阅读，能够对HBase框架有更深一层的认识，首先来看体系结构部分。</para>
+		<xi:include href="HBase/bigtable_section.xml" />
+		<section>
+			<title>存储设计</title>
+			<para>HBase的底层存储主要是基于LSM树(Log-Structured Merge Tree)来进行设计的，存储媒介有两种，分别是内存和磁盘。内存中的数据通过Memstore来管理(详细参考Memstore实现章节)，而磁盘中的数据通过HDFS进行写入。保存在HDFS上的数据有两种存储格式，一种封装成HFile用于存储数据内容，另一种封装成HLog用于记录操作日志。下面将对每部分内容进行详细介绍。</para>
+			<xi:include href="HBase/lsm_section.xml"/>
+			<xi:include href="HBase/hfile_v2_section.xml"/>
+			<xi:include href="HBase/hlog_section.xml" />
+			<section>
+				<title>META表格</title>
+				<para>TODO</para>
+			</section>
+			<section>
+				<title>小结</title>
+				<para>在本章中主要对HBase的底层存储结构进行了详细的介绍，包括LSM树的实现，HFile以及HLog的存储格式，同时对HFile的读写API进行了简短描述，以方便读者跨过应用层的API直接对HBase数据进行读取。 在下一个章节中主要对HBase各个组件的实现细节进行介绍。</para>
+			</section>
+		</section>
+	</chapter>
+	<chapter>
+		<title>组件实现</title>
+		<para>通过对体系结构的阅读，相信大家已经对HBase的整体实现已经有了一个抽象的认识，而在这一章中主要对每个组件的实现细节进行深入介绍，以便能够加深各位对HBase的认知。</para>
+		<para>HBase的两大核心组件分别为HMaster和RegionServer，而Region主要作为集群的分布式部署单元来存在。Region的内部是划Store进行管理的，其中有一个Store比较特殊，它的数据全部存在与内存里，称之为MemStore，负责存储每个Region最新写入的数据。不同的组件之间主要通过自定义的RPC引擎来进行通信，从而形成功能上的串联。因此整个RPC通信机制也是HBase最为基础和重要的环节，下面将首先对其进行讲解。</para>
+		<xi:include href="HBase/memstore_section.xml"/>
+		<xi:include href="HBase/region_section.xml"/>
+		<xi:include href="HBase/regionserver_section.xml"/>
+		<xi:include href="HBase/master_section.xml"/>
+	</chapter>
+	<chapter>
+		<title>功能实现</title>
+		<xi:include href="HBase/rpc_section.xml"/>
+		<xi:include href="HBase/blockcache_section.xml"/>
+		<xi:include href="HBase/bloomfilter_section.xml"/>
+		<xi:include href="HBase/coprocessor_section.xml"/>
+		<xi:include href="HBase/procedure_section.xml"/>
+		<xi:include href="HBase/replication_section.xml"/>
+		<xi:include href="HBase/metrics_section.xml"/>
+	</chapter>
+	<chapter>
+	   <title>服务特性</title>
+	   <xi:include href="HBase/mob_section.xml"/>
+	   <xi:include href="HBase/group_section.xml"/>
+	   <xi:include href="HBase/dyncConf_section.xml"/>
+	</chapter>
+	<chapter>
+		<title>研发运维</title>
+		<xi:include href="HBase/monitor_section.xml" />
+		<xi:include href="HBase/security_section.xml" />
+		<xi:include href="HBase/performance_section.xml" />
+		<xi:include href="HBase/maintenance_section.xml" />
+		<xi:include href="HBase/other_section.xml" />
+	</chapter>
+	<chapter>
+		<title>框架生态</title>
+		<xi:include href="HBase/mr_section.xml" />
+		<xi:include href="HBase/spark_section.xml" />
+		<xi:include href="HBase/phoenix_section.xml" />
+	</chapter>
+</book>

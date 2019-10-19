@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>运行机制</title>
+	<para>自0.23版本起，Hadoop开始重构MapReduce子框架，将之前的JobTracker拆分成ResourceManager和ApplicationMaster两部分，拆分后，ResourceManager主要用来调度资源，而ApplicationMaster用来监控任务的运行状态，并且后者的运行是在Slave机器上进行的，这样大大减轻了Master的工作负荷。</para>
+	<para>然而为了达到使用上的向下兼容，重构后的Mapreduce框架依然保留了之前的API调用方式，只是运行环境发生了变化(基于yarn框架运行)，重构后的MapReduce提交过程如下：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/mr-yarn.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>可以看到程序最后调用了ResourceMgrDelegate类的submitApplication方法，将MapReduce任务提交到yarn环境中去执行，</para>
+	<para>在YARN体系结构中，ResourceMgrDelegate充当客户端的角色，其他角色以及角色之间的交互关系如下图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="80%" width="80%" fileref="../media/yarn/yarn-role.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>ResourceManager(RM)负责资源的调度与管理，为每一个App指定AM，并为AM分配Container(相当于分布式运行单元)；</para>
+	<para>ApplicationMaster(AM)负责监控App的执行情况，并及时对ResourceManager进行反馈：</para>
+	<para>NodeManager(NM)负责管理Container资源，其与RM保持心跳通信的逻辑以便RM能够对其进行监控。</para>
+	<xi:include href="dispatcher_section.xml" />
+	<xi:include href="statemachine_section.xml" />
+	<xi:include href="service_section.xml" />
+</section>

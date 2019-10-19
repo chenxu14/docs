@@ -1,0 +1,284 @@
+<article>
+    <section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Replication功能</title>
+	<para>Replication功能用于实现不同集群间的数据同步，其在现实应用中主要包含以下几个场景：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem><para>对比较重要的集群数据进行容灾备份，以便集群出现问题时可以很容易的将已有业务迁移到其他集群；</para></listitem>
+			<listitem><para>将多个集群的数据内容聚合到同一集群上；</para></listitem>
+			<listitem><para>将已有集群中的部分表格数据迁移到其他集群，以实现存储数据的垂直分布；</para></listitem>
+			<listitem><para>将集群数据做成两份，一份用于线上业务处理，一份用于线下业务分析。</para></listitem>
+		</itemizedlist>
+	</blockquote>
+	<para>在功能实现上，Replication主要基于生产者/消费者模式来设计，相关的角色声明如下：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>生产者：ReplicationSource</para>
+			<para>ReplicationSource作为生产者主要负责生产HLog数据产品，并将其加入PriorityBlockingQueue产品队列中供消费者使用，产品队列的存储优先级是基于HLog的创建时间来决定的(代码参考LogsComparator类实现)，即创建较早的HLog会出现在队列的头部，优先进行处理。</para>
+			<para>针对每一个待备份的peerCluster集群，源集群中所有的RegionServer节点都会创建一个ReplicationSource对象，负责将RegionServer中最新生成的HLog加入到生产队列中，同时将文件名称存储在Zookeeper的/hbase/replication/rs/${regionserver}/${peerId}路径下，供消费者在消费过程中进行使用。</para>
+			<para>同时，每个ReplicationSource还会绑定一个ReplicationEndpoint(采用的默认实现类为HBaseInterClusterReplicationEndpoint)用于获取peerCluster的相关信息。</para>
+			<tip>每个/hbase/replication/rs/${regionserver}/${peerId}节点相当于一个ReplicationQueue，其下面存储着一些子节点，每个子节点对应一个HLog，节点内容为该HLog的偏移量信息(该偏移量之前的数据已做了备份处理)。</tip>
+			<para>生产者的另一职责是对已被消费完成的HLog进行清理(清理逻辑可参考ReplicationSourceManager类的logPositionAndCleanOldLogs方法)，如果其所记录的数据内容已全部同步至目标集群中，将其从生产队列中移除，并删除Zookeeper中对应的/hbase/replication/rs/${regionserver}/${peerId}/${hlog}节点目录。</para>
+		</listitem>
+		<listitem>
+			<para>消费者：ReplicationSink</para>
+			<para>消费者是通过ReplicationSinkManager对象筛选出来的，针对每个待备份的peerCluster集群，它会在目标集群中随机挑选一定比例的RegionServer节点(代码参考ReplicationSinkManager类的chooseSinks方法)，并为其创建ReplicationSink实例来作为潜在的消费者，整个消费过程大致涉及如下几部分操作：</para>
+			<orderedlist>
+				<listitem>
+					<para>消费分期</para>
+					<para>由于HLog文件的数据内容通常都比较庞大，消费者有可能一次性消费不起，对此Replication采用的办法是对HLog进行分期消费处理，每次消费只同步HLog中的部分数据，这部分数据的长度是通过如下两个参数来决定的：</para>
+					<para>(1)replication.source.nb.capacity：数据段中包含的日志记录条数不能大于该参数阀值；</para>
+					<para>(2)replication.source.size.capacity：数据段的总数据量大小不能大于该参数阀值。</para>
+				</listitem>
+				<listitem>
+					<para>KeyValue过滤</para>
+					<para>由HLog的存储结构可以看到，在每条HLog.Entry记录中有可能同时存在多个KeyValue实体，然而并不是每个KeyValue实体的所属表格都支持备份操作，需要将不支持备份操作的KeyValue实体过滤掉，只保留符合以下规则的KeyValue实体：</para>
+					<para>(1)如果peerCluster启用了tableCFs配置，则KeyValue所属列簇及表格信息一定声明在Zookeeper的/hbase/replication/peers/${peerId}/tableCFs配置中。</para>
+					<tip>
+						<para>每个/hbase/replication/peers/${peerId}节点相当于一个ReplicationPeer(封装待备份集群)，其节点内容为待备份集群的clusterKey(格式为：zk1.host.com,zk2.host.com:2181:/hbase)，同时其还存储着两个子节点：</para>
+						<para>peer-state用来标识该ReplicationPeer的Replication功能是否开启；</para>
+						<para>tableCFs用来标识该ReplicationPeer支持哪些表格的备份操作，内容格式为："table1; table2:cf1,cf3"，可通过set_peer_tableCFs命令进行指定，如不指定则支持所有表格的备份操作。</para>
+					</tip>
+					<para>(2)KeyValue所属列簇在创建时声明了REPLICATION_SCOPE => '1'参数属性值。</para>
+				</listitem>
+				<listitem>
+					<para>在目标集群上执行log-replay</para>
+					<para>log-replay的执行过程是通过远程调用ReplicationSink类的replicateEntries方法来实现的，ReplicationSink接受到WALEntry以后会在目标集群上开启对应表格的连接，然后执行batch方法将日志内容进行回放。</para>
+				</listitem>
+			</orderedlist>
+		</listitem>
+	</itemizedlist>
+	<para>在代码逻辑上Replication功能主要是通过Replication类来封装的，该类主要实现了以下几个接口的业务逻辑：</para>
+	<orderedlist>
+		<listitem>
+			<para>WALActionsListener</para>
+			<para>该接口主要用于监听HLog的回滚事件，当相关事件触发时通过实现该接口来进行相应的回调处理，Replication感兴趣的事件包括：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>visitLogEntryBeforeWrite：在HLog.Entry写入HLog之前触发该事件</para>
+					<para>回调处理主要是对HLogKey的scope属性值进行设置，便于ReplicationSink在消费HLog记录时过滤掉无需备份的KeyValue实体。scope的数据结构为：NavigableMap&lt;byte[], Integer>，其中key为列簇名，value为备份范围，如果KeyValue所属列簇对应的value值为REPLICATION_SCOPE_GLOBAL，则该KeyValue在消费过程中不会被过滤掉。</para>
+				</listitem>
+				<listitem>
+					<para>preLogRoll：HLog执行回滚操作之前触发该事件</para>
+					<para>针对每一个待备份的peerCluster，将新生成的HLog文件名添加到Zookeeper的/hbase/replication/rs/${regionserver}/${peerId}路径下</para>
+				</listitem>
+				<listitem>
+					<para>postLogRoll：HLog执行回滚操作之后触发该事件</para>
+					<para>将新生成的HLog文件添加到每一个ReplicationSource的生产队列中，供消费者使用。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>ReplicationService</para>
+			<para>负责实例化ReplicationSource及ReplicationSink实例。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>多租户隔离</title>
+		<para>在社区原生版本实现中，Replication特性尚无法感知rsgroup维度，针对每一个待备份peerCluster集群，所有RegionServer节点都需要创建与之对应的ReplicationSource实例来负责数据同步操作，即使我们已经知道当前RegionServer节点并没有部署需要执行同步操作的表格。</para>
+		<para>另一方面，在执行ReplicationSink筛选过程中，社区的原生做法是在目标集群中随机筛选一定比例的RegionServer节点来作为目标Sink对象，然而并没有考虑所筛选出的这些Sink节点有可能隶属于不同的分组，从而在不同业务分组之间造成了使用上的级连影响，没有很好的做到多租户隔离效果。</para>
+		<para>因此可针对Replication特性做出相应定制，通过感知rsgroup维度来实现更好的多租户隔离。</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="./media/hbase/replication_group.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<section>
+			<title>ReplicationSource隔离</title>
+			<para>ReplicationSource的构建触发主要发生在如下时段：</para>
+			<orderedlist>
+				<listitem>
+					<para>RegionServer向HMaster注册成功以后开始初始化Replication服务，期间会遍历所有已存在的peerCluster集群(通过ReplicationPeers对象封装)，并针对每个集群构建相应的ReplicationSource实例(代码逻辑可参考ReplicationSourceManager类的init方法)。</para>
+					<para>针对该情况可以在ReplicationPeers构建过程中做一些过滤处理(通过重构其init方法，引入group维度)，过滤掉与当前分组无关的peerId记录，从而避免不必要的ReplicationSource构建过程。</para>
+					<tip>判断目标peerId是否与当前分组有关主要是通过约束peerId的命名规则来实现的，比如将peerId命名为[GROUP]COMMON_BACKUP表示表格是从源集群的COMMON分组备份到目标集群的BACKUP分组，其中[GROUP]是固定关键字，这样如果源集群的RegionServer不属于COMMON分组，那么便没有必要针对该peerCluster创建对应的ReplicationSource实例。</tip>
+				</listitem>
+				<listitem>
+					<para>客户端执行add_peer操作时会触发ReplicationSourceManager进行相关的回调处理(代码参考peerListChanged方法)，针对新增的peerCluster集群构建新的ReplicationSource实例进行同步处理。</para>
+					<para>针对该情况同样可以对新增的peerId进行分组过滤，如果不属于当前分组则对其进行bypass处理。</para>
+				</listitem>
+				<listitem>
+					<para>当源集群有RegionServer节点宕机的时候，源集群的其他节点会去抢占该节点的Replication队列资源，以便接管尚未同步到目标集群的HLog数据。</para>
+					<para>针对该情况可首先判断死掉的目标节点与当前RegionServer节点是否隶属于同一分组，如果不在一个分组则放弃抢占逻辑(通过重构ReplicationSourceManager类的transferQueues方法)。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>ReplicationSink隔离</title>
+			<para>ReplicationSink的筛选逻辑主要是通过调用HBaseReplicationEndpoint类的getRegionServers方法进行封装的，这里我们可以对改方法进行如下重构：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先由peerId信息解析出表格将要备份到目标集群的哪个分组。</para>
+					<para>这里将peerId的命名规则约束为[GROUP]SOURCE_TARGET_index，其中[GROUP]为固定的关键字信息，SOURCE为表格所在的源集群分组，TARGET为目标集群分组，而index为用来标识唯一ID的索引，这样便可以从peerId中解析出目标集群的target分组信息。</para>
+				</listitem>
+				<listitem>
+					<para>获取目标集群指定分组下所部署的所有RegionServer列表。</para>
+					<para>通过peerCluster配置我们可以解析出目标集群的ZK地址，这样便可以针对该ZK进行直连，从而获取目标分组所包含的节点信息。</para>
+					<tip>美团所采用的rsgroup版本与社区版本实现并不完全相同(具体参考rsgroup章节)，社区是将group信息通过hbase:rsgroup表格来进行维护，而公司这边直接通过ZK来进行持久化存储，这样当我们知道目标集群的ZK地址之后，便可以通过访问ZK来获取目标分组都部署了哪些节点信息。</tip>
+				</listitem>
+				<listitem>
+					<para>对目标分组所部署的机器进行随机筛选，这样便不会筛选到其他业务分组所使用的机器，从而实现更好的多租户资源隔离效果。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>bulkload复制</title>
+		<para>HBase从1.3.0版本起开始提供针对bulkload操作的replication支持(补丁jira可参考HBASE-13153)，功能的大体实现原理如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="./media/hbase/bulkload_replication.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>在源集群端，ReplicationObserver协处理器会对bulkload操作进行拦截，在执行对HFile的commit之前，将文件路径临时保存到ZK中进行存储，这样ReplicationHFileCleaner在执行归档文件清理时，会先判断目标HFile节点在ZK中是否存在，如果存在这放弃清理，防止文件尚未同步到目标集群之前就被清理的情况。</para>
+		<tip>ZK用有关HFile的znode清理是在ReplicationSource执行shipEdits操作后触发的，如果WALEdit同步失败，或目标peerCluster被disable掉，ZK中有可能会积压大量的znode节点，节点数量可通过regionserver.Replication.source.sizeOfHFileRefsQueue指标监控到。</tip>
+		<para>bulkload操作执行结束以后，会写入相应的WALEntry到WAL文件，内容是通过BulkLoadDescriptor来封装的，相关的protocol声明如下：</para>
+		<programlisting>
+message StoreDescriptor {
+  required bytes family_name = 1;
+  required string store_home_dir = 2;
+  repeated string store_file = 3;
+  optional uint64 store_file_size = 4;
+}
+message BulkLoadDescriptor {
+  required TableName table_name = 1;
+  required bytes encoded_region_name = 2;
+  repeated StoreDescriptor stores = 3;
+  required int64 bulkload_seq_num = 4;
+}
+		</programlisting>
+		<para>WALEntry写入成功后会通过ReplicationSource同步到目标集群端，以便于ReplicationSink处理接下来的同步操作，操作内容主要涉及两个方面，通过HFileReplicator线程来封装。</para>
+		<orderedlist>
+			<listitem>
+				<para>从源集群拷贝目标HFile到当前集群的staging目录。</para>
+				<para>staging目录地址可通过hbase.bulkload.staging.dir参数进行配置，同时拷贝过程中还需要知道有关源集群的配置信息，以便于创建连接，这些配置信息需要存放到hbase.replication.conf.dir路径下。</para>
+			</listitem>
+			<listitem>
+				<para>在目标集群执行bulkload操作，加载staging目录中的HFile文件到线上，自此完成同步操作。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>功能启用</title>
+		<para>在Replication功能启用前要确保满足以下前提条件：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>Zookeeper集群是独立部署的，而不是整合在HBase集群中部署；</para></listitem>
+			<listitem><para>主集群与目标待备份集群要建立起连接关系，即主集群中的每台机器节点都可以访问到目标待备份集群中的所有节点；</para></listitem>
+			<listitem><para>主集群与目标待备份集群所部署的HBase大版本要一致(比如主集群部署0.98.7，目标集群可部署0.98.8，但不能部署0.94)；</para></listitem>
+			<listitem><para>在主集群与目标待备份集群中，表格信息要一致(具有相同的表名和列簇名)。</para></listitem>
+		</itemizedlist>
+		<para>具体的启用步骤如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先修改两个集群的hbase-site.xml文件，加入以下配置</para>
+				<programlisting>
+&lt;property>
+  &lt;name>hbase.replication&lt;/name>
+  &lt;value>true&lt;/value>
+&lt;/property>
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>在主集群上执行如下hbase shell命令</para>
+				<para>add_peer 'ID' 'CLUSTER_KEY'</para>
+				<para>其中ID最好为数字(short类型)，用来唯一标识目标待备份集群，CLUSTER_KEY为目标待备份集群的连接信息，如：zk1.host.com,zk2.host.com:2181:/hbase</para>
+			</listitem>
+			<listitem>
+				<para>在主集群上通过如下shell命令为your_table表格启用Replication功能</para>
+				<programlisting>
+disable 'your_table'
+alter 'your_table', {NAME => 'family_name', REPLICATION_SCOPE => '1'}
+enable 'your_table'
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>激活步骤2中创建的peer</para>
+				<para>enable_peer 'ID'</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>配置参数</title>
+		<orderedlist>
+			<listitem>
+				<para>replication.source.log.queue.warn</para>
+				<para>ReplicationSource中待处理的HLog数量达到该参数值时，打印警告，默认值为2；</para>
+			</listitem>
+			<listitem>
+				<para>replication.replicationsource.implementation</para>
+				<para>ReplicationSource的实现类，默认为org.apache.hadoop.hbase.replication.regionserver.ReplicationSource；</para>
+			</listitem>
+			<listitem>
+				<para>hbase.replication.rpc.codec</para>
+				<para>Replication的执行过程是通过RPC服务来进行调用的，通过该参数来指定CellBlock报文的编码/解码器(参考RPC通信功能实现章节)，默认为org.apache.hadoop.hbase.codec.KeyValueCodecWithTags；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.size.capacity</para>
+				<para>每次向sink端同步的数据大小不能超过该阀值，默认为64M；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.nb.capacity</para>
+				<para>每次向sink端同步的数据记录不能大于该阀值，默认为25000条；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.per.peer.node.bandwidth</para>
+				<para>限制replication的传输带宽，默认值为0，表示不限制；</para>
+			</listitem>
+			<listitem>
+				<para>replication.sleep.before.failover</para>
+				<para>将死掉的RegionServer中的ReplicationQueue转移到其他RegionServer之前，先休眠2秒；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.ratio</para>
+				<para>从待备份集群中筛选出该比例的RegionServer作为潜在的ReplicationSink，默认值为0.1；</para>
+			</listitem>
+			<listitem>
+				<para>replication.bad.sink.threshold</para>
+				<para>如果某个ReplicationSink的执行失败次数大于该阀值(默认为3)，source端不再向其推送数据，从而改用其他ReplicationSink作为消费者实例。</para>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>bulkload复制相关</title>
+			<para>源集群端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>hbase.replication.bulkload.enabled</para>
+					<para>是否启用bulkloadReplication特性，默认值为false。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.cluster.id</para>
+					<para>如若启用bulkloadReplication特性，必须对该参数值进行设置，用来唯一标识集群。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.bulkload.copy.maxthreads</para>
+					<para>最多允许开启多少个Copier线程对HFile进行拷贝，默认为10个。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.bulkload.copy.hfiles.perthread</para>
+					<para>每个线程每次最多拷贝多少个HFile文件，默认为10个。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.bulkload.retries.number</para>
+					<para>执行bulkload失败后的重试次数，默认重试10次。</para>
+				</listitem>
+			</orderedlist>
+			<para>目标集群端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>hbase.bulkload.staging.dir</para>
+					<para>从源集群拷贝的HFile会临时存放于该目录下，参数默认值为/user/${user.name}/hbase-staging</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.conf.dir</para>
+					<para>改路径用于存储源集群的hdfs配置信息，如不指定默认值为$HBASE_CONF_DIR/$replicationClusterId</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+</section>
+</article>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>社区bug修复</title>
+	<section>
+		<title>KAFKA-1382</title>
+		<para>KAFKA-1382主要解决了/brokers/topics/$topic/partitions/$partition/state节点更新isr数据失败的问题，产生该问题的原因大致如下：</para>
+		<para>更新isr的操作主要是通过调用Partition类的updateIsr方法来实现的，在Partition的内部封装了一个zkVersion成员变量用于表示目标分区节点的当前版本，每次执行updateIsr操作时，需要拿该zkVersion与目标ZK节点的版本进行比对，如果版本不一致则更新失败。</para>
+		<para>当集群带宽负载压力比较大的时候，可能会产生如下场景：</para>
+		<orderedlist>
+			<listitem><para>Controller向ZK发送更新isr的请求；</para></listitem>
+			<listitem><para>ZK收到请求后开始执行更新操作，并将更新成功的结果反馈给Controller；</para></listitem>
+			<listitem><para>由于集群的带宽使用已经达到饱和，ZK没能及时的将响应信息反馈到Controller端。超时以后Controlle会再次发送更新isr的申请(此时采用的zkVersion与之前的请求一致)；</para></listitem>
+			<listitem><para>ZK再次收到更新请求之后开始比较zkVersion，由于之前已经更新成功过，目标节点的版本会相应的增加，从而造成zkVersion与目标版本不匹配，更新失败。</para></listitem>
+			<listitem><para>Controller收到失败的反馈信息以后不再更新zkVersion，从而造成Partition所记录的版本与ZK中对应的版本信息不一致，所有以后的更新操作也将全部失败。</para></listitem>
+		</orderedlist>
+		<para>社区的解决方法如下(代码参考ReplicationUtils类的updateLeaderAndIsr方法)：</para>
+		<para>在收到ZK的更新失败响应之后(ZkBadVersionException异常)，首先读取出目标ZK节点的isr信息，并与当前所期望的isr信息进行比对，如果信息一致那么即使ZK响应失败，Controller也会认为更新isr的操作执行成功，并更新zkVersion为ZK中所记录的版本，从而不会产生版本不一致的问题。</para>
+	</section>
+</section>

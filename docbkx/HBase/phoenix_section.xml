@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>SQL On HBase - PHOENIX</title>
+	<xi:include href="secInx_section.xml"/>
+	<section>
+		<title>研发运维</title>
+		<section>
+			<title>开启查询终端</title>
+			<para>export HADOOP_CONF_DIR=/opt/meituan/hadoop/etc/hadoop</para>
+			<para>export HBASE_CONF_DIR=/opt/meituan/hbase/conf</para>
+			<para>export PHOENIX_OPTS="$PHOENIX_OPTS -Djava.security.krb5.conf=/path/to/krb5.conf"</para>
+			<para>cd $PHONEIX_HOME/bin; ./sqlline.py gh-data-hbase-finance01.gh.sankuai.com</para>
+		</section>
+		<section>
+			<title>rsgroup集成</title>
+			<para>phoenix集群在搭建之初，通常作为一个rsgroup分组来存在，为了将所有的phoenix表格划分到一个分组，有必要对phoenix的建表操作进行重构，以便通过配置项来决定目标表格将要存放到哪个分组。</para>
+			<para>在HBase的rsgroup章节中描述到可以通过如下建表语句来指定目标表格对应的分组：</para>
+			<blockquote><para>create 'TestTable','cf',{METADATA=>{GROUP_NAME=>'TEST'}}</para></blockquote>
+			<para>即在构造HTableDescriptor对象时为表格引入GROUP_NAME元数据信息，为此可针对ConnectionQueryServicesImpl类的如下方法进行重构。</para>
+			<programlistingco>
+			  <programlisting>
+package org.apache.phoenix.query;
+public class ConnectionQueryServicesImpl extends DelegateQueryServices
+    implements ConnectionQueryServices {
+  ...
+  private HTableDescriptor generateTableDescriptor(byte[] physicalTableName,
+      HTableDescriptor existingDesc, PTableType tableType, Map&lt;String, Object> tableProps, 
+      List&lt;Pair&lt;byte[], Map&lt;String, Object>>> families, byte[][] splits,
+      boolean isNamespaceMapped) throws SQLException {
+    ...
+    HTableDescriptor tableDescriptor = (existingDesc != null) ? 
+        new HTableDescriptor(existingDesc) : new HTableDescriptor(physicalTableName);
+    ...
+    tableDescriptor.setValue("GROUP_NAME", this.config
+        .get("hbase.phoenix.table.group", "default")); <co id="co.rsgroup.name" linkends="co.note.rsgroup.name"/>
+    logger.info("create " + tableDescriptor.toString());
+    return tableDescriptor;
+  }
+  ...
+  public MetaDataMutationResult createTable(final List&lt;Mutation> tableMetaData, ...
+    ...
+    if ((tableType == PTableType.VIEW &amp;&amp; physicalTableName != null) ||
+        (tableType != PTableType.VIEW &amp;&amp; (physicalTableName==null || localIndexTable))){
+      // For views this will ensure that metadata already exists
+      // For tables and indexes, this will create the metadata if it doesn't already exist
+      boolean isSystemTable = Bytes.toString(tableName).startsWith("SYSTEM.");
+      boolean bypassCheck = isSystemTable &amp;&amp;
+          this.config.getBoolean("hbase.phoenix.bypasstablecheck", false); <co id="co.rsgroup.bypass" linkends="co.note.rsgroup.bypass"/>
+      ensureTableCreated(tableName, tableType, tableProps, families, splits,
+          !bypassCheck, isNamespaceMapped);
+    }
+    ...
+  }
+  ...
+  void createSysMutexTable(HBaseAdmin admin, ReadOnlyProps props)
+      throws IOException, SQLException {
+    ...
+    if (systemTables.contains(mutexTableName) ||
+        this.config.getBoolean("hbase.phoenix.bypasstablecheck", false)) { <co id="co.rsgroup.mutex" linkends="co.note.rsgroup.mutex"/>
+      logger.debug("System mutex table already appears to exist, not creating it");
+      return;
+    }
+    ...
+  }
+  ...
+}
+			  </programlisting>
+			  <calloutlist>
+			    <callout id="co.note.rsgroup.name" arearefs="co.rsgroup.name" ><para>为目标表格添加GROUP_NAME元数据信息，以便确定其分组。</para></callout>
+			    <callout id="co.note.rsgroup.bypass" arearefs="co.rsgroup.bypass" ><para>在确定系统表格已经存在的情况下可通过hbase.phoenix.bypasstablecheck参数项来绕过系统表格的检测逻辑，防止因为GROUP_NAME元数据不一致而导致表格重复创建。</para></callout>
+			    <callout id="co.note.rsgroup.mutex" arearefs="co.rsgroup.mutex" ><para>同样，如果确定SYSTEM.MUTEX表格已经存在了，可通过该参数项绕过检测。</para></callout>
+			  </calloutlist>
+			</programlistingco>
+			<para>这样便可通过hbase.phoenix.table.group配置来决定目标表格将要存放到哪个rsgroup上。</para>
+		</section>
+		<section>
+			<title>大查询隔离</title>
+			<para>phoenix的聚合查询是一项非常耗费资源的操作，聚合分析过程中会涉及全表的数据扫描，如果不在服务端加以控制隔离，很容易造成系统资源跑满，导致普通查询进入排队等待。为此有必要引入大查询隔离机制来对聚合查询进行隔离控制。</para>
+			<para>在HBase的大查询隔离章节中描述到，如果目标查询满足如下任何约束条件，调度器会将其标记为大查询来进行处理：</para>
+			<orderedlist>
+        		<listitem><para>Scan对象声明了LARGEQUERY属性，并且属性值为true。</para></listitem>
+        		<listitem><para>Scan对象没有声明数据的检索区间(即Scan过程没有声明startkey和endkey)。</para></listitem>
+        		<listitem><para>对Scanner执行next的次数超过了指定阈值。</para></listitem>
+        		<listitem><para>调用了自定义的协处理器，并且协处理器涉及到一些比较耗费资源的操作。</para></listitem>
+    		</orderedlist>
+    		<para>因此我们可以基于条件一来实现phoenix的大查询隔离功能。</para>
+    		<para>phoenix有关Scan对象的查询设置主要是通过BaseQueryPlan类来完成的，具体可参考其iterator方法。在方法实现中，我们可以基于Statement语句来判断当前查询是否为聚合查询，如果是为其指定LARGEQUERY属性。</para>
+    		<programlisting>
+package org.apache.phoenix.execute;
+public abstract class BaseQueryPlan implements QueryPlan {
+  ...
+  public final ResultIterator iterator(
+      final Map&lt;ImmutableBytesPtr, ServerCache> caches, ParallelScanGrouper scanGrouper,
+      Scan scan) throws SQLException {
+    if (scan == null) {
+      scan = context.getScan();
+    }
+    /*
+     * For aggregate queries, think it as largeQuery
+     */
+    if(getStatement().isAggregate()){
+      scan.setAttribute("LARGEQUERY", Bytes.toBytes(true));
+    }
+    ...
+  }
+  ...
+}
+    		</programlisting>
+    		<para>另外需要注意条件二对应的约束，如果phoenix在查询过程中采用了本地索引，那么其构建的Scan对象是不包含startkey和endkey的，为了不使HBase将其标记为大查询来进行处理，需要将该Scan的LARGEQUERY属性值设置为false。</para>
+    		<programlisting>
+public abstract class BaseQueryPlan implements QueryPlan {
+  ...
+  public final ResultIterator iterator(
+      final Map&lt;ImmutableBytesPtr, ServerCache> caches, ParallelScanGrouper scanGrouper,
+      Scan scan) throws SQLException {
+    ...
+    // Set local index related scan attributes.
+    if (table.getIndexType() == IndexType.LOCAL) {
+      ScanUtil.setLocalIndex(scan);
+      // when Scan use localIndex, it has no startkey and endkey specify
+      // make it as small query through setAttribute
+      if(!getStatement().isAggregate()){
+        scan.setAttribute("LARGEQUERY", Bytes.toBytes(false));
+      }
+      ...
+  }
+  ...
+}
+    		</programlisting>
+		</section>
+		<section>
+			<title>集成到zeppelin</title>
+			<para>zeppelin主要通过JDBCInterpreter来对目标phoenix集群进行连接，如果集群启用了kerberos安全认证机制，需要对该类进行如下定制才能顺利创建连接。</para>
+			<programlistingco>
+			  <programlisting>
+package org.apache.zeppelin.jdbc;
+public class JDBCInterpreter extends Interpreter {
+  ...
+  public Connection getConnection(String propertyKey, InterpreterContext interpreterContext)
+      throws ClassNotFoundException, SQLException, InterpreterException, IOException {
+    ...
+    if (isEmpty(property.getProperty("zeppelin.jdbc.auth.type"))) {
+      ...
+    } else {
+      ...
+      if (url.trim().startsWith("jdbc:hive")) {
+        ...
+      } else {
+        ...
+        final String poolKey = propertyKey;
+        try {
+          if (url.trim().startsWith("jdbc:phoenix")) { <co id="co.zeppelin.url" linkends="co.note.zeppelin.url"/>
+            properties.setProperty("hadoop.security.authentication", "kerberos");
+            properties.setProperty("hbase.master.kerberos.principal",
+                "hbase/_HOST@SANKUAI.COM");
+            properties.setProperty("hbase.regionserver.kerberos.principal",
+                "hbase/_HOST@SANKUAI.COM");
+            properties.setProperty("hbase.rpc.engine",
+                "org.apache.hadoop.hbase.ipc.SecureRpcEngine");
+            properties.setProperty("hbase.security.authentication", "kerberos");
+            properties.setProperty("hbase.security.authorization", "true");
+            properties.setProperty("hbase.phoenix.bypasstablecheck", "true");
+          }
+          ...
+        } catch (Exception e)
+        ...        
+      }
+    }
+  }
+  ...
+  private InterpreterResult executeSql(String propertyKey, String sql,
+      InterpreterContext interpreterContext) {
+    Connection connection = null;
+    Statement statement;
+    ResultSet resultSet = null;
+    String uperSql = sql.toUpperCase();
+    if (uperSql.contains("GROUP BY")) { <co id="co.zeppelin.filter" linkends="co.note.zeppelin.filter"/>
+      return new InterpreterResult(Code.ERROR, "GROUP BY query not support currently!"); 
+    } else if (uperSql.contains(" JOIN ")) {
+      return new InterpreterResult(Code.ERROR, "JOIN query not support currently!");
+    }
+    ...
+  }
+  ...
+}
+			  </programlisting>
+			  <calloutlist>
+			    <callout id="co.note.zeppelin.url" arearefs="co.zeppelin.url" ><para>如果是连接到启用安全认证的phoenix集群需要把hbase相关的认证配置集成到properties中去。</para></callout>
+			    <callout id="co.note.zeppelin.filter" arearefs="co.zeppelin.filter" ><para>phoenix的聚合查询以及join查询都是比较耗费资源的操作，可通过修改该方法将此类操作过滤掉，不对外提供。</para></callout>
+			  </calloutlist>
+			</programlistingco>
+			<para>然后针对Interpreter做如下配置即可，同时在Dependencies面板中添加对phoenix-core的依赖</para>
+			<table frame='all'>
+              <title>Interpreter设置</title>
+              <tgroup cols='2' align='left' colsep='1' rowsep='1'>
+                <colspec colname='c1' colwidth="20em"/>
+			    <colspec colname='c2'/>
+			    <thead>
+				  <row><entry>name</entry><entry>value</entry></row>
+			    </thead>
+			    <tbody>
+				  <row><entry>default.driver</entry><entry>org.apache.phoenix.jdbc.PhoenixDriver</entry></row>
+				  <row><entry>default.url</entry><entry>jdbc:phoenix:host1,host2:2181:/hbase</entry></row>
+				  <row><entry>zeppelin.jdbc.auth.type</entry><entry>KERBEROS</entry></row>
+				  <row><entry>zeppelin.jdbc.keytab.location</entry><entry>path/to/keytab</entry></row>
+				  <row><entry>zeppelin.jdbc.principal</entry><entry>principalName</entry></row>
+			    </tbody>
+              </tgroup>	
+            </table>
+		</section>
+		<section>
+			<title>YCSB定制</title>
+			<para>phoenix的基准测试可通过YCSB来进行(通过其jdbc模块)，但是原生的YCSB实现并不支持kerberos环境下的phoenix访问，因此可通过修改如下代码进行定制。</para>
+			<orderedlist>
+        		<listitem>
+        			<para>首先修改jdbc/src/main/java/com/yahoo/ycsb/db/JdbcDBCli.java</para>
+        			<programlistingco>
+			  			<programlisting>
+ private static void executeCommand(Properties props, String sql) throws SQLException {
+   String driver = props.getProperty(JdbcDBClient.DRIVER_CLASS);
+-  String username = props.getProperty(JdbcDBClient.CONNECTION_USER);
+-  String password = props.getProperty(JdbcDBClient.CONNECTION_PASSWD, "");
+   String url = props.getProperty(JdbcDBClient.CONNECTION_URL);
+-  if (driver == null || username == null || url == null) {
++  if (driver == null || url == null) {
+     throw new SQLException("Missing connection information.");
+   }
+   ...
+   try {
+     Class.forName(driver);
+-    conn = DriverManager.getConnection(url, username, password);
++    conn = DriverManager.getConnection(url, props);
+     Statement stmt = conn.createStatement();
+     ...
+   }
+ ...
+ public static void main(String[] args) {
+   ...
+   try {
++    System.setProperty("java.security.krb5.conf", props.getProperty("krbConfFile"));
++    Configuration conf = new Configuration();
++    conf.set("hadoop.security.authentication", "kerberos");
++    conf.set("hadoop.security.authorization", "true");
++    UserGroupInformation.setConfiguration(conf);
++    UserGroupInformation.loginUserFromKeytab(props.getProperty("principal"),
++        props.getProperty("keytab"));
+     executeCommand(fileprops, sql);
+   } catch (SQLException e) {
++    System.err.println("Error in executing command. " + e);
++    System.exit(1);
++  } catch (IOException e) {
+     System.err.println("Error in executing command. " + e);
+ ...
+			  			</programlisting>
+			  		</programlistingco>
+        		</listitem>
+        		<listitem>
+        			<para>其次修改JdbcDBClient.java，应用程序主要通过它来与phoenix交互。</para>
+        			<programlistingco>
+			  			<programlisting>
+ public void init() throws DBException {
+   ...
+-  String user = props.getProperty(CONNECTION_USER, DEFAULT_PROP);
+-  String passwd = props.getProperty(CONNECTION_PASSWD, DEFAULT_PROP);
+   ...
+   try {
+     if (driver != null) {
+       Class.forName(driver);
+     }
++    System.setProperty("java.security.krb5.conf", props.getProperty("krbConfFile"));
++    Configuration conf = new Configuration();
++    conf.set("hadoop.security.authentication", "kerberos");
++    conf.set("hadoop.security.authorization", "true");
++    UserGroupInformation.setConfiguration(conf);
++    UserGroupInformation.loginUserFromKeytab(props.getProperty("principal"),
++        props.getProperty("keytab"));
+     int shardCount = 0;
+     ...
+     for (String url : urlArr) {
+       System.out.println("Adding shard node URL: " + url);
+-      Connection conn = DriverManager.getConnection(url, user, passwd);
++      Connection conn = DriverManager.getConnection(url, props);
+     ...
+   } catch (NumberFormatException e) {
+     System.err.println("Invalid value for fieldcount property. " + e);
+     throw new DBException(e);
++  } catch (IOException e) {
++    System.err.println("Error in database operation: " + e);
++    throw new DBException(e);
+   }  
+     
+			  			</programlisting>
+			  		</programlistingco>
+        		</listitem>
+        		<listitem>
+        			<para>最后修改JdbcDBCreateTable.java，通过它来执行创建表格的操作。</para>
+        			<programlistingco>
+        				<programlisting>
+ private static void createTable(Properties props, String tablename) throws SQLException {
+   String driver = props.getProperty(JdbcDBClient.DRIVER_CLASS);
+-  String username = props.getProperty(JdbcDBClient.CONNECTION_USER);
+-  String password = props.getProperty(JdbcDBClient.CONNECTION_PASSWD, "");
+   String url = props.getProperty(JdbcDBClient.CONNECTION_URL);
+   int fieldcount = Integer.parseInt(props.getProperty(JdbcDBClient.FIELD_COUNT_PROPERTY,
+       JdbcDBClient.FIELD_COUNT_PROPERTY_DEFAULT));
+-  if (driver == null || username == null || url == null) {
++  if (driver == null || url == null) {
+   ...
+   try {
+     Class.forName(driver);
+-    conn = DriverManager.getConnection(url, username, password);
++    conn = DriverManager.getConnection(url, props);
+     Statement stmt = conn.createStatement();
+     ...
+ }
+ ...
+ public static void main(String[] args) {
+   ...
+   try {
++    System.setProperty("java.security.krb5.conf", props.getProperty("krbConfFile"));
++    Configuration conf = new Configuration();
++    conf.set("hadoop.security.authentication", "kerberos");
++    conf.set("hadoop.security.authorization", "true");
++    UserGroupInformation.setConfiguration(conf);
++    UserGroupInformation.loginUserFromKeytab(props.getProperty("principal"),
++        props.getProperty("keytab"));
+     createTable(props, tablename);
+   } catch (SQLException e) {
++    System.err.println("Error in creating table. " + e);
++    System.exit(1);
++  } catch (IOException e) {
+     System.err.println("Error in creating table. " + e);
+   ...
+ }
+        				</programlisting>
+        			</programlistingco>
+        		</listitem>
+        		<listitem>
+        			<para>最后在$YCSB_HOME/conf/db.properties文件中添加如下配置即可。</para>
+        			<programlistingco>
+        				<programlisting>
+db.driver=org.apache.phoenix.jdbc.PhoenixDriver
+db.url=jdbc:phoenix:gh-data-hbase-finance01.gh.sankuai.com:2181:/hbase
+hbase.security.authentication=kerberos
+hadoop.security.authentication=kerberos
+hbase.security.authorization=true
+hbase.rpc.engine=org.apache.hadoop.hbase.ipc.SecureRpcEngine
+hbase.regionserver.kerberos.principal=hbase/_HOST@SANKUAI.COM
+hbase.master.kerberos.principal=hbase/_HOST@SANKUAI.COM
+principal=hbase/gh-data-hbase-finance01.gh.sankuai.com@SANKUAI.COM
+keytab=/etc/hadoop/keytabs/hbase.keytab
+krbConfFile=/opt/meituan/hadoop/etc/hadoop/krb5.conf
+        				</programlisting>
+        			</programlistingco>
+        		</listitem>
+        	</orderedlist>
+		</section>
+	</section>
+	<xi:include href="hive2phoenix_section.xml" />
+</section>

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
+         xmlns:xi="http://www.w3.org/2001/XInclude"
+         xmlns:ns5="http://www.w3.org/2000/svg"
+         xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+         xmlns:ns3="http://www.w3.org/1999/xhtml"
+         xmlns:db="http://docbook.org/ns/docbook">
+	<title>对象池管理</title>
+	<para>在对RS做profile过程中发现有近13%的内存申请消耗在了HFileScannerImpl对象实例的构建上，如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/objpool.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>如果针对该对象采用池化机制进行管理，GC层面又可以得到进一步的改良，为此我们可引入netty的对象池管理功能。Netty的对象池管理主要是通过继承Recycler类来实现的，其内部数据结构如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/netty_recyler.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>在Recycler内部主要维护了如下两个比较重要的ThreadLocal变量，来避免不同线程在执行对象回收过程中的锁同步消耗。</para>
+	<orderedlist>
+		<listitem>
+			<para>Stack变量</para>
+			<para>如果对象的创建和回收都是通过本地线程来完成的(即在一个线程里)，那么可直接通过elements数组对该对象进行管理(数组的长度可通过io.netty.recycler.maxCapacityPerThread参数指定，默认为32768)，由于只是当前线程访问，所以针对elements的操作不需要任何加锁。</para>
+		</listitem>
+		<listitem>
+			<para>DELAYED_RECYCLED变量</para>
+			<para>该变量是一个WeakHashMap，key的类型为Stack，value的类型为WeakOrderQueue。</para>
+			<para>对象的创建和回收必须要通过相同的Stack来进行处理，如果创建对象的线程(即Stack的归属线程)和回收对象的线程并不是同一个线程，那么针对每个回收线程，需要构建一个WeakOrderQueue队列(map的value值)，并将其压入到创建该对象的Stack堆栈(map的key值)。这样每个回收线程同样只操作自己的队列，避免了单队列情况下不同线程在做对象回收操作时的锁同步消耗。</para>
+			<para>另外WeakOrderQueue对创建它的回收线程进行了弱引用，如果目标回收线程已被GC处理，Stack会把该队列下的所有元素转移到elements数组里，然后将队列从Stack中移除(代码可参考Stack#scavengeSome方法)。</para>
+			<para>在WeakOrderQueue内部封装了一个Link链表，在类机构上Link主要继承至AtomicInteger，这样便可以通过其value值来映射当前的writerIndex(有关writerIndex的更新是通过lazySet方法来设置的而不是set，相关代码可参考WeakOrderQueue#add方法)。</para>
+		</listitem>
+	</orderedlist>
+	<para>每当调用Recycler#get方法从对象池中获取对象时，首先从elements集合中检索，看是否有元素可用，如果没有可用元素则执行Stack#scavenge方法将WeakOrderQueue中的可用元素转移到elements集合中(代码逻辑封装在Stack#pop方法里)。在Stack内部维护了一个cursor指针，用来指向当前正在遍历的WeakOrderQueue，当elements集合没有可用数据时，开始从cursor位置遍历整个堆栈，当遍历到堆栈的底部时开始下一个遍历轮回(将cursor移动到堆栈的头部)。</para>
+	<para>基于netty的对象池管理机制，我们可对HFileScannerImpl实例的构建做以下重构。</para>
+	<programlistingco>
+		<programlisting>
++++ org/apache/hadoop/hbase/io/hfile/HFileReaderImpl.java
+   ...
++  import io.netty.util.Recycler;
++  import io.netty.util.Recycler.Handle;
+   ...
+   protected static class HFileScannerImpl implements HFileScanner {
++    private static final Recycler&lt;HFileScannerImpl> RECYCLER =
++        new Recycler&lt;HFileScannerImpl>() {
++      @Override
++      protected HFileScannerImpl newObject(Handle&lt;HFileScannerImpl> handle) {
++        return new HFileScannerImpl(handle);
++      }
++    };
+     ...
+-    public HFileScannerImpl(final HFile.Reader reader, final boolean cacheBlocks,
++    private Handle&lt;HFileScannerImpl> handle;
++
++    public static HFileScannerImpl newInstance(final HFile.Reader reader,
+         final boolean cacheBlocks ... {
+-      this.reader = reader;
+-      this.cacheBlocks = cacheBlocks;
+-      this.pread = pread;
+-      this.isCompaction = isCompaction;
++      HFileScannerImpl scanner = RECYCLER.get(); <co id="co.objpool.get" linkends="co.note.objpool.get"/>
++      scanner.reader = reader;
++      scanner.cacheBlocks = cacheBlocks;
++      scanner.pread = pread;
++      scanner.isCompaction = isCompaction;
++      return scanner;
++    }
++
++    private HFileScannerImpl(Handle&lt;HFileScannerImpl> handle) { <co id="co.objpool.private" linkends="co.note.objpool.private"/>
++      this.handle = handle;
++    }
++
++    private void recycle() {
++      if (handle != null) {
++        blockBuffer = null;
++        currKeyLen = 0;
++        currValueLen = 0;
++        currMemstoreTSLen = 0;
++        currMemstoreTS = 0;
++        reader = null;
++        currTagsLen = 0;
++        nextIndexedKey = null;
++        curBlock = null;
++        if (!prevBlocks.isEmpty()) {
++          prevBlocks.clear();
++        }
++        handle.recycle(this); <co id="co.objpool.recycle" linkends="co.note.objpool.recycle"/>
++      }
+     }
+     ...
+     public void close() {
+       ...
+       this.returnBlocks(true);
++      this.recycle();
+     }
+     ...
+     public HFileScanner getScanner(boolean cacheBlocks, final boolean pread,
+       ...
+-      return new HFileScannerImpl(this, cacheBlocks, pread, isCompaction);
++      return HFileScannerImpl.newInstance(this, cacheBlocks, pread, isCompaction);
+     }
+		</programlisting>
+		<calloutlist>
+			<callout id="co.note.objpool.get" arearefs="co.objpool.get">
+				<para>从对象池中获取目标对象实例，如果不存在则新建。</para>
+			</callout>
+			<callout id="co.note.objpool.private" arearefs="co.objpool.private">
+				<para>将类的构造函数声明成私有类型，这样外部类只能通过对象池来获取相应的对象实例。</para>
+			</callout>
+			<callout id="co.note.objpool.recycle" arearefs="co.objpool.recycle">
+				<para>对象使用周期结束后，通过recycle方法将其回收到对象池。</para>
+			</callout>
+		</calloutlist>
+	</programlistingco>
+</section>

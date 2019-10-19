@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>RCFile</title>
+	<para>在做数据存储时比较常用的存储方式有两种，分别是基于行存储和基于列存储。</para>
+	<orderedlist>
+		<listitem>
+			<para>行存储方式</para>
+			<para>行存储方式的主要缺点是在执行数据扫描时无法略过不需要的列。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../../media/common/row.png"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>由于指定行的全部数据都存储在同一个block中，即使只需要查询某一列，依然需要对所有列进行扫描。</para>
+		</listitem>
+		<listitem>
+			<para>列存储方式</para>
+			<para> 列存储的主要缺点是查询过程中网络开销比较大，因为同一条记录中不同的列可能存储在不同的数据节点上，查询时需要对这些节点进行聚合。</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="60%" width="100%" scalefit="1" fileref="../../media/common/column.png"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>不同的列簇通过不同的文件进行存储，这些文件可能分散在不同的机器上，查询结果需要从不同的机器聚合。</para>
+		</listitem>
+	</orderedlist>
+	<para>由于两种存储方式在功能上呈现互补，所以RCFile基于两种方式进行设计。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../../media/common/rcfile.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>首先按行进行水平切片，确保同一条记录的数据存储在同一台机器上。切片大小建议为4M，太小影响压缩比例，太大影响延迟解压的触发机率。因为每个切片的列分区数量是确定的，切片越大每个列分区所跨越的行数就越多，能够符合目标查询规则的可能性就越大，满足过滤条件列分区将被解压。</para>
+	<para>然后对每一个切片按列进行垂直分区，以此来过滤查询过程中不需要的列。并针对每个列分区提供压缩(采用gzip压缩算法)和延迟解压功能，这样在读取的时候不需要的列数据可以不解压。</para>
+	<section>
+		<title>数据写入</title>
+		<para>RCFile只支持以追加的方式进行数据写入，并不支持随机写。写入过程中会先将数据缓存在内存里，待数据量达到一个批次在flush到磁盘上，每次flush都会新生成一个行切片，flush批次通过如下两个参数来控制：</para>
+		<blockquote>
+			<para>(1)hive.io.rcfile.record.buffer.size(缓存大小)</para>
+			<para>(2)hive.io.rcfile.record.interval(缓存条数)</para>
+		</blockquote>
+		<para>数据写入过程主要是通过调用RCFile.Writer类来实现的，具体API调用如下：</para>
+		<programlistingco>
+			<programlisting>
+Configuration conf = new Configuration();
+conf.setInt(RCFile.COLUMN_NUMBER_CONF_STR, 4); <co id="co.rcfile.colnum" linkends="co.note.rcfile.colnum"/>
+conf.setInt(RCFile.Writer.COLUMNS_BUFFER_SIZE_CONF_STR, 4 * 1024 * 1024); <co id="co.rcfile.buffer" linkends="co.note.rcfile.buffer"/>
+conf.setInt(RCFile.RECORD_INTERVAL_CONF_STR, 3000); <co id="co.rcfile.records" linkends="co.note.rcfile.records"/>
+RCFile.Writer writer = new RCFile.Writer(fs, conf, path);
+
+BytesRefArrayWritable row = new BytesRefArrayWritable(4); <co id="co.rcfile.record" linkends="co.note.rcfile.record"/>
+BytesRefWritable col = new BytesRefWritable(data, offset, len);
+row.set(index, col);
+
+writer.append(row);
+writer.close();
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.rcfile.colnum" arearefs="co.rcfile.colnum"><para>方法会对hive.io.rcfile.column.number.conf参数进行设置，用来指定列分区数。</para></callout>
+				<callout id="co.note.rcfile.buffer" arearefs="co.rcfile.buffer"><para>方法会对hive.io.rcfile.record.buffer.size参数进行设置，用来决定切片的大小。</para></callout>
+				<callout id="co.note.rcfile.records" arearefs="co.rcfile.records"><para>方法会对hive.io.rcfile.record.interval参数进行设置，用来决定切片的大小。</para></callout>
+				<callout id="co.note.rcfile.record" arearefs="co.rcfile.record"><para>构造要写入的数据记录。</para></callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>数据读取</title>
+		<para>读取过程中只将元数据和需要的列分区载入内存，针对列分区数据，rcfile支持延迟解压功能(真正需要读取的时候在进行解压，如果被where条件过滤掉则不解压)。</para>
+		<orderedlist>
+			<listitem>
+				<para>按行读取</para>
+				<programlistingco>
+					<programlisting>
+ColumnProjectionUtils.setReadAllColumns(conf); <co id="co.rcfile.read.col" linkends="co.note.rcfile.read.col"/>
+RCFile.Reader reader = new RCFile.Reader(fs, path, conf);
+LongWritable rowID = new LongWritable();
+BytesRefArrayWritable cols = new BytesRefArrayWritable();
+while (reader.next(rowID)){ <co id="co.rcfile.read.iter" linkends="co.note.rcfile.read.iter"/>
+   reader.getCurrentRow(cols);
+   cols.get(columnIndex);
+}
+reader.close();
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.rcfile.read.col" arearefs="co.rcfile.read.col"><para>读取所有列，还可通过appendReadColumns方法过滤要读取的列分区。</para></callout>
+						<callout id="co.note.rcfile.read.iter" arearefs="co.rcfile.read.iter"><para>遍历所有的行记录。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>按列读取</para>
+				<programlistingco>
+					<programlisting>
+ColumnProjectionUtils.appendReadColumns(conf, ids); <co id="co.rcfile.read.filter" linkends="co.note.rcfile.read.filter"/>
+RCFile.Reader reader = new RCFile.Reader(fs, path, conf);
+BytesRefArrayWritable rows = new BytesRefArrayWritable();
+while (reader.nextColumnsBatch()) { <co id="co.rcfile.read.split" linkends="co.note.rcfile.read.split"/>
+   reader.getColumn(columnIndex, rows);
+   rows.get(rowIndex);
+}
+reader.close();
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.rcfile.read.filter" arearefs="co.rcfile.read.filter"><para>过滤要读取的列分区。</para></callout>
+						<callout id="co.note.rcfile.read.split" arearefs="co.rcfile.read.split"><para>遍历所有的行分片。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Mapreduce应用</title>
+		<orderedlist>
+			<listitem>
+				<para>作为输入</para>
+				<para>设置Job的InputFormatClass为org.apache.hadoop.hive.ql.io.RCFileInputFormat。</para>
+				<para>设置Map的valueType为BytesRefArrayWritable。</para>
+				<para>通过ColumnProjectionUtils的appendReadColumns方法设置要读取的列。</para>
+			</listitem>
+			<listitem>
+				<para>作为输出</para>
+				<para>设置Job的InputFormatClass为org.apache.hadoop.hive.ql.io.RCFileOutputFormat。</para>
+				<para>设置Reduce的valueType为BytesRefArrayWritable。</para>
+				<para>通过RCFileOutputFormat的setColumnNumber方法设置列分区数。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

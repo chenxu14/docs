@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>LSM树</title>
+	<para>LSM树是由O'Neil在1996年发表的论文《The Log-Structured Merge-Tree》中提出的，核心价值用于解决数据在存储过程中面临的各种问题。该存储策略的产生大致经历了如下2个过渡阶段。</para>
+	<orderedlist>
+		<listitem>
+			<para>首先是最早的哈希式存储</para>
+			<para>哈希式存储策略非常简单，当写操作到来以后，不经过排序处理直接将数据内容持久化到磁盘。其特点是写入性能非常高效，只需将数据追加至文件的结尾处即可，无需过多的排序处理，只是在执行查询操作时会比较麻烦，由于数据是无序存储的，因此每次查询都要做全盘扫描。为此，大家开始尝试将数据进行有序存储，以此来提升查询性能，于是有了B+树的设计。</para>
+		</listitem>
+		<listitem>
+			<para>B+树存储</para>
+			<para>B+树的索引方案在很多关系数据库中都有启用(比如MySQL和Oracle)。它的特点是数据存储有序，在执行写入操作前，需要首先进行数据寻址，找到自身的排序位置之后在执行数据写入。以下便是一个B+树的使用实例：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/B-tree.png"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>如图所示，树的叶子节点主要用来记录数据内容，而根节点和中间节点用来记录数据索引，叶子节点中的数据内容是经过全局排序处理的，每个叶子节点都可以通过指针来引向其排序位置的上一个节点或下一个节点，从而避免查询过程中的回溯处理。</para>
+			<para>然而B+树存储方式也有问题，其最大的性能问题便是会产生大量的随机IO，因为随着写操作的不断进行，叶子节点会进行持续拆分(如果其存储容量达到上限阀值)。拆分后的子节点在物理存储上往往并不是连续的，甚至会分离很远，这样在做范围查询时便会产生大量的随机IO。另一个问题便是数据写入不是十分高效，因为要有数据寻址的过程。为了解决B+树面临的存储问题LSM树油然而生。</para>
+		</listitem>
+	</orderedlist>
+	<para>LSM的核心设计思想并不复杂，核心的原理大致如下：对数据的修改操作首先在内存中进行，修改的同时记录操作日志以便内存数据丢失时进行恢复处理。内存中的数据达到指定大小阀值之后，在将这些数据flush到磁盘上。每次flush都会生成一颗小树，这些小树可以是B+树存储格式(如HFile)。当小树的数量变多了以后，需要对这些小树进行合并处理，从而形成一颗大树来优化读取性能，也避免了做范围查询时会产生大量随机IO的问题。</para>
+	<para>有关LSM树的工作原理如下图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/lsm-tree.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>与B+树比较，LSM树主要提升了数据的写入能力，因为一开始数据是缓存到内存里的，对数据的排序处理会高效一些，不用执行磁盘寻址操作。但LSM树也存在相应的弊端，那便是在执行数据读取时需要合并磁盘和内存中的数据来进行统一读取。</para>
+	<para>HBase主要是参照LSM树的存储结构进行设计的，在执行数据写入时，首先将数据保存至Memstore里(内存)，同时记录写操作日志到HLog。当Memstore的数据量大小达到指定阀值之后，在将其flush到HDFS上，以便生成HFile进行持久化存储。而有关HFile的存储结构将会在下一个章节中进行详细介绍。</para>
+</section>

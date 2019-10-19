@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xi="http://www.w3.org/2001/XInclude"
+    xmlns:ns5="http://www.w3.org/2000/svg"
+    xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+    xmlns:ns3="http://www.w3.org/1999/xhtml"
+    xmlns:db="http://docbook.org/ns/docbook">
+    <title>参数动态调整</title>
+    <para>在系统部署的初始阶段，很难保证每项参数的设置都是合理的，需要根据系统的运行情况来做出适当的调整，参数值的修改可借助于HBase的动态刷新服务来实现，HBase从1.0版本起开始提供该服务的支持，目前可支持动态调整的参数有如下几项。</para>
+    <orderedlist>
+        <listitem>
+            <para>Region整理相关</para>
+            <para>(1)hbase.offpeak.start.hour</para>
+            <para>(2)hbase.offpeak.end.hour</para>
+            <para>(3)hbase.hstore.compaction.max.size</para>
+            <para>(4)hbase.hstore.compaction.min.size</para>
+            <para>(5)hbase.hstore.compaction.min</para>
+            <para>(6)hbase.hstore.compaction.max</para>
+            <para>(7)hbase.hstore.compaction.ratio</para>
+            <para>(8)hbase.hstore.compaction.ratio.offpeak</para>
+            <para>(9)hbase.regionserver.thread.compaction.throttle</para>
+            <para>(10)hbase.hregion.majorcompaction</para>
+            <para>(11)hbase.hregion.majorcompaction.jitter</para>
+            <para>(12)hbase.hstore.min.locality.to.skip.major.compact</para>
+            <para>(13)hbase.regionserver.thread.compaction.large</para>
+            <para>(14)hbase.regionserver.thread.compaction.small</para>
+            <para>(15)hbase.regionserver.thread.split</para>
+            <para>(16)hbase.regionserver.thread.merge</para>
+        </listitem>
+        <listitem>
+            <para>RPC通信相关</para>
+            <para>(1)hbase.ipc.server.fallback-to-simple-auth-allowed</para>
+            <para>(2)hbase.ipc.server.max.callqueue.length</para>
+            <para>(3)hbase.ipc.server.priority.max.callqueue.length</para>
+            <para>(4)hbase.ipc.server.callqueue.codel.target.delay</para>
+            <para>(5)hbase.ipc.server.callqueue.codel.interval</para>
+            <para>(6)hbase.ipc.server.callqueue.codel.lifo.threshold</para>
+        </listitem>
+        <listitem>
+            <para>流量限制相关</para>
+            <itemizedlist make='bullet'>
+                <listitem>
+                    <para>整理操作相关的限流(前提：开启了整理限流操作，即hbase.regionserver.throughput.controller属性值为org.apache.hadoop.hbase.regionserver.compactions.PressureAwareCompactionThroughputController)</para>
+                    <para>(1)hbase.hstore.compaction.throughput.higher.bound</para>
+                    <para>(2)hbase.hstore.compaction.throughput.lower.bound</para>
+                    <para>(3)hbase.hstore.compaction.throughput.offpeak</para>
+                </listitem>
+                <listitem>
+                    <para>flush相关的限流(前提：开启了flush限流操作，即hbase.regionserver.flush.throughput.controller属性值为org.apache.hadoop.hbase.regionserver.throttle.PressureAwareFlushThroughputController)</para>
+                    <para>(1)hbase.hstore.flush.throughput.upper.bound</para>
+                    <para>(2)hbase.hstore.flush.throughput.lower.bound</para>
+                    <para>(3)hbase.hstore.flush.throughput.control.check.interval</para>
+                    <para>(4)hbase.hstore.flush.throughput.tune.period</para>
+                </listitem>
+            </itemizedlist>
+        </listitem>
+        <listitem>
+            <para>负载均衡相关</para>
+            <para>目前只支持stochastic负载均衡相关的配置，具体参数项可参考负载均衡章节。</para>
+        </listitem>
+    </orderedlist>
+    <para>在功能实现上，动态刷新服务主要是借助于观察者模式来实现的，通过声明ConfigurationManager服务，然后向其注入ConfigurationObserver观察对象，当配置刷新操作触发时，对每一个观察对象进行通知，通过调用其onConfigurationChange方法(详细参考HBASE-12147)。然而HBase的配置参数比较繁多，该服务引入的时候并没有对所有参数提供动态修改功能，不过我们可以针对服务的实现方式来做一些个性化的定制。</para>
+    <section>
+        <title>Stripe整理相关</title>
+        <para>HBase默认情况下并不提供针对Stripe整理相关的动态刷新功能，为此我们可以做如下定制：重构StripeCompactionPolicy类实现，覆盖其父类的setConf方法。</para>
+        <programlisting>
+@Override
+public void setConf(Configuration conf) {
+    super.setConf(conf);
+    this.config = new StripeStoreConfig(conf, storeConfigInfo);
+    this.stripePolicy.setConf(conf);
+}
+        </programlisting>
+        <para>类重构之后可对如下参数配置进行动态刷新：</para>
+        <blockquote>
+            <para>(1)hbase.store.stripe.compaction.minFilesL0</para>
+            <para>(2)hbase.store.stripe.compaction.flushToL0</para>
+            <para>(3)hbase.store.stripe.compaction.minFiles</para>
+            <para>(4)hbase.store.stripe.compaction.maxFiles</para>
+            <para>(5)hbase.store.stripe.region.split.max.imbalance</para>
+            <para>(6)hbase.store.stripe.splitPartCount</para>
+            <para>(7)hbase.store.stripe.sizeToSplit</para>
+            <para>(8)hbase.store.stripe.initialStripeCount</para>
+        </blockquote>
+        <para>完整的功能补丁可参考：https://issues.apache.org/jira/browse/HBASE-16344</para>
+    </section>
+    <section>
+        <title>HRegion相关</title>
+        <para>HRegion在类结构上同样实现了ConfigurationObserver接口，不过其目前的onConfigurationChange方法尚未进行任何处理，可通过重构该方法来进行个性化定制。</para>
+        <programlisting>
+@Override
+public void onConfigurationChange(Configuration conf) {
+  this.flushCheckInterval = conf.getInt(MEMSTORE_PERIODIC_FLUSH_INTERVAL,
+     DEFAULT_CACHE_FLUSH_INTERVAL);
+  this.flushPerChanges = conf.getLong(MEMSTORE_FLUSH_PER_CHANGES, 
+     DEFAULT_FLUSH_PER_CHANGES);
+}
+        </programlisting>
+        <para>这里主要对hbase.regionserver.optionalcacheflushinterval参数和hbase.regionserver.flush.per.changes参数提供了动态刷新功能，以便合理提高memstore的利用率。</para>
+        <para>完整的功能补丁可参考：TODO</para>
+    </section>
+    <section>
+        <title>刷新操作</title>
+        <para>刷新操作可通过HBaseAdmin的updateConfiguration方法来进行调用，也可在hbase的shell环境中通过如下语句来执行：</para>
+        <para>hbase_shell > update_config ‘servername’</para>
+    </section>
+</section>

@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>启用ganglia监控metrics</title>
+	<section>
+		<title>ganglia安装</title>
+		<para>安装环境如下：</para>
+		<blockquote>
+			<para>操作系统：CentOS release 6.3 (Final)</para>
+			<para>ganglia版本：3.6.0</para>
+		</blockquote>
+		<para>安装步骤如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>yum安装依赖库</para>
+				<programlisting>
+shell > yum install apr-devel apr-util check-devel cairo-devel pango-devel \
+      > libxml2-devel rpm-build glib2-devel dbus-devel freetype-devel fontconfig-devel \ 
+      > gcc-c++ expat-devel python-devel libXrender-devel pcre-devel perl-devel					
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>编译安装confuse</para>
+				<programlisting>
+shell > wget http://savannah.nongnu.org/download/confuse/confuse-2.7.tar.gz
+shell > tar -xzvf confuse-2.7.tar.gz
+shell > cd confuse-2.7
+shell > ./configure CFLAGS=-fPIC --disable-nls
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>编译安装rrdtool</para>
+				<programlisting>
+shell > wget http://oss.oetiker.ch/rrdtool/pub/rrdtool.tar.gz
+shell > tar -xzvf rrdtool.tar.gz
+shell > cd rrdtool-1.4.9
+shell > ./configure --prefix=/usr
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>加载连接库</para>
+				<programlisting>
+shell > vi /etc/ld.so.conf
+            + /usr/local/lib
+      >ldconfig
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>编译安装ganglia</para>
+				<programlisting>
+shell > tar -xzvf ganglia-3.6.0.tar.gz
+shell > cd ganglia-3.6.0
+shell > ./configure --with-gmetad
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>ganglia配置</para>
+				<programlisting>
+shell > mkdir /etc/ganglia
+shell > cd ganglia-3.6.0
+shell > cp gmetad/gmetad.conf /etc/ganglia/
+shell > gmond -t | tee /etc/ganglia/gmond.conf
+shell > cp gmetad/gmetad.init /etc/rc.d/init.d/gmetad
+shell > cp gmond/gmond.init /etc/rc.d/init.d/gmond
+# 修改gmetad进程启动脚本
+shell > vi /etc/init.d/gmetad
+           GMETAD=/usr/local/sbin/gmetad
+		   ...
+		   case "$1" in
+		       start)
+			   ...
+               daemon $GMETAD -c /etc/ganglia/gmetad.conf
+           ...
+# 修改gmond进程启动脚本
+shell > vi /etc/init.d/gmond
+           GMOND=/usr/local/sbin/gmond
+		   ...
+		   case "$1" in
+		       start)
+			   ...
+               daemon $GMOND -c /etc/ganglia/gmond.conf
+           ...
+shell > chkconfig --add gmetad
+shell > chkconfig --add gmond
+# 格式化rrd存储目录
+shell > mkdir -p /var/lib/ganglia/rrds
+shell > chown root:root /var/lib/ganglia/rrds
+shell > chmod 755 -R /var/lib/ganglia
+# 修改gmetad进程配置文件
+shell > vi /etc/ganglia/gmetad.conf
+           data_source "myCluster" masterHost
+           setuid_username "root"
+           # 设置为1表示针对hostname开启大小写敏感标识
+           case_sensitive_hostnames 1
+           ...
+# 修改gmond进程配置文件
+shell > vi /etc/ganglia/gmond.conf
+           globals {
+              user = root
+              ...
+           }
+           cluster {
+              name = "myCluster"
+              owner = "root"
+              ...
+           }
+           udp_send_channel {
+              host = masterHost
+              port = 8649
+              ttl = 1
+           }
+           udp_recv_channel {
+              port = 8649
+           }
+           tcp_accept_channel {
+               port = 8649
+           }
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>ganglia部署</para>
+				<para>在主节点上(masterHost)启动gmetad进程：service gmetad start</para>
+				<para>在所有监控节点上启动gmond进程：service gmond start</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>ganglia-web安装</title>
+		<para>ganglia-web需要安装在主节点上，即启动gmetad进程的节点(masterHost)，安装步骤如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>安装apache服务器</para>
+				<programlisting>
+shell > tar -xzvf httpd-2.2.23.tar.gz
+shell > cd httpd-2.2.23/srclib/apr
+shell > ./configure --prefix=/usr/local/apr
+shell > make &amp;&amp; make install
+
+shell > cd httpd-2.2.23/srclib/apr-util
+shell > ./configure --prefix=/usr/local/apr-util/ --with-apr=/usr/local/apr
+shell > make &amp;&amp; make install
+
+shell > cd httpd-2.2.23
+shell > ./configure --prefix=/usr/local/apache2 --with-apr=/usr/local/apr \ 
+      > --with-apr-util=/usr/local/apr-util
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>安装php</para>
+				<programlisting>
+shell > tar -xzvf php-5.6.0.tar.gz
+shell > cd php-5.6.0
+shell > ./configure --prefix=/usr/local/php \
+      > --with-apxs2=/usr/local/apache2/bin/apxs
+shell > make &amp;&amp; make install
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>部署ganglia-web</para>
+				<programlisting>
+shell > tar -xzvf ganglia-web-3.6.2.tar.gz -C /software/servers/
+shell > cd /software/servers/ganglia-web-3.6.2
+shell > vi conf_default.php
+           $conf['gweb_confdir'] = "/software/servers/ganglia-web-3.6.2";
+shell > cd /software/servers/ganglia-web-3.6.2/dwoo
+shell > mkdir cache
+shell > chmod 777 cache
+shell > mkdir compiled
+shell > chmod 777 compiled
+
+shell > vi /usr/local/apache2/conf/httpd.conf
+           ...
+           Listen 80
+           ...
+           &lt;IfModule dir_module>
+              DirectoryIndex index.html index.php
+              AddType application/x-httpd-php .php
+           &lt;/IfModule>
+           ...
+           Alias /ganglia "/software/servers/ganglia-web-3.6.2"
+           &lt;Directory "/software/servers/ganglia-web-3.6.2">
+              AuthType Basic
+              Options None
+              AllowOverride None
+              Order allow,deny
+              Allow from all
+           &lt;/Directory>
+配置完成后通过如下命令启动apache服务器：
+   /usr/local/apache2/bin/apachectl restart
+然后通过如下界面便可访问到ganglia系统
+   http://masterHost/ganglia
+				</programlisting>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>metrics配置</title>
+		<para>修改$HADOOP_HOME/etc/hadoop/hadoop-metrics2.properties配置如下：</para>
+		<programlisting>
+*.sink.ganglia.class=org.apache.hadoop.metrics2.sink.ganglia.GangliaSink31
+*.period=10
+namenode.sink.ganglia.servers=masterHost:8649
+secondarynamenode.sink.ganglia.servers=masterHost:8649
+datanode.sink.ganglia.servers=masterHost:8649
+journalnode.sink.ganglia.servers=masterHost:8649
+resourcemanager.sink.ganglia.servers=masterHost:8649
+nodemanager.sink.ganglia.servers=masterHost:8649
+jobhistoryserver.sink.ganglia.servers=masterHost:8649
+mrappmaster.sink.ganglia.servers=masterHost:8649
+maptask.sink.ganglia.servers=masterHost:8649
+reducetask.sink.ganglia.servers=masterHost:8649
+		</programlisting>
+	</section>
+</section>

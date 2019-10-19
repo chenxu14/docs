@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>堆外数据管理</title>
+	<para>gc问题是java开发中比较难以规避的一类性能问题，执行链路如果创建的临时对象比较多会导致新生代GC异常频繁，从而增加系统STW用时开销。为了缓解GC的回收压力，可考虑将部分内存数据移植到堆外进行管理使其不参与GC回收。目前HBase主要在以下几个方面对内存数据做了offheap处理。</para>
+	<section>
+		<title>RPC通信层面</title>
+		<para>RpcServer从buffers池中获取对等大小的内存资源用来存放客户端发送过来的通信报文(代码参考RpcServer.Connection#initByteBuffToReadInto方法)，buffers池的管理方式与内存分页相类似，每个分页大小可通过hbase.ipc.server.allocator.buffer.size参数进行指定，默认为65KB。分页数量可通过hbase.ipc.server.allocator.max.buffer.count参数进行声明，如不指定按如下公式进行计算得出(代码可参考ByteBuffAllocator.create)</para>
+		<blockquote><para>handler数量 ＊ 2 ＊ 2M/分页大小</para></blockquote>
+		<para>其中handler数量主要是考虑到了请求的最大并发数，而之所以要乘2是因为服务端的response信息在被客户端完全接受前有可能又接受了新的请求，2M大小考虑到hbase的单次rpc请求返回的数据量上限。</para>
+		<tip>为尽量保证块数据保存在同一个分页上，通常将分页大小设置成块的大小加1Kb，另外如果申请的内存空间小于hbase.ipc.server.reservoir.minimal.allocating.size阈值(默认为分页大小的6分之一)，是不走buffers池分配的，而是直接从堆内存上申请，防止buffers空间的过度浪费。</tip>
+		<para>除了客户端的请求信息，服务端的响应信息同样是通过buffers池来进行管理的。相关请求处理结束后会去调用RpcServer.Call#setResponse方法，对response信息进行指定，期间会去执行IPCUtil#buildCellBlockStream方法来将要返回的Cell信息序列化存储到buffers池所管理的内存空间里。待响应信息发送到客户端之后，需要对这次RPC请求所占用的buffer空间进行回收利用处理，回收逻辑主要封装在RpcServer.Call#done方法里将相关ByteBuff的使用计数进行减1操作，待计数为0的时候会触发ByteBuffAllocator#putbackBuffer逻辑，将目标ByteBuff重新放回道buffers池。</para>
+	</section>
+	<section>
+		<title>HFileBlock块加载</title>
+		<para>堆外buffers池是通过ByteBuffAllocator进行管理的，执行块加载操作时，会将块数据暂存于buffers池中进行存储，然后根据接下来的操作转存到其他存储媒介。</para>
+		<orderedlist>
+			<listitem>
+				<para>如果是索引块或者meta块需要将其转存到LruCache</para>
+				<para>转存过程中需要有数据从堆外拷贝到堆内的过程，代码参考LruBlockCache#asReferencedHeapBlock。转存后的ByteBuff，由于不需要在放回buffers池，所以其refCount为0时不需要做相应的回调处理，代码参考HFileBlock#deepCloneOnHeap。</para>
+			</listitem>
+			<listitem>
+				<para>暂存于RAMCache中进行管理</para>
+				<para>Block数据在转存到Bucket之前会暂存于RAMCache中进行管理，此时块数据内容依然存储在buffers池中，因此在访问RAMCache时需要对相应的ByteBuff添加引用计数。</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>计数加1操作</para>
+						<para>(1)调用BucketCache.RAMCache#putIfAbsent将目标块进行缓存时。</para>
+						<para>(2)调用BucketCache.RAMCache#get获取目标缓存块时</para>
+					</listitem>
+					<listitem>
+						<para>计数减1操作</para>
+						<para>(1)当已缓存的Block从ramCache移除时会触发计数器减1操作，比如数据已经转存到了Bucket里，此时便可以将其从ramCache中移除(代码参考WriterThread#doDrain方法);或者在转存到Bucket之前块被驱逐，同样需要触发计数减1的逻辑(代码参考BucketCache#evictBlock方法)。</para>
+						<para>(2)当HFileScanner关闭时，如果有部分扫描的块是从ramCache中获取的，需要对其进行计数减1操作(代码参考HFileScannerImpl#returnBlocks方法)。</para>
+					</listitem>
+					<listitem>
+						<para>回调处理</para>
+						<para>当ByteBuff的引用计数为0的时候，表示块空间内容已经可以释放，此时会触发ByteBuffAllocator#putbackBuffer将其回收进buffer池。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>将其转存进Bucket(BucketAllocator封装)</para>
+				<para>Block数据转存到Bucket之后，主要通过backingMap进行检索，相关的map结构如下：</para>
+				<blockquote><para>BlockCacheKey -> BucketEntry</para></blockquote>
+				<para>每当从backingMap取块时，取出的BucketEntry会和封装块数据的ByteBuff共用一个RefCount(代码参考BucketEntry.wrapAsCacheable)，这样对BucketEntry触发计数操作时，也会映射ByteBuff的计数。</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>计数加1操作</para>
+						<para>通过backingMap获取到缓存块之后，需要对封装块数据的ByteBuff进行计数加1操作(代码可参考BucketCache#getBlock方法)。</para>
+					</listitem>
+					<listitem>
+						<para>计数减1操作</para>
+						<para>(1)当Block数据从backingMap移除时需要触发refCount减1操作(代码参考BucketEntry#markAsEvicted方法)，减1操作是针对BucketEntry对象执行的，但是由于BucketEntry和块数据对应的ByteBuff共用同一个计数器(RefCount)因此也会体现出ByteBuff的计数。</para>
+						<para>(2)每当HFileScanner关闭时，如果有部分扫描的块是从backingMap中获取的，需要对其进行计数减1操作(代码参考HFileScannerImpl#returnBlocks方法)。</para>
+					</listitem>
+					<listitem>
+						<para>回调处理</para>
+						<para>当ByteBuff引用计数为0时的时候会触发如下回调处理(代码参考BucketCache#createRecycler#free)：将目标块从backingMap中移除，释放ByteBuff所占用的资源，将其回收到Bucket池。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>FileIOEngine读块操作</title>
+		<para>启用基于文件的BucketCache缓存之后，缓存块的获取主要是通过执行FileIOEngine#read方法来进行的，方法在执行过程中会按需申请内存，然后将目标缓存块加载到内存中进行返回。针对这部分内存我们可以采用池化机制进行管理，从而缩减内存的申请和释放频率，以此来提升GC效率。</para>
+		<para>对RS进程做profile分析，发现在启用池化机制之前，有近80%的内存申请是由FileIOEngine#read操作触发的，如图所示：</para>
+		<mediaobject>
+            <imageobject>
+                <imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/bufferpool_before.png"></imagedata>
+            </imageobject>
+        </mediaobject>
+        <para>而在启用池化机制之后，内存申请由80%降到了5%，gc时延方面也得到了将近1倍的改良。</para>
+        <mediaobject>
+            <imageobject>
+                <imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/bufferpool_after.png"></imagedata>
+            </imageobject>
+        </mediaobject>
+        <para>针对缓存块的池化管理机制主要是基于HBASE-21879补丁做了相应的扩展，通过其提供的ByteBufferAllocator工具类，核心的补丁修复逻辑如下：</para>
+        <programlistingco>
+			<programlisting>
++++ org/apache/hadoop/hbase/io/hfile/bucket/FileIOEngine.java
+  public Cacheable read(BucketEntry be) throws IOException {
+    ...
+-   ByteBuffer dstBuffer = ByteBuffer.allocate(length);
++   ByteBuff dstBuffer = be.allocator.allocate(length); <co id="co.fileioengine.usepool" linkends="co.note.fileioengine.usepool"/>
+    ...
+    dstBuffer.rewind();
+-   return be.wrapAsCacheable(new ByteBuffer[] { dstBuffer });
++   return be.wrapAsCacheable(dstBuffer);
+  }
+
++++ org/apache/hadoop/hbase/io/hfile/bucket/BucketEntry.java
+   ...
+-  private final ByteBuffAllocator allocator;
++  final ByteBuffAllocator allocator;
+   ...
+   Cacheable wrapAsCacheable(ByteBuffer[] buffers) throws IOException {
+     ByteBuff buf = ByteBuff.wrap(buffers, this.refCnt);
+     return this.deserializerReference().deserialize(buf, allocator);
+   }
++  Cacheable wrapAsCacheable(ByteBuff buf) throws IOException {
++    return this.deserializerReference().deserialize(buf, allocator); <co id="co.fileioengine.refcnt" linkends="co.note.fileioengine.refcnt"/>
++  }
+
++++ org/apache/hadoop/hbase/io/hfile/bucket/BucketCache.java
+   ...
+   public Cacheable getBlock(BlockCacheKey key, boolean caching, boolean repeat,
+       boolean updateCacheMetrics) {
+     ...
+     Cacheable cachedBlock = ioEngine.read(bucketEntry);
+-    // RPC start to reference, so retain here.
+-    cachedBlock.retain();
++    if (ioEngine instanceof ByteBufferIOEngine) {
++      // RPC start to reference, so retain here.
++      cachedBlock.retain(); <co id="co.fileioengine.retain" linkends="co.note.fileioengine.retain"/>
++    }
+     // Update the cache statistics.
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.fileioengine.usepool" arearefs="co.fileioengine.usepool">
+					<para>从内存池中申请出需要的内存，HFileScanner关闭时会将已申请的内存空间归还内存池(具体可参考HFileScanner#close方法)。</para>
+				</callout>
+				<callout id="co.note.fileioengine.refcnt" arearefs="co.fileioengine.refcnt">
+					<para>将Block数据序列化到新申请的内存中，由于从内存池中申请的内存是每个线程独占的，所以不需要和BucketEntry共用一个refCnt。</para>
+				</callout>
+				<callout id="co.note.fileioengine.retain" arearefs="co.fileioengine.retain">
+					<para>只有在启用offheap形式的BucketCache时，缓存的数据块才是所有线程共享的，每当有RPC线程对其引用时需要对其计数进行加1。</para>
+				</callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+	<section>
+		<title>问题修复</title>
+		<orderedlist>
+			<listitem>
+				<para>执行HFileWriterImpl#finishFileInfo操作时，封装lastCell的ByteBuff有可能已被重用。</para>
+				<para>修复办法主要是将Scanner的关闭操作移动到commitWriter之后进行，核心补丁逻辑如下：</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/regionserver/compactions/Compactor.java
+  protected List&lt;Path> compact(final CompactionRequest request ... {
++   List&lt;Path> res = null;
+    FileDetails fd = getFileDetails(request.getFiles(), request.isAllFiles());
+    ...
+    try {
+      ...
+      if (!finished) {
+        throw new InterruptedIOException("Aborting compaction of store " + store + " in region "
+          + store.getRegionInfo().getRegionNameAsString() + " because it was interrupted.");
+      }
++     res = commitWriter(writer, fd, request);
+    } finally {
+      Closeables.close(scanner, true); <co id="co.offheap.lastcell" linkends="co.note.offheap.lastcell"/>
+      if (!finished &amp;&amp; writer != null) {
+        abortWriter(writer);
+      }
+    }
+    assert finished : "We should have exited the method on all error paths";
+    assert writer != null : "Writer should be non-null if no error";
+-   return commitWriter(writer, fd, request);
++   return res;
+  }
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.offheap.lastcell" arearefs="co.offheap.lastcell">
+							<para>对Scanner执行关闭操作时，其所使用的ByteBuffer将归还资源池(代码可参考HFileScannerImpl#close方法)，从而有可能被其他线程重用。为了防止相关Cell引用到被重用的ByteBuffer，需要将该行操作放到commitWriter之后进行。</para>
+						</callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>序列化response到CellBlock之前，封装response的ByteBuffer有可能已被释放回资源池。</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/ipc/CallRunner.java
+  public void run() {
+    try {
+      ...
+      try {
+        ...
+      } finally {
+        if (traceScope != null) {
+         traceScope.close();
+        }
+        RpcServer.CurCall.set(null);
+        if (resultPair != null) {
+          this.rpcServer.addCallSize(call.getSize() * -1);
+-         sucessful = true;
+        }
+      }
+      // return back the RPC request read BB we can do here. It is done by now.
+-     call.cleanup(); <co id="co.offheap.clear" linkends="co.note.offheap.clear"/>
+      ...
+      call.setResponse(param, cells, errorThrowable, error);
+      call.sendResponseIfReady();
++     sucessful = true;
+      ...
+    } finally {
+      if (!sucessful) {
+        this.rpcServer.addCallSize(call.getSize() * -1);
++       call.cleanup(); <co id="co.offheap.fail" linkends="co.note.offheap.fail"/>
+      }
+      cleanup();
+    }
+  }
+  public void drop() {
+    try {
+      ...
+    } finally {
+      if (!sucessful) {
+        this.rpcServer.addCallSize(call.getSize() * -1);
++       call.cleanup();
+      }
+      cleanup();
+    }
+  }
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.offheap.clear" arearefs="co.offheap.clear"><para>对目标Call执行cleanup方法时，会释放其所申请的ByteBuffer，因此要在setResponse方法执行之后在调用，防止CellBlock报文序列化失败。</para></callout>
+						<callout id="co.note.offheap.fail" arearefs="co.offheap.fail"><para>针对执行成功的RPC请求，相关资源会在Call#done方法中进行释放，如果RPC执行失败会在这里进行相关资源的清理操作。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>整理过程中shipped操作的触发时机不对。</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/regionserver/compactions/Compactor.java
+  protected boolean performCompaction(FileDetails fd...
+    ...
+    try {
+      do {
+        hasMore = scanner.next(cells, scannerContext);
+        ...
+        for (Cell c : cells) {
+          ...
+          去掉之前的shipped逻辑
+        }
+        // 遍历完所有cell之后在触发shipped操作
++       if (kvs != null) {
++         if (lastCleanCell != null) {
++           // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly.
++           // ShipperListener will do a clone of the last cells it refer, so need to set back
++           // sequence id before ShipperListener.beforeShipped
++           CellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
++         }
++         // Clone the cells that are in the writer so that they are freed of references,
++         // if they are holding any.
++         ((ShipperListener)writer).beforeShipped();
++         // The SHARED block references, being read for compaction, will be kept in prevBlocks
++         // list(See HFileScannerImpl#prevBlocks). In case of scan flow, after each set of cells
++         // being returned to client, we will call shipped() which can clear this list. Here by
++         // we are doing the similar thing. In between the compaction (after every N cells
++         // written with collective size of 'shippedCallSizeLimit') we will call shipped which
++         // may clear prevBlocks list.
++         kvs.shipped();
++       }
+      ...
+					</programlisting>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>LocalizedResource状态机</title>
+	<para>LocalizedResource状态机用来封装Container资源的获取情况，状态转换如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/yarn/localizedRes-lifecycle.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>LocalizedResource状态转变是由ResourceEventType事件触发的，状态转移信息如下所示：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>状态转换：INIT-->DOWNLOADING</para>
+			<para>触发事件：REQUEST</para>
+			<blockquote><para>Container向ResourceLocalizationService服务申请资源下载时触发，代码参考其handleInitContainerResources方法。</para></blockquote>
+			<para>回调处理：通过FetchResourceTransition类来封装。</para>
+			<blockquote>
+				<para>触发LocalizerEvent事件，事件类型为REQUEST_RESOURCE_LOCALIZATION，使LocalizerTracker服务开始执行资源下载操作(详细参考LocalizerTracker服务)。</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：INIT-->LOCALIZED</para>
+			<para>触发事件：RECOVERED(对LocalizedResource执行recover操作时触发)</para>
+			<para>回调处理：通过RecoveredTransition类来封装，具体可参考LocalizedResource恢复章节。</para>
+		</listitem>
+		<listitem>
+			<para>状态转换：DOWNLOADING-->LOCALIZED</para>
+			<para>触发事件：LOCALIZED(该状态机所封装的资源被成功下载后触发)</para>
+			<para>回调处理：通过FetchSuccessTransition类来封装。</para>
+			<blockquote>
+				<para>触发ContainerEvent事件，事件类型为RESOURCE_LOCALIZED，通知依赖该资源的Container，文件已下载完成。</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>状态转换：LOCALIZED-->LOCALIZED</para>
+			<para>触发事件：REQUEST</para>
+			<blockquote><para>对Container执行recover操作时会在该状态下触发REQUEST事件。</para></blockquote>
+			<para>回调处理：通过LocalizedResourceTransition类来封装。</para>
+			<blockquote>
+				<para>建立目标Container与该资源的依赖关系，并触发RESOURCE_LOCALIZED事件来通知目标Container该资源已成功下载。</para>
+			</blockquote>
+		</listitem>
+	</itemizedlist>
+</section>

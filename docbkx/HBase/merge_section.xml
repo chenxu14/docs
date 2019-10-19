@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region合并</title>
+	<para>集群运行过程中如果出现了以下问题可以考虑对目标Region执行合并操作：</para>
+	<orderedlist>
+		<listitem><para>两个Region的数据出现了重叠；</para></listitem>
+		<listitem><para>由于RowKey设计的不合理，TTL过期以后，Region数据量变为空；</para></listitem>
+		<listitem><para>预定义分区后，部分Region的数据量一直没有增长，这时可以考虑和其他Region合并；</para></listitem>
+		<listitem><para>Region数量偏多，mslab占用了大量的集群资源。</para></listitem>
+	</orderedlist>
+	<section>
+		<title>合并条件</title>
+		<para>只有满足以下约束条件时才可对目标Region执行合并操作(代码方面可参考RegionMergeTransaction类的prepare方法)：</para>
+		<orderedlist>
+			<listitem><para>待合并的两个Region同属于一个Table；</para></listitem>
+			<listitem><para>待合并的两个Region具有不同的id，即在物理上它们不是同一个Region；</para></listitem>
+			<listitem><para>如果合并操作不是强制执行的，那么两个Region需要在排序上相邻，即其中一个Region的起始key为另一个Region的结束key；</para></listitem>
+			<listitem><para>Region中不能包含Reference文件，此时需要先执行整理操作；</para></listitem>
+			<listitem><para>如果待合并的两个子Region是由其他Region合并而来，那么子Region之前的合并操作已经结束。</para></listitem>
+		</orderedlist>
+		<para>如果其中任何一个约束条件得不到满足，合并操作将取消。</para>
+	</section>
+	<section>
+		<title>合并步骤</title>
+		<para>不同于Region拆分逻辑可以自动触发，Region的合并逻辑主要是通过手动的方式来进行管理的。客户端可以通过执行HBaseAdmin的mergeRegions方法来对目标Region进行合并，方法一共有3个参数，分别为两个待合并的Region以及一个flag标识用于表示合并操作是否强制执行。</para>
+		<para>方法执行后会在HMaster端开启DispatchMergingRegionHandler线程来对合并操作进行接管，线程在运行期间会执行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先将两个目标Region移动到一台RegionServer上。</para>
+				<para>移动过程中主要基于Region的负载来做考量，如果Region-a的负载低于Region-b，构造分配计划，将Region-a移动到Region-b所在RegionServer上。反之则将Region-b移动到Region-a所在的RegionServer上，移动细节可参考Region分配章节。</para>
+			</listitem>
+			<listitem>
+				<para>Region都部署到同一台RegionServer之后，开始对目标RegionServer发送RPC申请，将合并操作转交到RegionServer端去完成。</para>
+				<para>RPC请求的发送过程可参考ServerManager类的sendRegionsMerge方法。</para>
+			</listitem>
+		</orderedlist>
+		<para>RegionServer收到HMaster发送过来的合并请求后，开始调用RSRpcServices类的mergeRegions方法进行处理，处理逻辑如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先监测待合并的Region是否处于Recovering状态。</para>
+				<para>如果是将退出合并操作并抛出异常，具体可参考HRegion的startRegionOperation方法。</para>
+			</listitem>
+			<listitem>
+				<para>对目标Region的Memstore执行flush操作，将数据持久化到HFile中去。</para>
+			</listitem>
+			<listitem>
+				<para>开启RegionMergeRequest线程来接管Region合并逻辑。</para>
+				<para>RegionMergeRequest线程是通过CompactSplitThread类的requestRegionsMerge方法来开启的，线程启动后会执行如下处理：</para>
+				<para>(1)首先在两个子Region中选取排序比较考前的Region，并在其目录下生成.merges子目录；</para>
+				<para>(2)然后开始对目标表格锁进行抢占，即在Region合并期间，不能对表格的schema做修改操作；</para>
+				<para>(3)最后将合并处理操作封装成事务来提交，参考合并细节章节。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>合并细节</title>
+		<para>同Region的拆分逻辑类似，Region在合并过程中也是采用事务来进行管理的，如果在合并的过程中出现异常可以执行回滚操作，以此来防止脏数据的产生。事务逻辑主要通过RegionMergeTransaction类来处理，该类的使用模版如下：</para>
+		<programlisting>
+RegionMergeTransaction mt = new RegionMergeTransaction(this.conf, parent, midKey)
+if (!mt.prepare(services)) return;
+try {
+   mt.execute(server, services);
+} catch (IOException ioe) {
+   try {
+      mt.rollback(server, services);
+      return;
+   } catch (RuntimeException e) {
+      myAbortable.abort("Failed merge, abort");
+   }
+}
+		</programlisting>
+		<para>首先调用prepare方法来判断目标Region是否满足合并要求，如果不满足直接放弃处理，否则开始执行execute方法来处理合并操作。Region在合并过程中同样需要HMaster与RegionServer的共同协助来完成，合并前首先在Zookeeper中创建出/hbase/region-intransition/{regionName}合并节点，节点内容为RegionTransition对象，对象所封装的事件类型为RS_ZK_REQUEST_REGION_MERGE。合并节点创建成功后，Master端会执行如下回调处理(参考AssignmentManager类的handleRegion方法)：</para>
+		<para>(1)从合并节点中读取出RegionTransition对象，并修改其eventType属性值为RS_ZK_REGION_MERGING；</para>
+		<para>(2)将目标子Region的状态修改为MERGING，表示其正在参与合并；</para>
+		<para>(3)将目标父Region的状态修改为MERGING_NEW(有关状态修改操作可参考Region生命周期章节)。</para>
+		<para>与此同时，RegionServer端在创建出拆分节点以后会进入循环等待状态，直至其eventType属性值变为RS_ZK_REGION_MERGING(代码逻辑参考RegionMergeCoordination类的waitForRegionMergeTransaction方法)，然后开始执行如下处理：</para>
+		<orderedlist>
+			<listitem><para>选择存储靠前的子Region，在其存储目录下新增.merges子目录来作为合并目录。</para></listitem>
+			<listitem>
+				<para>将待合并的子Region下线，不再提供线上服务。</para>
+				<para>这里的下线只是在RegionServer端进行，通过HRegionServer的removeFromOnlineRegions方法。而meta表中依然有该Region的记录并处于上线状态。HMaster端的下线会在最后进行处理，那时会修改meta表格中的相关记录。</para>
+			</listitem>
+			<listitem>
+				<para>对两个子Region所存储的StoreFile进行合并。</para>
+				<para>合并办法比较简单，分别针对将两个子Region所存储的StoreFile创建Reference文件，并将其拷贝到步骤1所创建的合并目录下。</para>
+			</listitem>
+			<listitem><para>创建出合并后的父Region。</para></listitem>
+			<listitem>
+				<para>修改meta表中目标Region的元数据信息，通过MetaTableAccessor类的mergeRegions方法。</para>
+				<para>将子Region从meta表中移除，并将父Region标记为Merged状态(新增mergeA和mergeB列信息，内容为子Region的HRegionInfo)。</para>
+				<tip>从该步骤开始起，Region合并操作将无法回滚，一旦出错，需要将RegionServer停掉以便ServerShutdownHandler可以对目标Region的元数据进行修复，具体可参考Region状态管理章节中有关状态修复内容的介绍。</tip>
+			</listitem>
+			<listitem>
+				<para>将合并后的父Region进行启动，通过HRegion的openHRegion方法。</para>
+				<para>Region启动后同样需要对其执行整理操作，由于其存储目录中含有Reference文件。</para>
+			</listitem>
+		</orderedlist>
+		<para>RegionServer端完成目标Region的启动之后，需要将启动结果通知到Master端，以便其进行回调处理。通知逻辑是借助于Zookeeper来实现的，首先从Zookeeper的目标合并节点中获取RegionTransition对象，将其eventType属性值修改为RS_ZK_REGION_MERGED。节点状态修改后，Master端会进行如下回调处理：</para>
+		<blockquote>
+			<para>(1)将合并后的子Region进行下线，并将其标记为MERGED状态；</para>
+			<para>(2)将合并后的父Region进行上线，并将其标记为OPEN状态；</para>
+			<para>(3)删除Zookeeper中的合并节点。</para>
+		</blockquote>
+	</section>
+	<section>
+		<title>回滚操作</title>
+		<para>同Region拆分一样，Region合并也支持回滚操作，通过RegionMergeTransaction类的rollback方法，回滚逻辑如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先获取当前Region的合并进度，以及到达该进度之前都做了哪些工作。</para>
+				<para>Region在合并的过程中大致会经历如下几个阶段：</para>
+				<para>(1)SET_MERGING - Zookeeper中创建出合并节点；</para>
+				<para>(2)CREATED_MERGE_DIR - 合并目录被生成；</para>
+				<para>(3)CLOSED_REGION_A - 子Region_A被关闭；</para>
+				<para>(4)OFFLINED_REGION_A - 子Region_A被下线，不再提供线上服务；</para>
+				<para>(5)CLOSED_REGION_B - 子Region_B被关闭；</para>
+				<para>(6)OFFLINED_REGION_B - 子Region_B被下线，不再提供线上服务；</para>
+				<para>(7)STARTED_MERGED_REGION_CREATION - 开始创建合并后的Region；</para>
+				<para>(8)PONR - 回滚临界点，即该阶段之前的操作都可以回滚。</para>
+			</listitem>
+			<listitem>
+				<para>针对当前进度之前的所有操作进行回滚处理。</para>
+				<para>回滚操作通过不断迭代来完成，每次回滚都针对一个具体的阶段来进行。</para>
+				<para>(1)如果回滚时处于SET_MERGING阶段，删除Zookeeper中的拆分节点；</para>
+				<para>(2)如果回滚时处于CREATED_MERGE_DIR阶段，清理合并目录；</para>
+				<para>(3)如果回滚时处于CLOSED_REGION_A阶段，重新对Region_A执行初始化操作；</para>
+				<para>(4)如果回滚时处于CLOSED_REGION_B阶段，重新对Region_B执行初始化操作；</para>
+				<para>(5)如果回滚时处于OFFLINED_REGION_A阶段，重新对Region_A进行上线，通过HRegionServer的addToOnlineRegions方法；</para>
+				<para>(6)如果回滚时处于OFFLINED_REGION_B阶段，重新对Region_B进行上线；</para>
+				<para>(7)如果回滚时处于STARTED_MERGED_REGION_CREATION阶段，清理目标Region的存储目录；</para>
+				<para>(8)如果回滚时处于PONR阶段，将RegionServer停掉，以便ServerShutdownHandler对Region的元数据进行修复(参考Region状态管理章节中有关状态修复内容的介绍)。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>为服务启用metric</title>
+	<para>这里主要为之前定义的FailoverProvider服务启用metric统计功能，以便监控端可以实时获取当前集群的ActiveNN信息，具体实现步骤如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>首先定义MetricsSource</para>
+			<para>MetricsSource的定义可通过两种方式来实现，分别是实现MetricsSource接口，或使用@Metrics标签进行声明，这里使用第二种方式。</para>
+			<programlistingco>
+				<programlisting>
+@Metrics(about="FailoverProvider metrics", context="failover") <co id="co.metrics" linkends="co.note.metrics"/>
+public class FailoverMetrics {
+   private String activeNN="";
+   @Metric("current active namenode") <co id="co.metric" linkends="co.note.metric"/>
+   public String getActiveNN() {
+      return activeNN;
+   }
+   public void setActiveNN(String activeNN){
+      this.activeNN = activeNN;
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.metrics" arearefs="co.metrics" ><para>Metrics标签用来表明该对象为MetricsSource，其中about属性为source描述，context为source所属上下文，在配置端可作为过滤条件来使用；</para></callout>
+					<callout id="co.note.metric" arearefs="co.metric" ><para>Metric标签用来声明统计项，每个MetricsSource可对外声明多个统计项，这里只统计activeNN信息。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>将定义好的MetricsSource进行注册</para>
+			<para>注册过程主要是调用MetricsSystem类的register方法，具体实现逻辑如下(在FailoverProvider服务上进行改动)：</para>
+			<programlistingco>
+				<programlisting>
+public class FailoverProvider implements Watcher,StatCallback{
+   ...
+   + private FailoverMetrics metrics;
+   ...
+   public void run(){
+      try {
+      + initMetrics(); <co id="co.metrics.initmethod" linkends="co.note.metrics.initmethod"/>
+      initZookeeper();
+      initRPC();
+      ...
+   }
+   + private void initMetrics() {
+      + MetricsSystem ms = DefaultMetricsSystem.instance();
+      + ms.init("failover"); <co id="co.metrics.init" linkends="co.note.metrics.init"/>
+      + metrics = new FailoverMetrics();
+      + ms.register("FailoverProvider", "obtain current active namenode", metrics); <co id="co.metrics.reg" linkends="co.note.metrics.reg"/>
+   + }
+   ...
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.metrics.initmethod" arearefs="co.metrics.initmethod" ><para>通过该方法完成MetricsSystem的初始化操作；</para></callout>
+					<callout id="co.note.metrics.init" arearefs="co.metrics.init" ><para>方法参数为metric配置的前缀信息，具体参考metric配置描述；</para></callout>
+					<callout id="co.note.metrics.reg" arearefs="co.metrics.reg" ><para>将定义好的MetricsSource进行注册。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>声明MetricsSink来对已有metrics进行消费</para>
+			<para>Hadoop目前对外声明了两种类型的MetricsSink，分别是GangliaSink(将metrics信息广播给Ganglia框架进行处理)和FileSink(将metrics信息保存到指定文件中)，这里使用FileSink进行消费处理。在$HADOOP_HOME/etc/hadoop/hadoop-metrics2.properties文件中添加如下配置项：</para>
+			<programlistingco>
+				<programlisting>
+failover.sink.file.class=org.apache.hadoop.metrics2.sink.FileSink <co id="co.metrics.sink" linkends="co.note.metrics.sink"/>
+failover.sink.file.period=10 <co id="co.metrics.sink.period" linkends="co.note.metrics.sink.period"/>
+failover.sink.file.filename=/tmp/failover-metrics.out <co id="co.metrics.sink.file" linkends="co.note.metrics.sink.file"/>
+failover.sink.file.context=failover <co id="co.metrics.sink.context" linkends="co.note.metrics.sink.context"/>
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.metrics.sink" arearefs="co.metrics.sink"><para>当执行MetricsSystem类的init("failover")方法时，会读取以failover为前缀的配置并应用到MetricsSystem中去；</para></callout>
+					<callout id="co.note.metrics.sink.period" arearefs="co.metrics.sink.period"><para>每隔多长时间(单位：秒)消费一次MetricsSource所提供的metrics；</para></callout>
+					<callout id="co.note.metrics.sink.file" arearefs="co.metrics.sink.file"><para>metrics信息保存的文件路径；</para></callout>
+					<callout id="co.note.metrics.sink.context" arearefs="co.metrics.sink.context"><para>只消费context为failover的MetricsSource所提供的metrics。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+</section>

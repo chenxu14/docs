@@ -1,0 +1,648 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Replication功能</title>
+	<para>Replication功能用于实现不同集群间的数据同步，其在现实应用中主要包含以下几个场景：</para>
+	<orderedlist>
+		<listitem><para>对比较重要的集群数据进行灾备，以便集群出现问题时可以将流量切换到其他集群；</para></listitem>
+		<listitem><para>将集群数据做成两份，一份用于线上业务处理，一份用于线下业务分析。</para></listitem>
+		<listitem><para>将HBase集群数据准实时同步到其它存储媒介，比如ES或者Kafka。</para></listitem>
+	</orderedlist>
+	<para>在功能实现上，Replication特性主要是基于生产者/消费者模型来进行设计的，实现模型如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/replication.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>WALActionListener</para>
+			<para>WALActionListener充当生产者角色负责监听HLog的回滚事件，当有新HLog生成时，会将该HLog加入到每一个ReplicationSource的产品队列中进行处理。产品队列是通过ReplicationQueues类进行封装的，队列的存储优先级基于HLog的创建时间来决定(代码参考LogsComparator类实现)，时间戳较早的HLog会出现在队列的头部优先进行处理。每一个产品队列可对应到Zookeeper的/hbase/replication/rs/${regionserver}/${peerId}存储路径，其下面会存放一些有关HLog的znode节点，节点value值为目标HLog的消费偏移量信息。</para>
+		</listitem>
+		<listitem>
+			<para>ReplicationSource</para>
+			<para>针对每一个待备份的peerCluster集群，源集群的RegionServer节点都会创建一个ReplicationSource对象，负责同步HLog数据到目标集群上。HLog数据在向目标集群同步之前，ReplicationSource会先对其进行过滤处理，过滤逻辑主要是通过WALEntryFilter类进行封装的，目前已知的接口实现类有以下两种：</para>
+			<orderedlist>
+				<listitem>
+					<para>TableCfWALEntryFilter</para>
+					<para>该过滤器主要用来指定对哪些表格的哪些列族执行备份同步操作，tablceCFs信息是通过ZK进行保存的(客户端可通过set_peer_tableCFs命令进行指定)，过滤器会对该信息进行加载。</para>
+					<tip>
+						<para>每个/hbase/replication/peers/${peerId}节点相当于一个ReplicationPeer(封装待备份集群)，其节点内容为待备份集群的clusterKey(格式为：zk1.host.com,zk2.host.com:2181:/hbase)，同时其还存储着两个子节点：</para>
+						<para>peer-state用来标识该ReplicationPeer的Replication功能是否开启；</para>
+						<para>tableCFs用来标识该ReplicationPeer支持哪些表格的备份操作，内容格式为："table1; table2:cf1,cf3"，可通过set_peer_tableCFs命令进行指定，如不指定则支持所有表格的备份操作。</para>
+					</tip>
+				</listitem>
+				<listitem>
+					<para>ScopeWALEntryFilter</para>
+					<para>该过滤器主要用来过滤REPLICATION_SCOPE值不为1的表格信息。</para>
+				</listitem>
+			</orderedlist>
+			<para>如果WALEntry没有被过滤，会按组分发给每一个Replicator进行接下来的数据同步处理，同步过程主要是远程调用ReplicationSink类的replicateEntries方法，将WALEntry数据传递至目标端进行处理。</para>
+			<tip>
+				<para>如果HLog的数据生产比较迅速，Replicator将会有很大压力，对此Replication采用的办法是对HLog进行分期消费处理，每次消费只同步HLog中的部分数据，这部分数据的长度是通过如下两个参数来决定的：</para>
+				<para>(1)replication.source.nb.capacity：数据段中包含的日志记录条数不能大于该阀值；</para>
+				<para>(2)replication.source.size.capacity：数据段的总数据量大小不能大于该阀值。</para>
+			</tip>
+			<para>ReplicationSource的另一职责是对已被消费完成的HLog进行清理(清理逻辑可参考ReplicationSourceManager类的logPositionAndCleanOldLogs方法)，如果其所记录的数据内容已全部同步至目标集群中，将其从生产队列中移除，并删除Zookeeper中对应的/hbase/replication/rs/${regionserver}/${peerId}/${hlog}节点目录。</para>
+		</listitem>
+		<listitem>
+			<para>ReplicationSink</para>
+			<para>ReplicationSink是通过ReplicationSinkManager对象筛选出来的，针对每个待备份的peerCluster集群，它会在目标集群中随机挑选一定比例的RegionServer节点(代码参考ReplicationSinkManager类的chooseSinks方法)，并为其创建ReplicationSink实例来作为潜在的WALEntry接收方，接受到WALEntry以后会在目标集群上开启对应表格的连接，然后执行batch方法将日志内容进行回放。</para>
+		</listitem>
+	</itemizedlist>
+	<para>在代码逻辑上Replication功能主要是通过Replication类来封装的，该类主要实现了以下几个接口的业务逻辑：</para>
+	<orderedlist>
+		<listitem>
+			<para>WALActionsListener</para>
+			<para>该接口主要用于监听HLog的回滚事件，当相关事件触发时通过实现该接口来进行相应的回调处理，Replication感兴趣的事件包括：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>visitLogEntryBeforeWrite：在HLog.Entry写入HLog之前触发该事件</para>
+					<para>回调处理主要是对HLogKey的scope属性值进行设置，便于ReplicationSink在消费HLog记录时过滤掉无需备份的KeyValue实体。scope的数据结构为：NavigableMap&lt;byte[], Integer>，其中key为列簇名，value为备份范围，如果KeyValue所属列簇对应的value值为REPLICATION_SCOPE_GLOBAL，则该KeyValue在消费过程中不会被过滤掉。</para>
+				</listitem>
+				<listitem>
+					<para>preLogRoll：HLog执行回滚操作之前触发该事件</para>
+					<para>针对每一个待备份的peerCluster，将新生成的HLog文件名添加到Zookeeper的/hbase/replication/rs/${regionserver}/${peerId}路径下</para>
+				</listitem>
+				<listitem>
+					<para>postLogRoll：HLog执行回滚操作之后触发该事件</para>
+					<para>将新生成的HLog文件添加到每一个ReplicationSource的生产队列中，供消费者使用。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>ReplicationService</para>
+			<para>负责实例化ReplicationSource及ReplicationSink实例。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>多租户隔离</title>
+		<para>在社区原生版本实现中，Replication特性尚无法感知rsgroup维度，针对每一个待备份peerCluster集群，所有RegionServer节点都需要创建与之对应的ReplicationSource实例来负责数据同步操作，即使我们已经知道当前RegionServer节点并没有部署需要执行同步操作的表格。</para>
+		<para>另一方面，在执行ReplicationSink筛选过程中，社区的原生做法是在目标集群中随机筛选一定比例的RegionServer节点来作为目标Sink对象，然而并没有考虑所筛选出的这些Sink节点有可能隶属于不同的分组，从而在不同业务分组之间造成了使用上的级连影响，没有很好的做到多租户隔离效果。</para>
+		<para>因此可针对Replication特性做出相应定制，通过感知rsgroup维度来实现更好的多租户隔离。</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/replication_group.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<section>
+			<title>ReplicationSource隔离</title>
+			<para>ReplicationSource的构建触发主要发生在如下时段：</para>
+			<orderedlist>
+				<listitem>
+					<para>RegionServer向HMaster注册成功以后开始初始化Replication服务，期间会遍历所有已存在的peerCluster集群(通过ReplicationPeers对象封装)，并针对每个集群构建相应的ReplicationSource实例(代码逻辑可参考ReplicationSourceManager类的init方法)。</para>
+					<para>针对该情况可以在ReplicationPeers构建过程中做一些过滤处理(通过重构其init方法，引入group维度)，过滤掉与当前分组无关的peerId记录，从而避免不必要的ReplicationSource构建过程。</para>
+					<tip>判断目标peerId是否与当前分组有关主要是通过约束peerId的命名规则来实现的，比如将peerId命名为[GROUP]COMMON_BACKUP表示表格是从源集群的COMMON分组备份到目标集群的BACKUP分组，其中[GROUP]是固定关键字，这样如果源集群的RegionServer不属于COMMON分组，那么便没有必要针对该peerCluster创建对应的ReplicationSource实例。</tip>
+				</listitem>
+				<listitem>
+					<para>客户端执行add_peer操作时会触发ReplicationSourceManager进行相关的回调处理(代码参考peerListChanged方法)，针对新增的peerCluster集群构建新的ReplicationSource实例进行同步处理。</para>
+					<para>针对该情况同样可以对新增的peerId进行分组过滤，如果不属于当前分组则对其进行bypass处理。</para>
+				</listitem>
+				<listitem>
+					<para>当源集群有RegionServer节点宕机的时候，源集群的其他节点会去抢占该节点的Replication队列资源，以便接管尚未同步到目标集群的HLog数据。</para>
+					<para>针对该情况可首先判断死掉的目标节点与当前RegionServer节点是否隶属于同一分组，如果不在一个分组则放弃抢占逻辑(通过重构ReplicationSourceManager类的transferQueues方法)。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>ReplicationSink隔离</title>
+			<para>ReplicationSink的筛选逻辑主要是通过调用HBaseReplicationEndpoint类的getRegionServers方法进行封装的，这里我们可以对改方法进行如下重构：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先由peerId信息解析出表格将要备份到目标集群的哪个分组。</para>
+					<para>这里将peerId的命名规则约束为[GROUP]SOURCE_TARGET_index，其中[GROUP]为固定的关键字信息，SOURCE为表格所在的源集群分组，TARGET为目标集群分组，而index为用来标识唯一ID的索引，这样便可以从peerId中解析出目标集群的target分组信息。</para>
+				</listitem>
+				<listitem>
+					<para>获取目标集群指定分组下所部署的所有RegionServer列表。</para>
+					<para>通过peerCluster配置我们可以解析出目标集群的ZK地址，这样便可以针对该ZK进行直连，从而获取目标分组所包含的节点信息。</para>
+					<tip>美团所采用的rsgroup版本与社区版本实现并不完全相同(具体参考rsgroup章节)，社区是将group信息通过hbase:rsgroup表格来进行维护，而公司这边直接通过ZK来进行持久化存储，这样当我们知道目标集群的ZK地址之后，便可以通过访问ZK来获取目标分组都部署了哪些节点信息。</tip>
+				</listitem>
+				<listitem>
+					<para>对目标分组所部署的机器进行随机筛选，这样便不会筛选到其他业务分组所使用的机器，从而实现更好的多租户资源隔离效果。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>bulkload复制</title>
+		<para>HBase从1.3.0版本起开始提供针对bulkload操作的replication支持(补丁jira可参考HBASE-13153)，功能的大体实现原理如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/bulkload_replication.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>在源集群端，ReplicationObserver协处理器会对bulkload操作进行拦截，在执行对HFile的commit之前，将文件路径临时保存到ZK中进行存储，这样ReplicationHFileCleaner在执行归档文件清理时，会先判断目标HFile节点在ZK中是否存在，如果存在这放弃清理，防止文件尚未同步到目标集群之前就被清理的情况。</para>
+		<tip>ZK用有关HFile的znode清理是在ReplicationSource执行shipEdits操作后触发的，如果WALEdit同步失败，或目标peerCluster被disable掉，ZK中有可能会积压大量的znode节点，节点数量可通过regionserver.Replication.source.sizeOfHFileRefsQueue指标监控到。</tip>
+		<para>bulkload操作执行结束以后，会写入相应的WALEntry到WAL文件，内容是通过BulkLoadDescriptor来封装的，相关的protocol声明如下：</para>
+		<programlisting>
+message StoreDescriptor {
+  required bytes family_name = 1;
+  required string store_home_dir = 2;
+  repeated string store_file = 3;
+  optional uint64 store_file_size = 4;
+}
+message BulkLoadDescriptor {
+  required TableName table_name = 1;
+  required bytes encoded_region_name = 2;
+  repeated StoreDescriptor stores = 3;
+  required int64 bulkload_seq_num = 4;
+}
+		</programlisting>
+		<para>WALEntry写入成功后会通过ReplicationSource同步到目标集群端，以便于ReplicationSink处理接下来的同步操作，操作内容主要涉及两个方面，通过HFileReplicator线程来封装。</para>
+		<orderedlist>
+			<listitem>
+				<para>从源集群拷贝目标HFile到当前集群的staging目录。</para>
+				<para>staging目录地址可通过hbase.bulkload.staging.dir参数进行配置，同时拷贝过程中还需要知道有关源集群的配置信息，以便于创建连接，这些配置信息需要存放到hbase.replication.conf.dir路径下。</para>
+			</listitem>
+			<listitem>
+				<para>在目标集群执行bulkload操作，加载staging目录中的HFile文件到线上，自此完成同步操作。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>功能启用</title>
+		<para>在Replication功能启用前要确保满足以下前提条件：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>Zookeeper集群是独立部署的，而不是整合在HBase集群中部署；</para></listitem>
+			<listitem><para>主集群与目标待备份集群要建立起连接关系，即主集群中的每台机器节点都可以访问到目标待备份集群中的所有节点；</para></listitem>
+			<listitem><para>主集群与目标待备份集群所部署的HBase大版本要一致(比如主集群部署0.98.7，目标集群可部署0.98.8，但不能部署0.94)；</para></listitem>
+			<listitem><para>在主集群与目标待备份集群中，表格信息要一致(具有相同的表名和列簇名)。</para></listitem>
+		</itemizedlist>
+		<para>具体的启用步骤如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先修改两个集群的hbase-site.xml文件，加入以下配置</para>
+				<programlisting>
+&lt;property>
+  &lt;name>hbase.replication&lt;/name>
+  &lt;value>true&lt;/value>
+&lt;/property>
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>在主集群上执行如下hbase shell命令</para>
+				<para>add_peer 'ID' 'CLUSTER_KEY'</para>
+				<para>其中ID最好为数字(short类型)，用来唯一标识目标待备份集群，CLUSTER_KEY为目标待备份集群的连接信息，如：zk1.host.com,zk2.host.com:2181:/hbase</para>
+			</listitem>
+			<listitem>
+				<para>在主集群上通过如下shell命令为your_table表格启用Replication功能</para>
+				<programlisting>
+disable 'your_table'
+alter 'your_table', {NAME => 'family_name', REPLICATION_SCOPE => '1'}
+enable 'your_table'
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>激活步骤2中创建的peer</para>
+				<para>enable_peer 'ID'</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>配置参数</title>
+		<orderedlist>
+			<listitem>
+				<para>replication.source.log.queue.warn</para>
+				<para>ReplicationSource中待处理的HLog数量达到该参数值时，打印警告，默认值为2；</para>
+			</listitem>
+			<listitem>
+				<para>replication.replicationsource.implementation</para>
+				<para>ReplicationSource的实现类，默认为org.apache.hadoop.hbase.replication.regionserver.ReplicationSource；</para>
+			</listitem>
+			<listitem>
+				<para>hbase.replication.rpc.codec</para>
+				<para>Replication的执行过程是通过RPC服务来进行调用的，通过该参数来指定CellBlock报文的编码/解码器(参考RPC通信功能实现章节)，默认为org.apache.hadoop.hbase.codec.KeyValueCodecWithTags；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.size.capacity</para>
+				<para>每次向sink端同步的数据大小不能超过该阀值，默认为64M；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.nb.capacity</para>
+				<para>每次向sink端同步的数据记录不能大于该阀值，默认为25000条。建议调小一些(比如2500)，如果KV数据量较大Direct内存容易出现OutOfMemoryError异常；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.per.peer.node.bandwidth</para>
+				<para>限制replication的传输带宽，默认值为0，表示不限制；</para>
+			</listitem>
+			<listitem>
+				<para>replication.sleep.before.failover</para>
+				<para>将死掉的RegionServer中的ReplicationQueue转移到其他RegionServer之前，先休眠2秒；</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.ratio</para>
+				<para>从待备份集群中筛选出该比例的RegionServer作为潜在的ReplicationSink，默认值为0.1；</para>
+			</listitem>
+			<listitem>
+				<para>replication.bad.sink.threshold</para>
+				<para>如果某个ReplicationSink的执行失败次数大于该阀值(默认为3)，source端不再向其推送数据，从而改用其他ReplicationSink作为消费者实例。</para>
+			</listitem>
+			<listitem>
+				<para>replication.source.shipedits.timeout</para>
+				<para>ReplicationSource执行shipedits操作的超时时间，开启bulkload复制的情况下建议调高一些，比如10分钟(600000)。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.regionserver.replication.handler.count</para>
+				<para>用来响应replication操作的handler线程数，建议设置成10。</para>
+			</listitem>
+			<listitem>
+				<para>replication.sink.client.ops.timeout</para>
+				<para>ReplicationSink执行batch写入操作的超时时间，如果shipedits传递数据量较大，可调高该参数阈值，比如2分钟(120000)。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.regionserver.wal.enablecompression</para>
+				<para>开启replication功能后，一定要关闭WAL字典压缩功能，否则数据同步会异常缓慢。</para>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>bulkload复制相关</title>
+			<para>源集群端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>hbase.replication.bulkload.enabled</para>
+					<para>是否启用bulkloadReplication特性，默认值为false。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.cluster.id</para>
+					<para>如若启用bulkloadReplication特性，必须对该参数值进行设置，用来唯一标识集群。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.bulkload.copy.maxthreads</para>
+					<para>最多允许开启多少个Copier线程对HFile进行拷贝，默认为10个。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.bulkload.copy.hfiles.perthread</para>
+					<para>每个线程每次最多拷贝多少个HFile文件，默认为10个。</para>
+				</listitem>
+				<listitem>
+					<para>hbase.bulkload.retries.number</para>
+					<para>执行bulkload失败后的重试次数，默认重试10次。</para>
+				</listitem>
+			</orderedlist>
+			<para>目标集群端配置</para>
+			<orderedlist>
+				<listitem>
+					<para>hbase.bulkload.staging.dir</para>
+					<para>从源集群拷贝的HFile会临时存放于该目录下，参数默认值为/user/${user.name}/hbase-staging</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.conf.dir</para>
+					<para>改路径用于存储源集群的hdfs配置信息，如不指定默认值为$HBASE_CONF_DIR/$replicationClusterId</para>
+				</listitem>
+				<listitem>
+					<para>hbase.replication.bulkload.maxthreads</para>
+					<para>bulkload开启异步复制功能后，通过该参数来决定异步导入线程数。</para>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>问题修复</title>
+		<section>
+			<title>bulkload循环复制</title>
+			<para>集群如果开启了Master To Master备份逻辑，并且启用了bulkload replication，则在执行bulkload操作时会出现HFile在两个集群之间循环备份的情况。</para>
+			<para>Replication用来阻止循环备份的操作逻辑主要是通过ReplicationSourceWorkerThread线程来进行封装的(详细可参考其readAllEntriesToReplicateOrNextFile方法)，在对要同步的WALEntry进行遍历时，首先判断目标集群的ClusterId是否已经保存在了当前WALEntry的WALKey里，如果存在说明当前WALEntry已经在目标集群做了消费处理，没有必要在将其同步到目标集群。否则将当前集群的ClusterId保存到对应的WALKey中，再将WALEntry同步给目标集群，这样目标集群便可以知道当前WALEntry已经在源集群做了消费处理。</para>
+			<para>然而针对bulkload操作并没有相关的ClusterId指定逻辑，导致集群之间无法根据WALKey来判断目标集群是否已经做了相应的HFile加载，出现循环备份的情况。修复办法主要是在备份集群执行bulkload过程中，跳过WALEntry的写入逻辑，以防止其再次传递回主集群，相关的代码补丁逻辑如下：</para>
+			<programlistingco>
+				<programlisting>
++++ hbase-protocol-shaded/src/main/protobuf/Client.proto
+  message BulkLoadHFileRequest {
+    required RegionSpecifier region = 1;
+    repeated FamilyPath family_path = 2;
+    optional bool assign_seq_num = 3;
+    optional DelegationToken fs_token = 4;
+    optional string bulk_token = 5;
+    optional bool copy_file = 6 [default = false];
++   optional bool skip_wal = 7;
+
++++ org/apache/hadoop/hbase/regionserver/HRegion.java
+   public Map&lt;byte[], List&lt;Path>> bulkLoadHFiles(
+       Collection&lt;Pair&lt;byte[], String>> familyPaths,
+-      boolean assignSeqId, BulkLoadListener bulkLoadListener, boolean copyFile)
+-          throws IOException {
++      boolean assignSeqId, boolean skipWal, BulkLoadListener bulkLoadListener,
++      boolean copyFile) throws IOException {
+     long seqId = -1;
+     ...
+-    if (this.getCoprocessorHost() != null) {
++    if (this.getCoprocessorHost() != null &amp;&amp; !skipWal) {
+       for (Map.Entry&lt;byte[], List&lt;Pair&lt;Path, Path>>> entry : familyWithFinalPath
+           .entrySet()) {
+         this.getCoprocessorHost().preCommitStoreFile(entry.getKey(), entry.getValue());
+     ...
+     isSuccessful = true;
+   } finally {
+-    if (wal != null &amp;&amp; !storeFiles.isEmpty()) {
++    if (wal != null &amp;&amp; !storeFiles.isEmpty() &amp;&amp; !skipWal) {
+       // Write a bulk load event for hfiles that are loaded
+       try {
+         WALProtos.BulkLoadDescriptor loadDescriptor =
+
++++ org/apache/hadoop/hbase/replication/regionserver/HFileReplicator.java
+  public Void replicate() throws IOException {
+    ...
+    LoadIncrementalHFiles loadHFiles = null;
+    try {
+-     loadHFiles = new LoadIncrementalHFiles(conf);
++     loadHFiles = new LoadIncrementalHFiles(conf, true);
+    } catch (Exception e) {
+      LOG.error("Failed to initialize LoadIncrementalHFiles for ...
+
++++ org/apache/hadoop/hbase/tool/LoadIncrementalHFiles.java
+   private final int maxFilesPerRegionPerFamily;
+   private final boolean assignSeqIds;
++  private boolean skipWal = false;
+   ...
+   public LoadIncrementalHFiles(Configuration conf) {
++    this(conf, false);
++  }
++
++  public LoadIncrementalHFiles(Configuration conf, boolean skipWal) {
+     // make a copy, just to be sure we're not overriding someone else's config
+     ...
+     rpcControllerFactory = new RpcControllerFactory(conf);
++    this.skipWal = skipWal;
+   }
+   ...
+   @VisibleForTesting
+   protected ClientServiceCallable&lt;byte[]> buildClientServiceCallable(Connection conn,
+       TableName tableName, byte[] first, Collection&lt;LoadQueueItem> lqis,
+       boolean copyFile) {
+     ...
+     try (Table table = conn.getTable(getTableName())) {
+-      secureClient = new SecureBulkLoadClient(getConf(), table);
++      secureClient = new SecureBulkLoadClient(getConf(), table, skipWal);
+       success = secureClient.secureBulkLoadHFiles(getStub(), famPaths, regionName,
+         assignSeqIds, fsDelegationToken.getUserToken(), bulkToken, copyFile);
+
++++ org/apache/hadoop/hbase/client/SecureBulkLoadClient.java
+   private Table table;
++  private boolean skipWal = false;
+   private final RpcControllerFactory rpcControllerFactory;
+
+   public SecureBulkLoadClient(final Configuration conf, Table table) {
++    this(conf, table, false);
++  }
++
++  public SecureBulkLoadClient(final Configuration conf, Table table,
++      boolean skipWal) {
+     this.table = table;
+     this.rpcControllerFactory = new RpcControllerFactory(conf);
++    this.skipWal = skipWal;
+   }
+   ...
+   public boolean secureBulkLoadHFiles(final ClientService.BlockingInterface client,
+       final List&lt;Pair&lt;byte[], String>> familyPaths,
+       final byte[] regionName, boolean assignSeqNum,
+       final Token&lt;?> userToken, final String bulkToken, boolean copyFiles)
+           throws IOException {
+     BulkLoadHFileRequest request =
+         RequestConverter.buildBulkLoadHFileRequest(familyPaths,regionName,assignSeqNum,
+-          userToken, bulkToken, copyFiles);
++          skipWal, userToken, bulkToken, copyFiles);
+
++++ org/apache/hadoop/hbase/shaded/protobuf/RequestConverter.java
+   public static BulkLoadHFileRequest buildBulkLoadHFileRequest(
+       final List&lt;Pair&lt;byte[], String>> familyPaths,
+-      final byte[] regionName, boolean assignSeqNum,
++      final byte[] regionName, boolean assignSeqNum, boolean skipWal,
+       final Token&lt;?> userToken, final String bulkToken, boolean copyFiles) {
+     ...
+     ClientProtos.BulkLoadHFileRequest.newBuilder()
+       .setRegion(region)
+       .setAssignSeqNum(assignSeqNum)
++      .setSkipWal(skipWal)
+       .addAllFamilyPath(protoFamilyPaths);
+
++++ org/apache/hadoop/hbase/regionserver/SecureBulkLoadManager.java
+   public Map&lt;byte[], List&lt;Path>> secureBulkLoadHFiles(final HRegion region,
+       final BulkLoadHFileRequest request) throws IOException {
+     ...
+     // We call bulkLoadHFiles as requesting user
+     // To enable access prior to staging
+-    return region.bulkLoadHFiles(familyPaths, true,
++    return region.bulkLoadHFiles(familyPaths, true, request.getSkipWal(),
+         new SecureBulkLoadListener(fs, bulkToken, conf), request.getCopyFile());
+				</programlisting>
+			</programlistingco>
+		</section>
+		<section>
+			<title>bulkload异步复制</title>
+			<para>在HBase原生的备份实现里，bulkload复制是一个同步的过程，只有当目标集群加载完所有待同步的HFile之后才会发送执行成功的响应信息到源集群端，以便ReplicationSource进行接下来的处理。</para>
+			<para>然而源集群和目标集群的Region分区有可能是不一致的，此时HFile在目标集群的加载将会变的异常缓慢，因为在执行bulkload过程中，如果要导入的HFile出现了跨Region分区的情况，需要首先对该HFile做拆分处理，以便将数据内容分散导入到不同的Region。如果该过程耗时比较严重，ReplicationSourceWorkerThread线程在执行shipEdits操作时将会出现超时的情况，进而引发超时重试，重试过程中会将同步失败的WALEntry再次发送到目标集群端进行处理，而如果每次重试都超时，会导致待同步的HFile在目标集群端被反复不断的加载，造成Region数据的大量冗余。</para>
+			<para>针对该问题可从以下几个方面进行修复。</para>
+			<orderedlist>
+				<listitem>
+					<para>首先可以尝试延长shipEdits操作的超时时间，以便为目标集群预留出足够多的时间来进行HFile同步和加载。</para>
+					<para>相应的补丁逻辑如下：</para>
+					<programlisting>
++++ o/a/h/hbase/replication/regionserver/HBaseInterClusterReplicationEndpoint.java
+   private long sleepForRetries;
++  private int shipEditsTimeout;
+   ...
+   public void init(Context context) throws IOException {
+     ...
+     this.sleepForRetries =
+        this.conf.getLong("replication.source.sleepforretries", 1000);
++    this.shipEditsTimeout = this.conf.getInt(
++        "replication.source.shipedits.timeout", 60000);
+     ... 
+   }
+   ...
+   protected class Replicator implements Callable&lt;Integer> {
+     ...
+     public Integer call() throws IOException {
+       ...
+       ReplicationProtbufUtil.replicateWALEntry(rrs, entries...
+-          replicationClusterId, baseNamespaceDir, hfileArchiveDir);
++          replicationClusterId, baseNamespaceDir, hfileArchiveDir, shipEditsTimeout);
+       replicationSinkMgr.reportSinkSuccess(sinkPeer);
+       ...
+
++++ org/apache/hadoop/hbase/protobuf/ReplicationProtbufUtil.java
+   public static void replicateWALEntry(final AdminService.BlockingInterface admin,
+       final Entry[] entries, String replicationClusterId, Path sourceBaseNamespaceDir,
+-      Path sourceHFileArchiveDir) throws IOException {
++      Path sourceHFileArchiveDir, int timeout) throws IOException {
+     ...
+     PayloadCarryingRpcController controller = new PayloadCarryingRpcController(p.getSecond());
++    controller.setCallTimeout(timeout);
+     try {
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>其次针对HFile在目标集群的加载逻辑可尝试采用异步的方式来对其进行处理。</para>
+					<para>待HFile同步拷贝到目标集群之后开启一个异步线程池来对其执行load操作，但是不等待load的执行结果。如果load过程执行失败，相应的HFile会保存在Staging目录下(hbase.bulkload.staging.dir参数声明)，我们可以在线下做手动的恢复处理。</para>
+					<para>相关的补丁修复如下：</para>
+					<programlisting>
++++ org/apache/hadoop/hbase/replication/regionserver/ReplicationSink.java
+   private final Configuration conf;
++  private ThreadPoolExecutor replicatorPool;
+   ...
+   public ReplicationSink(Configuration conf, Stoppable stopper)
+     ...
+     decorateConf();
++    ThreadFactoryBuilder builder = new ThreadFactoryBuilder();
++    builder.setNameFormat("HFileReplicator-%1$d");
++    this.replicatorPool =
++      new ThreadPoolExecutor(1, conf.getInt("hbase.replication.bulkload.maxthreads", 5),
++        60, TimeUnit.SECONDS, new LinkedBlockingQueue&lt;Runnable>(), builder.build());
+     this.metrics = new MetricsSink();
+     ...
+   }
+   ...
+   public void replicateEntries(List&lt;WALEntry> entries, final CellScanner cells,
+     ...
+-    hFileReplicator.replicate();
++    hFileReplicator.replicate(replicatorPool);
+     LOG.debug("Finished replicating bulk loaded data.");
+     ...
+   }
+   ...
+   public void stopReplicationSinkServices() {
+     try {
+       ...
++      if (this.replicatorPool != null) {
++        replicatorPool.shutdown();
++      }
+     } catch (IOException e) {
+     ...
+   }
+
++++ org/apache/hadoop/hbase/replication/regionserver/HFileReplicator.java
+   public HFileReplicator(Configuration sourceClusterConf...
+     ...
+     ThreadFactoryBuilder builder = new ThreadFactoryBuilder();
+-    builder.setNameFormat("HFileReplicationCallable-%1$d");
++    builder.setNameFormat("HFileCopier-%1$d");
+     this.exec =
+     ...
+   }
+   ...
+-  public Void replicate() throws IOException {
++  public void replicate(ThreadPoolExecutor pool) throws IOException {
+     // Copy all the hfiles to the local file system
+     Map&lt;String, Path> tableStagingDirsMap = copyHFilesToStagingDir();
++    // do the bulkload async
++    pool.execute(new Runnable() {
++      @Override
++      public void run() {
+         ...
+     });
+   }
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>针对执行失败的导入操作，放弃对staging目录进行清理</para>
+					<para>在原生实现里，无论bulkload执行结果如何都将对staging目录进行清理。但是采用异步导入方式之后，源集群是不等备份集群执行导入操作结束的，一旦执行失败需要对Staging目录中的数据进行存留，以便进行线下手动修复处理。</para>
+					<para>相应的修复补丁如下：</para>
+					<programlisting>
++++ org/apache/hadoop/hbase/replication/regionserver/HFileReplicator.java
+   public void replicate(ThreadPoolExecutor pool) throws IOException {
+     ...
+     Table table = null;
++    boolean success = false;
+     try (RegionLocator locator = connection.getRegionLocator(tableName)) {
+       ...
+       doBulkLoad(loadHFiles, table, queue, locator, maxRetries);
++      success = true;
+     } catch (Throwable e) {
+       ..
+     } finally {
+-      cleanup(stagingDir.toString(), table);
++      String stagingPath = stagingDir.toString();
++      if (!success) { // don't clean staging dir if bulkload failed
++        stagingPath = null;
++      }
++      cleanup(stagingPath, table);
+     }
+					</programlisting>
+				</listitem>
+			</orderedlist>
+		</section>
+		<section>
+			<title>其他修复</title>
+			<orderedlist>
+				<listitem>
+					<para>HLog读取EOF导致ReplicationSourceWorkerThread线程阻塞</para>
+					<para>在启用AsyncWAL策略时触发了该问题，起因是WAL执行sync操作失败导致目标WAL需要回滚，回滚过程中需要对当前WAL进行关闭，但是关闭过程中却发现目标WAL的对应的输入流已经处于BROKEN状态(sync失败导致，具体参考FanOutOneBlockAsyncDFSOutput的failed方法)，导致关闭过程中无法将trailer信息写入到WAL，以至于接下来对WAL执行读取操作时出现EOF异常。EOF异常触发后，ReplicationSourceWorkerThread线程虽然可以对其进行捕获，但是却没有进行相应的bypass处理，导致线程进入了while循环，无法处理接下来的WAL同步逻辑。</para>
+					<para>修复办法主要是捕获EOF异常后进行重试操作，如果重试次数达到一定阈值，则跳过该WAL，继续处理队列中的其它WAL，核心补丁代码逻辑如下：</para>
+					<programlistingco>
+						<programlisting>
++++ org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+           }
+         } catch (IOException ioe) {
+           LOG.warn(peerClusterZnode + " Got: ", ioe);
+-          gotIOE = true;
+-          if (ioe.getCause() instanceof EOFException) {
+-
+-            boolean considerDumping = false;
+-            if (this.replicationQueueInfo.isQueueRecovered()) {
+-              try {
+-                FileStatus stat = fs.getFileStatus(this.currentPath);
+-                if (stat.getLen() == 0) {
+-                  LOG.warn(peerClusterZnode + " Got EOF and the file was empty");
+-                }
+-                considerDumping = true;
+-              } catch (IOException e) {
+-                LOG.warn(peerClusterZnode + " Got while getting file size: ", e);
+-              }
+-            }
+-
+-            if (considerDumping &amp;&amp;
+-                sleepMultiplier == maxRetriesMultiplier &amp;&amp;
+-                processEndOfFile(false)) {
++          if (sleepMultiplier >= 10 &amp;&amp;
++              conf.getBoolean("replication.source.eof.autorecovery", true)) {
++            LOG.warn("Waited too long for this file, skip to next file.");
++            processEndOfFile(false);
++            if (entries.isEmpty()) {
+               continue;
+             }
++          } else {
++            gotIOE = true;
+           }
+         } finally {
+           try {
+						</programlisting>
+					</programlistingco>
+				</listitem>
+				<listitem>
+					<para>ReplicationObserver加载逻辑错误</para>
+					<para>ReplicationObserver协处理器主要作用是拦截HRegion的bulkload写入操作，并将相关的HFile信息保存到znone中进行存储，以便防止目标HFile尚未同步到目标集群之前便被HFileCleaner清理的情况，因此其作用域应该是Region层面的，而不是RegionServer粒度。对此社区以提供相关的补丁进行修复，详细可参考HBASE-21001。</para>
+					<para>另外协处理器针对preCommitStoreFile方法的拦截逻辑也存在一些问题，如果表格没有启用replication特性，则没有必要执行znode的添加逻辑，对应的补丁修改内容如下：</para>
+					<programlisting>
++++ org/apache/hadoop/hbase/replication/regionserver/ReplicationObserver.java
+   public void preCommitStoreFile(final ObserverContext&lt;RegionCoprocessorEnvironment> ctx,
+       final byte[] family, final List&lt;Pair&lt;Path, Path>> pairs) throws IOException {
+     if (pairs == null || pairs.isEmpty() ||
++        env.getRegion().getTableDescriptor().getColumnFamily(family).getScope()
++          != HConstants.REPLICATION_SCOPE_GLOBAL ||
+         !c.getBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY,
+           HConstants.REPLICATION_BULKLOAD_ENABLE_DEFAULT)) {
+					</programlisting>
+				</listitem>
+				<listitem>
+					<para>MOB数据不参与bulkload复制</para>
+					<para>启用MOB特性以后，线下MOB数据同样会周期性的触发整理，整理过程中会产生新的数据文件并以bulkload的方式导入到集群中。如果集群开启了bulkload复制功能，需要阻止该新生成的数据文件同步到目标集群中去，因其内部所存储的MOB元数据信息在目标集群是不对称的。</para>
+					<para>相关的补丁修复如下(需要依赖bulkload循环复制的修复内容)：</para>
+					<programlisting>
++++ org/apache/hadoop/hbase/mob/compactions/PartitionedMobCompactor.java
+   private void bulkloadRefFile(Connection connection, Table table...
+     ...
+     try {
+-      LoadIncrementalHFiles bulkload = new LoadIncrementalHFiles(conf);
++      LoadIncrementalHFiles bulkload = new LoadIncrementalHFiles(conf, true);
+       bulkload.doBulkLoad(bulkloadDirectory, connection.getAdmin(), ...
+     } catch (Exception e) {
+					</programlisting>
+				</listitem>
+			</orderedlist>
+		</section>
+	</section>
+</section>

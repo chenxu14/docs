@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region恢复</title>
+	<para>RegionServer出现宕机以后，其上部署的Region将会被Master重新分配处理，由于在宕机前，某些Region的memStore数据可能还没有做flush操作，因此，需要对这部分数据做还原处理，还原过程通过读取HLog文件来实现。</para>
+	<para>截至到目前为止(1.0版本)，HBase共对外声明了两种Region恢复策略，分别基于LOG_SPLITTING和LOG_REPLAY。其中LOG_REPLAY是从0.98版本起开始引入的新策略，其相对LOG_SPLITTING策略有以下优点(具体可参考HBASE-7006)：</para>
+	<blockquote>
+		<para>(1)省略了创建和读写recovered.edits文件的过程；</para>
+		<para>(2)在Region恢复期间依然可以对其执行写操作。</para>
+	</blockquote>
+	<para>因此，这里主要围绕LOG_REPLAY策略进行描述。</para>
+	<para>HMaster通过监听Zookeeper的/hbase/rs节点可获取到相关RegionServer的宕机事件，从而进行相应的回调处理，处理逻辑是通过ServerShutdownHandler类来封装的，具体细节如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>首先通过元数据信息查找RegionServer，看其之前都部署了哪些Region，并将这些Region标记成recovering状态</para>
+			<para>针对每个待恢复的Region记录，Zookeeper都会创建与之对应的/hbase/recovering-regions/[region]/[failed-regionserver]节点来存储其最后一次执行flush时的sequenceId。这个过程是在Master端来完成的，通过MasterFileSystem的prepareLogReplay方法，由于RegionServer在默认情况下会每隔3秒与Master通信一次(通过hbase.regionserver.msginterval参数来控制)，因此sequenceId信息便可从通信内容中进行获取。</para>
+		</listitem>
+		<listitem>
+			<para>将目标RegionServer上部署的Region进行重新分配处理</para>
+			<para>分配过程依然是在Master端进行的，通过AssignmentManager的assign(List&lt;HRegionInfo>)方法，以round-robin方式将目标Regions分配给其他RegionServer，详细参考Region分配章节。</para>
+		</listitem>
+		<listitem>
+			<para>提交LogReplayHandler，将目标RegionServer上的HLog文件按Region进行分组拆分，并针对每个分组执行LOG_REPLAY操作</para>
+			<para>针对每一个待拆分的HLog，Master都会生成与之对应的SplitLogTask任务，并在Zookeeper中创建/hbase/splitWAL/[hlog]节点来将其存储，节点名称为HLog的存储路径，内容为SplitLogTask对象信息。</para>
+			<para>虽然SplitLogTask在Master端生成，但执行过程却是在RegionServer端，这主要通过Zookeeper来进行协调。每当有/hbase/splitWAL/[hlog]节点生成时，Zookeeper便会通知所有RegionServer节点进行任务抢占，抢占逻辑是通过SplitLogWorker线程来封装的，具体细节如下：</para>
+			<para>首先对目标ZK节点的数据内容进行读取，获取其version信息和SplitLogTask对象信息，然后由SplitLogTask对象判断其是否处于Unassigned状态，如果不是说明该任务已被其他RegionServer抢占；否则将SplitLogTask的状态修改为OWN，并通过Zookeeper的setData(path,data,version)方法来重新设置目标节点的数据内容，如果setData方法在执行过程中发现当前version与目标数据的version不匹配，说明该任务已优先被其他RegionServer抢占，将放弃处理。而抢到任务的RegionServer节点通过开启WALSplitterHandler线程开始对目标HLog进行拆分。</para>
+			<para>WALSplitter线程在实现上是基于生产者-消费者模式来设计的，其对内封装了buffers生产队列来存储所有待恢复的HLog.Entry实体。并对外提供了splitLogFile生产方法，来将目标HLog中符合以下要求的日志记录添加到buffers集合中去：</para>
+			<blockquote><para>HLogKey的logSeqNum属性值 > 其所在Region最后一次执行flush操作时的seqId</para></blockquote>
+			<para>其中，HLogKey所属Region可通过其encodingRegionName属性值来确定，而该Region最后执行flush时的seqId则记录在Zookeeper的/hbase/recovering-regions/[region]/[failed-regionserver]节点中(步骤1中所创建)。</para>
+			<para>buffers集合产生数据之后，WALSplitterHandler线程默认会开启3个子线程来对其数据内容进行消费处理(hbase.regionserver.hlog.splitlog.writer.threads参数控制)，每个子线程充当消费者的角色，通过WriterThread进行封装。</para>
+			<para>buffers集合是通过如下数据结构进行组织的：</para>
+			<blockquote><para>Map&lt;regionName, RegionEntryBuffer></para></blockquote>
+			<para>消费者在消费过程中，会从集合中挑选出数据总量最大的RegionEntryBuffer，并将其传递给LogReplayOutputSink进行处理(通过调用其append方法)，处理逻辑大致如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>将RegionEntryBuffer中的日志记录追加到serverToBufferQueueMap集合中</para>
+					<para>serverToBufferQueueMap集合的存储结构大致如下：servername#tablename --> Queue&lt;Row></para>
+					<para>通过key可定位到目标RegionServer上的目标表格，value为要在目标表格上执行LOG_REPLAY操作的日志数据。</para>
+				</listitem>
+				<listitem>
+					<para>从serverToBufferQueueMap集合中挑选出Row数量最多的记录并进行如下判断：</para>
+					<para>(1)Row个数是否大于hbase.regionserver.wal.logreplay.batch.size参数值；</para>
+					<para>(2)所有Row的总数据量大于hbase.regionserver.hlog.splitlog.buffersize * 0.35</para>
+					<para>如果满足以上任意一项条件，对其执行下个步骤中的操作，否则先将数据缓存在serverToBufferQueueMap集合中，待数据总量达到一定规模时在进行处理。</para>
+				</listitem>
+				<listitem>
+					<para>对上个步骤中过滤成功的数据执行LOG_REPLAY操作</para>
+					<para>通过RPC请求执行远端RSRpcServices服务的replay方法，来将待同步的日志数据传递过去进行数据恢复。</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>配置参数</title>
+		<orderedlist>
+			<listitem>
+				<para>hbase.master.distributed.log.replay</para>
+				<para>是否启用LOG_REPLAY策略，启用前提：hfile.format.version属性值不小于3。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.hlog.split.skip.errors</para>
+				<para>默认值为false，表示如果在HLog读取过程中如果出现了问题，则打印异常信息，并放弃接下来的处理。</para>
+				<para>如果将其属性值设置成true，则出现问题时会进行如下处理：首先打印错误信息，然后将出现问题的HLog文件移动到/hbase/.corrupt目录下，并继续接下来的处理。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.splitlog.report.interval.loglines</para>
+				<para>默认值为1024，表示每处理1024行HLog日志记录时打印一次输出信息。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.regionserver.hlog.splitlog.buffersize</para>
+				<para>默认值为128M，表示每次LOG_REPLAY操作的日志总量应大于128M * 0.35(固定百分比)，或满足hbase.regionserver.wal.logreplay.batch.size参数。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.regionserver.wal.logreplay.batch.size</para>
+				<para>默认值为64，表示每次执行LOG_REPLAY操作时应至少包含64条日志记录，或满足hbase.regionserver.hlog.splitlog.buffersize参数。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.regionserver.hlog.splitlog.writer.threads</para>
+				<para>通过该参数来控制WALSplitter.WriterThread线程的数量。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

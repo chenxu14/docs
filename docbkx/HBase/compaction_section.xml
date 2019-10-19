@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Region整理</title>
+	<para>HBase的整理操作可分为两种：大整理(MajorCompaction)和小整理(MinorCompaction)。小整理主要是将Store中的部分StoreFile文件进行合并从而降低需要检索的文件数量，而大整理要将Store中所有的StoreFile合并成一个，合并文件的同时还会删除逻辑上已经不存在的KeyValue数据。相比较小整理，大整理需要更高的IO使用量，整理期间有可能会降低系统的响应效率，因此其通常是在系统空闲的时候通过手动的方式来执行的，直至StripeCompcation的出现。</para>
+	<section>
+		<title>整理需求</title>
+		<para>HBase的数据整理是在Store层面进行实现的，不同的整理策略声明了不同的判定方法用来判断指定Store是否需要整理。</para>
+		<para>在0.98版本之前主要使用ExploringCompactionPolicy整理策略，其判断Store是否需要整理的方法如下：如果Store中没有参与整理操作的StoreFile文件数量已达到hbase.hstore.compaction.min参数阈值(默认为3，需大于等于2)，则该Store需要整理。</para>
+		<para>而在0.98版本之后由于引入了StripeCompaction(参考Stripe整理章节)，因此整理策略主要采用StripeCompactionPolicy，其判断Store是否需要整理的办法如下(代码逻辑可参考needsCompactions方法)：</para>
+		<para>首先要满足的必要条件是Store中没有StoreFile正在参与整理操作；</para>
+		<para>其次确保当前Store满足以下约束条件之一：</para>
+		<para>(1)Region中含有StoreFile的引用文件(即Reference文件，在执行Region拆分时会生成该文件类型)；</para>
+		<para>(2)L0区域中的StoreFile文件数量大于hbase.store.stripe.compaction.minFilesL0参数值(默认为4)；</para>
+		<para>(3)单个Stripe区间中的StoreFile文件数量大于hbase.store.stripe.compaction.minFiles参数值，该值默认为Math.max(4, hbase.hstore.compaction.min)。</para>
+	</section>
+	<section>
+		<title>整理条件</title>
+		<para>HBase的Region整理操作主要是通过CompactSplitThread线程来触发的，其对内声明了requestCompactionInternal方法用来触发整理操作的执行，当出现以下几种情况时会间接执行该方法。</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>MemStore执行flush操作前，如果Region中含有Store满足以下约束条件(代码参考MemStoreFlusher类的flushRegion方法)：</para>
+				<para>Store中所存储的StoreFile文件数量已达到hbase.hstore.blockingStoreFiles参数值。</para>
+				<para>该情况下的整理优先级是最高的，HBase会优先对其进行整理。</para>
+			</listitem>
+			<listitem><para>MemStore执行flush操作之后，如果Region中有Store已满足整理需求(参考整理需求章节)。</para></listitem>
+			<listitem><para>Region执行合并或拆分以后，目标Region中会含有Reference文件，此时同样会触发整理操作的执行。</para></listitem>
+			<listitem>
+				<para>CompactionChecker线程默认每隔10000秒对RegionSeriver中的所有Region检测一次，看是否有Store满足整理需求。检测周期通过如下方法来计算(单位：毫秒)：</para>
+				<para>hbase.server.compactchecker.interval.multiplier * hbase.server.thread.wakefrequency</para>
+			</listitem>
+			<listitem><para>客户端执行了compact命令，这种情况下的整理优先级只低于第一种情况，HBase会次优先处理。</para></listitem>
+		</itemizedlist>
+		<para>方法在执行时会首先判断指定Region所属的Table是否支持整理操作(COMPACTION_ENABLED属性，默认为true)，如果不支持则直接退出，否则针对每一个待整理的Store开启CompactionRunner线程进行整理，线程在运行期间执行以下操作：</para>
+		<orderedlist>
+			<listitem><para>首先过滤掉Store中TTL已经过期的数据文件，HBase会将这些数据文件从文件系统中移除，并在移除前通知给每一个StoreScanner(通过HStore的notifyChangedReadersObservers方法)；</para></listitem>
+			<listitem>
+				<para>构造CompactionRequest对象用于封装整理请求(代码参考HStore的requestCompaction方法)。</para>
+				<para>CompactionRequest对内声明如下属性信息：</para>
+				<blockquote>
+					<para>- priority：整理优先级，数值越小越优先处理；</para>
+					<para>- isMajor：是否为大整理；</para>
+					<para>- isOffPeak：是否在非运行高峰期间整理(默认不启用OffPeak配置)；</para>
+					<para>- filesToCompact：待整理的StoreFile文件集合。</para>
+				</blockquote>
+				<para>其中filesToCompact集合是通过CompactionPolicy(整理策略)筛选出来的，不同的整理策略会筛选出不同的文件集进行整理。</para>
+				<para>一、如果采用ExploringCompactionPolicy，其筛选策略如下(代码可参考applyCompactionPolicy方法)：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>遍历待整理文件集的每一个子集，当子集满足以下判断条件时，将其加入待比较集合。</para>
+						<para>(1)子集中的文件数量在[hbase.hstore.compaction.min,hbase.hstore.compaction.max]区间内</para>
+						<para>(2)子集中的文件总数据量没有达到hbase.hstore.compaction.max.size参数阈值；</para>
+						<para>(3)子集中的任何一个文件满足以下约束：</para>
+						<blockquote><para>单个文件大小/子集中的其他文件总大小 &lt;= hbase.hstore.compaction.ratio</para></blockquote>
+						<tip>在使用StripeCompaction整理时，也有可能会用到ExploringCompactionPolicy整理策略来判断指定Stripe是否需要整理，这时相关的参数阈值会和上面的有一些出入，但是判断方法没有变化。</tip>
+					</listitem>
+					<listitem>
+						<para>在待比较集合中筛选出最优的子集作为结果返回，子集优先级比较方法如下：</para>
+						<para>(1)看哪个子集中包含更多的StoreFile文件；</para>
+						<para>(2)如果两个子集的StoreFile文件数量相同，比较其总数据量大小，数值越小越优先。</para>
+					</listitem>
+				</itemizedlist>
+				<para>二、而如果采用StripeCompactionPolicy策略，筛选过程会复杂一些，需要考虑以下几种情况(代码逻辑可参考selectCompaction方法)：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>情况1：如果当前Store中有文件正在参与整理操作，需等待已有整理运行结束。</para></listitem>
+					<listitem>
+						<para>情况2：在满足以下任意一项条件时，需选择Store中所有的StoreFile文件进行整理</para>
+						<para>(1)Store中含有Reference文件，这些文件有可能是在Region合并或拆分的时候生成的。</para>
+						<para>(2)Store还没有做Stripe拆分处理，这时所有的StoreFile都存放在L0区，并且L0区域中的StoreFile文件数量已达到hbase.store.stripe.compaction.minFilesL0参数阈值。</para>
+					</listitem>
+					<listitem>
+						<para>情况3：Store已经做了Stripe拆分处理，并且L0区域中的StoreFile文件数量已达到hbase.store.stripe.compaction.minFilesL0参数阈值，筛选如下StoreFile进行整理(代码逻辑参考selectSingleStripeCompaction方法)。</para>
+						<para>(1)首先，将L0区域中的所有文件加入到filesToCompact集合中。</para>
+						<para>(2)然后使用ExploringCompactionPolicy整理策略筛选出符合如下需求的Stripe(代码逻辑参考StripeCompactionPolicy类的selectSimpleCompaction方法)：即整理操作包含目标Stripe中的全部StoreFile文件(忽略minFiles和maxFiles的阈值限制)，并且所有文件的总大小没有超过hbase.hstore.compaction.max.size参数阈值，同时满足"Stripe中单个文件大小 / 其他文件大小 &lt;= hbase.hstore.compaction.ratio"以此来防止单个数据文件过大的情况。</para>
+						<para>(3)对所有符合整理要求的Stripe进行比较，看哪个Stripe最适合做整理操作，比较方法如下：首先，比较Stripe中StoreFile文件的数量，文件数越多越优先；如果两个Stripe的待整理StoreFile文件数相同，比较这些StoreFile的总大小，总数据量越小越优先。</para>
+						<para>(4)获取到最优Stripe之后，将其内部所有StoreFile文件集加入到filesToCompact集合中，从而构造出最终的待整理文件集。</para>
+						<tip>针对该情况所筛选出来的Stripe会对其执行大整理操作，从而删除逻辑上已经不存在的数据。如果没有Stripe符合筛选要求，则只需要对L0区域中的StoreFile文件进行整理即可，而无需对Stripe进行整理。</tip>
+					</listitem>
+					<listitem>
+						<para>情况4：Store已经做了Stripe拆分处理，L0区域中的StoreFile文件数量并没有达到hbase.store.stripe.compaction.minFilesL0参数阈值，并且Stripe中含有过期的数据文件。</para>
+						<para>针对该情况，筛选出数据文件全部过期的Stripe，并将其内部所有的StoreFile文件加入到filesToCompact集合(筛选过程可参考selectExpiredMergeCompaction方法)。</para>
+					</listitem>
+					<listitem>
+						<para>情况5：Store已经做了Stripe拆分处理，L0区域中的StoreFile文件数量并没有达到hbase.store.stripe.compaction.minFilesL0参数阈值，而且Stripe中没有过期的数据文件。</para>
+						<para>(1)采用ExploringCompactionPolicy整理策略依次筛选出每个Stripe中最适合做整理操作的StoreFile集合。</para>
+						<para>(2)对所有Stripe进行比较，看哪个Stripe更适合做整理操作，比较办法如下：首先，比较Stripe中待整理StoreFile的文件数(如果Stripe不满足ExploringCompactionPolicy定义的整理要求，则其待整理文件数为0)，数量越大越优先；如果两个Stripe的待整理StoreFile文件数相同，则比较这些StoreFile文件的总大小，总数据量越小越优先。</para>
+						<para>(3)获取到最优Stripe之后，将其内部待整理的StoreFile文件集加入到filesToCompact集合中返回。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>响应CompactionRequest整理请求，执行整理操作。</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>针对步骤2中的第2种情况执行如下处理：</para>
+						<para>(1)首先计算出在执行大整理操作后，Store将要拆分成Stripe的个数(代码逻辑参考estimateTargetKvs方法)，在满足以下判断条件时：</para>
+						<blockquote><para>totalSize * splitPartCount &lt; splitCount * sizeToSplitAt</para></blockquote>
+						<para>splitCount可以取的最小值便是Store将要拆分成Stripe的数量值(其值不能低于hbase.store.stripe.initialStripeCount，否则按该参数值来处理)。其中totalSize为待整理文件集的数据总量，splitPartCount为hbase.store.stripe.splitPartCount参数值，sizeToSplitAt为hbase.store.stripe.sizeToSplit参数值。</para>
+						<para>(2)确定了Stripe的数量之后，将所有的KeyValue数据按照Stripe的个数来做均匀的拆分处理，并依次将数据写入到每一个Stripe中进行存储(代码逻辑参考SplitStripeCompactionRequest类的execute方法，数据的写入过程主要通过SizeMultiWriter类来实现)，写入数据的同时过滤掉逻辑上已经不存在的数据。</para>
+					</listitem>
+					<listitem>
+						<para>针对步骤2中的第3种情况执行如下处理：</para>
+						<para>如果filesToCompact集合存储了某一Stripe区间中的所有文件，并且这些文件的总数据量大小已达到hbase.store.stripe.sizeToSplit拆分阈值，则不做任何处理(待Stripe拆分完成之后在处理L0区域中的文件)。否则扫描filesToCompact集合中所有的StoreFile文件数据，通过rowKey来判断每个KeyValue需要存储在哪个Stripe区间中，并将其存储(代码逻辑参考BoundaryStripeCompactionRequest类的execute方法，数据写入过程主要通过BoundaryMultiWriter类来实现)。</para>
+					</listitem>
+					<listitem><para>针对步骤2中的第4种情况，将所有过期的StoreFile文件删除，并将这些待整理的Stripe区间合并成一个。</para></listitem>
+					<listitem>
+						<para>针对步骤2中的第5种情况(启用StripeCompcation后大部分都是这种情况)，执行如下处理：</para>
+						<para>如果filesToCompact集合包含了某个Stripe当中的全部StoreFile文件(说明该Stripe中所有的文件都需要整理)，并且这些文件的总数据量大小已经超过hbase.store.stripe.sizeToSplit阈值，则需要对该Stripe进行拆分处理，拆分逻辑同第2种情况的处理办法类似，首先计算出将要拆分的Stripe个数，在将数据均匀写入到每一个Stripe中。差别在于对已删除数据的处理方式不同，只有当L0区域中没有文件时才会过滤掉逻辑上已经不存在的数据。</para>
+						<para>如果数据总量没有达到hbase.store.stripe.sizeToSplit参数阈值，将filesToCompact集合中的StoreFile文件合并成一个。如果filesToCompact集合包含了目标Stripe的全部StoreFile并且L0区域中没有数据，则对该Stripe执行大整理操作，以便删除逻辑上已经不存在的KeyValue数据。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Stripe整理</title>
+		<para>StripeCompaction是从0.98版本起开始引入的新的整理模式，与传统的整理方式相比其主要特点是降低了每次整理操作所需要的磁盘IO，但是增加了整理频率。从而将整个整理过程分散化，以此来提高HBase在整理期间的响应效率。</para>
+		<para>在StripeCompaction出现之前，HBase也曾做过其他方面的尝试来提高整理效率，如HBASE-7630(让HBase支持更多的Region)和HBASE-7519(基于LevelDB的处理模式)，但最终都由于存在一定的局限性而没有实施。而StripeCompaction在处理上整合了两者的优点并修复了各自的缺陷：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>首先，在存储逻辑上将每个Region划分成更小的Mini-Region(每个Mini-Region称之为一个Stripe)</para>
+				<para>整理操作是基于Stripe进行的，从而降低了每次整理操作所涉及的数据总量。</para>
+			</listitem>
+			<listitem>
+				<para>对StoreFile采用分层的方式进行存储</para>
+				<para>如果通过元数据可以确定指定StoreFile的Stripe区间，将其移动到该Stripe区间即可(第二层)，否则将其移动到Leve-0区域(第一层)，表示该StoreFile尚未做Stripe拆分处理。当存储在L0区域中的StoreFile文件达到一定数量时，HBase开始对该区域中的文件做整理操作，将其数据内容分散到不同的Stripe中进行存储。</para>
+			</listitem>
+		</itemizedlist>
+		<para>采用StripeCompcation整理策略之后，很多HBase的其他处理也会级联反生变化，产生变化的操作有：</para>
+		<orderedlist>
+			<listitem>
+				<para>flush操作</para>
+				<para>采用StripeCompcation之后，如果没有启用hbase.store.stripe.compaction.flushToL0功能(默认不启用)，则MemStore在执行flush操作时，会将内存中数据直接分散写入到不同的Stripe中进行存储，而不是持久化到L0区域。</para>
+				<para>flush逻辑是通过StripeStoreFlusher类来实现的，每当执行flush操作时主要是调用该类的flushSnapshot方法，方法逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>首先判断当前Store是否已经做了Stripe的划分处理，如果没有划分，将其划分成指定数量的Stripe(数量通过hbase.store.stripe.initialStripeCount参数来指定)，每个Stripe的边界通过如下方法来确定：</para>
+						<para>(1)首先，将第一个Stripe区间的起始Key和最后一个Stripe区间的结束Key设置为空字节数组；</para>
+						<para>(2)然后将待冲洗的MemStore数据均匀分散到每一个Stripe中进行存储(通过SizeMultiWriter来实现)，比如：MemStore中含有3000条KeyValue数据，系统预定义了3个Stripe，则每个Stripe需存储1000条KeyValue。由于MemStore中的数据在执行flush前是经过排序处理的，所以每个Stripe区间的结束Key便可通过它所存储的最后一条KeyValue来确定。</para>
+						<tip>参数hbase.store.stripe.initialStripeCount的最大值只能为64，如果数量大于64，同样按64个来处理。其次要确保rowKey的排序先后不是按照记录的新增时间来确定的，要保证热点数据能够均匀分散到不同的Stripe中去。</tip>
+					</listitem>
+					<listitem>
+						<para>如果Store已经做了Stripe拆分处理，则在添加KeyValue数据时，需首先判断出其属于哪一个Stripe区间，在将其保存到该Stripe区间中即可(通过BoundaryMultiWriter来实现)</para>
+						<para>StoreFile在生成前，需要将其所属Stripe的区间信息(起始Key和结束Key)保存到FileInfo中进行存储(通过StoreFile.Writer的appendFileInfo方法)，以便下次执行StoreFile加载时可以确定其属于哪一个Stripe。</para>
+						<para>按照传统的flush办法，每个MemStore只会生成一个StoreFile，而基于StripeStoreFlusher会产生多个StoreFile，但是在执行查询时并没有增加要检索的StoreFile文件数量，因为可以先对Stripe进行过滤。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>Region加载</para>
+				<para>RegionServer启动后，如果之前的整理操作采用的是StripeCompcation，则在执行StoreFile加载时需首先确定其属于哪一个Stripe，以便对之前划分好的Stripe进行再现，该判断逻辑是通过StripeStoreFileManager类的loadFiles方法来实现的：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>首先读取文件的FileInfo块，看是否有Stripe相关的记录信息(STRIPE_START_KEY和STRIPE_END_KEY)，如果没有将该StoreFile文件放入L0区域；</para></listitem>
+					<listitem><para>如果文件有Stripe相关的元数据信息判断其是否合法(STRIPE_START_KEY >= STRIPE_END_KEY)，如果不合法同样将其放入L0。否则通过STRIPE_END_KEY来判断其属于哪个Stripe，并将其放入对应的Stripe容器中；</para></listitem>
+					<listitem><para>StoreFile加载结束后，检查Stripe空间是否出现重叠，通过遍历Stripe容器中的每一个StoreFile文件，看其记录的STRIPE_START_KEY与该Stripe的起始Key是否相同，如果不同将其移动到L0区域；</para></listitem>
+					<listitem>
+						<para>检查第一个Stripe的起始Key和最后一个Stripe的结束Key字节长度是否都为0，如果不为0根据上一步的检测情况分别做如下处理：</para>
+						<para>如果Stripe空间出现了重叠，将其内部所有的StoreFile移动到L0区域；</para>
+						<para>否则只需将第一个Stripe的起始Key和最后一个Stripe的结束Key赋值为空字节数组即可。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>配置参数</title>
+		<orderedlist>
+			<listitem>
+				<para>传统整理相关配置</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>hbase.hstore.compaction.min</para>
+						<para>每次执行Store整理至少要包含该数量的StoreFile文件，默认值为3；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.compaction.max</para>
+						<para>每次最多可以对Store中多少个StoreFile进行整理，默认为10；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.compaction.min.size</para>
+						<para>如果待整理数据量小于该阈值则跳过Radio校验；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.compaction.max.size</para>
+						<para>每次整理数据量不能大于该阈值。参数同样适用于Stripe整理，需要注意的是如果该阈值设置的比较低导致，在做Stripe筛选时将不能包含其内部全部的StoreFile文件，这将导致Stripe不能执行大整理操作和拆分操作，因此在启用Stripe整理时通常不设置。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.compaction.ratio</para>
+						<para>对待整理的StoreFile文件集执行Radio检测时会用到该参数，需满足的条件为：单个文件大小/其他文件大小 &lt;= 该参数值，默认值为1.2；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.compaction.ratio.offpeak</para>
+						<para>功能同hbase.hstore.compaction.ratio类似，只不过在HBase运行高峰期间(通过hbase.offpeak.start.hour和hbase.offpeak.end.hour来指定，默认不启用)，可以通过该参数来指定不同的比率，默认值为5；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.thread.compaction.throttle</para>
+						<para>通过该阈值将整理操作进行分类，然后采用不同的线程池来加载；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hregion.majorcompaction</para>
+						<para>majorCompaction执行周期，默认为一周。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.throughput.controller</para>
+						<para>将参数设置成org.apache.hadoop.hbase.regionserver.compactions.PressureAwareCompactionThroughputController来对整理操作进行限流。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>StripeCompcation相关配置</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>hbase.hstore.engine.class</para>
+						<para>如果启用StripeCompcation，将该参数值设置成org.apache.hadoop.hbase.regionserver.StripeStoreEngine；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.hstore.blockingStoreFiles</para>
+						<para>启用StripeCompcation之后，Region中的StoreFile文件数量会增加，因此最好提升该参数值来防止整理操作过于频繁(默认为10，可提高到100)；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.compaction.flushToL0</para>
+						<para>执行flush操作时，是否将新生成的StoreFile保存在L0区域，默认为false。当Stripe数量较多时可考虑开启该配置，防止flush过后产生大量的小文件使整理操作过于频繁。</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.initialStripeCount</para>
+						<para>执行Stripe划分时，通过该参数来指定Stripe初始个数，默认值为1，最大只能为64个，大于64也只能按64个处理；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.sizeToSplit</para>
+						<para>当Stripe大小达到该阈值时，将其进行拆分，默认值通过如下方法来计算：hbase.hregion.memstore.flush.size * hbase.store.stripe.compaction.minFilesL0 * 4 * hbase.store.stripe.splitPartCount；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.splitPartCount</para>
+						<para>每次执行Stripe拆分时，通过该参数来声明Stripe将要拆分成子Stripe的个数，默认值为2；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.compaction.minFilesL0</para>
+						<para>L0区域中的StoreFile文件数量达到该阈值时需要对其进行整理，默认值为4；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.compaction.maxFiles</para>
+						<para>每次最多可以对Stripe中多少个StoreFile进行整理，默认与hbase.hstore.compaction.max参数值相同(10个)；</para>
+					</listitem>
+					<listitem>
+						<para>hbase.store.stripe.compaction.minFiles</para>
+						<para>每次Stripe整理至少要包含该数量的StoreFile文件，默认值为Math.max(4, hbase.hstore.compaction.min)；</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>问题修复</title>
+		<orderedlist>
+			<listitem>
+				<para>启用Stripe整理策略后bulkload操作有可能失败，如果被加载的HFile含有Stripe信息，并且当前Region并没有对应的Stripe。</para>
+				<para>该问题一般发生在跨集群表格迁移的时候，源集群的表格数据distcp到新集群之后，因为该问题无法load到新集群。修复办法主要是在执行bulkload过程中，忽略每个HFile的Stripe维度，直接放入到level0区域，核心的补丁修复逻辑如下：</para>
+				<programlistingco>
+					<programlisting>
++++ org/apache/hadoop/hbase/regionserver/HStore.java
+   private void bulkLoadHFile(StoreFile sf) throws IOException {
+     ...
+     // Append the new storefile into the list
+     this.lock.writeLock().lock();
+     try {
++      sf.setBulkload(true);
+       this.storeEngine.getStoreFileManager().insertNewFiles(Lists.newArrayList(sf));
+     } finally {
+       // We need the lock, as long as we are updating the storeFiles
+
++++ org/apache/hadoop/hbase/regionserver/StoreFile.java
+   private long maxMemstoreTS = -1;
++  private boolean bulkload = false;
+   ...
++  public void setBulkload(boolean bulkload) {
++    this.bulkload = bulkload;
++  }
++
++  public boolean isBulkload() {
++    return bulkload;
++  }
+
++++ org/apache/hadoop/hbase/regionserver/StripeStoreFileManager.java
+  private TreeMap&lt;byte[], StoreFile> processResults() throws IOException {
+    ...
+    for (StoreFile sf : this.results) {
+      byte[] startRow = startOf(sf), endRow = endOf(sf);
+-     if (isInvalid(endRow) || isInvalid(startRow)) {
+-       if (!isFlush) {
++     if (isInvalid(endRow) || isInvalid(startRow) || sf.isBulkload()) {
++       if (sf.isBulkload()) {
++         LOG.warn("bulkload hfiles add to Level0: " + sf.getPath()); 
++       } else if (!isFlush) {
+          LOG.warn("The newly compacted file doesn't have stripes set...
+					</programlisting>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

@@ -1,0 +1,510 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>基于Hadoop开发RPC服务进程</title>
+	<para>hadoop为我们提供了很好的RPC引擎，基于该引擎来声明RPC服务会变得简单、高效。用户只需关注通信协议接口以及信息处理方式，而不用再考虑并发以及安全相关的配置，因为这些功能引擎已经提供。</para>
+	<para>这里所编写的服务demo主要提供以下功能：实时获取当前ActiveNN的通信地址，RPC引擎采用ProtobufRpcEngine，具体实现步骤如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>定义通信协议</para>
+			<para>协议使用protobuf语言进行描述，具体信息如下：</para>
+			<programlistingco>
+			<programlisting>
+option java_package = "org.apache.hadoop.hdfs.protocol.proto"; <co id="co.proto.package" linkends="co.note.proto.package"/>
+option java_outer_classname = "FailoverProviderProtocolProtos"; <co id="co.proto.classname" linkends="co.note.proto.classname"/>
+option java_generic_services = true; 
+option java_generate_equals_and_hash = true; <co id="co.proto.equalandhash" linkends="co.note.proto.equalandhash"/>
+package hadoop.hdfs;
+
+message GetActiveNNRequestProto { <co id="co.proto.msg" linkends="co.note.proto.msg"/>
+}
+
+message GetActiveNNResponseProto {
+    required string activeNN = 1;
+}
+
+service FailoverProviderProtocolService { <co id="co.proto.service" linkends="co.note.proto.service"/>
+    rpc getActiveNN(GetActiveNNRequestProto) returns(GetActiveNNResponseProto); <co id="co.proto.method" linkends="co.note.proto.method"/>
+}
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.proto.package" arearefs="co.proto.package" ><para>通过protobuf编译后的代码使用该包名；</para></callout>
+				<callout id="co.note.proto.classname" arearefs="co.proto.classname" ><para>通过protobuf编译后的代码使用该类名；</para></callout>
+				<callout id="co.note.proto.equalandhash" arearefs="co.proto.equalandhash" ><para>是否生成equals和hashcode方法；</para></callout>
+				<callout id="co.note.proto.msg" arearefs="co.proto.msg" ><para>协议消息通过message关键字来定义；</para></callout>
+				<callout id="co.note.proto.service" arearefs="co.proto.service" ><para>协议服务通过service关键字来定义；</para></callout>
+				<callout id="co.note.proto.method" arearefs="co.proto.method" ><para>服务方法通过rpc关键字来定义。</para></callout>
+			</calloutlist>
+			</programlistingco>
+			<para>通信协议定义好之后使用如下命令进行编译：</para>
+			<para>protoc -I=$SRC_DIR --java_out=$DST_DIR $SRC_DIR/FailoverProviderProtocol.proto</para>
+			<para>编译成功后会生成org.apache.hadoop.hdfs.protocol.proto.FailoverProviderProtocolProtos类，后续服务主要通过它来实现消息传输。</para>
+		</listitem>
+		<listitem>
+			<para>声明通信协议接口(传输协议)</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.protocolPB;
+@KerberosInfo(
+   serverPrincipal = CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY)
+@ProtocolInfo(
+   protocolName = "org.apache.hadoop.hdfs.protocol.FailoverProviderProtocol", <co id="co.proto.name" linkends="co.note.proto.name"/>
+   protocolVersion = 1) <co id="co.proto.version" linkends="co.note.proto.version"/>
+@InterfaceAudience.Public
+@InterfaceStability.Evolving
+public interface FailoverProviderProtocolPB extends BlockingInterface, <co id="co.proto.blockinter" linkends="co.note.proto.blockinter"/>
+   VersionedProtocol{ <co id="co.proto.superinter" linkends="co.note.proto.superinter"/>	
+}					
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.proto.name" arearefs="co.proto.name" ><para>应用协议名称，针对每个应用协议可定义多个传输协议，采用不同的组件实现数据传输的序列化处理(protobuf、avro等)；</para></callout>
+					<callout id="co.note.proto.version" arearefs="co.proto.version" ><para>应用协议版本号，表示该通信协议适用于应用协议的哪个版本(会和应用协议的versionID字段进行匹配)；</para></callout>
+					<callout id="co.note.proto.blockinter" arearefs="co.proto.blockinter" ><para>BlockingInterface接口由protobuf编译器生成，对外声明了getActiveNN方法；</para></callout>
+					<callout id="co.note.proto.superinter" arearefs="co.proto.superinter" ><para>hadoop中所有通信协议接口全部继承至VersionedProtocol。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>声明应用协议接口</para>
+			<para>应用协议接口名称要与通信协议中的protocolName属性相同，定义如下：</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.protocol;
+@KerberosInfo(
+   serverPrincipal = CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_USER_NAME_KEY)
+@InterfaceAudience.Public
+@InterfaceStability.Evolving
+public interface FailoverProviderProtocol {
+
+   public static final long versionID = 1L; <co id="co.appproto.version" linkends="co.note.appproto.version"/>
+
+   @Idempotent
+   public String getActiveNN() throws IOException, AccessControlException; <co id="co.appproto.getActiveNN" linkends="co.note.appproto.getActiveNN"/>
+
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.appproto.version" arearefs="co.appproto.version" ><para>应用协议版本，通信协议在调用的时候会进行版本匹配；</para></callout>
+					<callout id="co.note.appproto.getActiveNN" arearefs="co.appproto.getActiveNN" ><para>getActiveNN方法返回当前ActiveNN的通信地址。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>实现通信协议</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.protocolPB;
+public class FailoverProviderProtocolServerSideTranslatorPB implements
+      FailoverProviderProtocolPB {
+   private final FailoverProviderProtocol server;
+
+   public FailoverProviderProtocolServerSideTranslatorPB(
+         FailoverProviderProtocol server) {
+      this.server = server;
+   }
+
+   @Override
+   public GetActiveNNResponseProto getActiveNN(RpcController controller,
+         GetActiveNNRequestProto request) throws ServiceException {
+      try {
+         String activeNN = server.getActiveNN(); <co id="co.proto.impl.getActivNN" linkends="co.note.proto.impl.getActivNN"/>
+         GetActiveNNResponseProto response = GetActiveNNResponseProto
+            .newBuilder().setActiveNN(activeNN).build();
+         return response;
+      } catch (IOException e) {
+         throw new ServiceException(e);
+      }
+   }
+
+   @Override
+   public long getProtocolVersion(String protocol, long clientVersion) <co id="co.proto.impl.version" linkends="co.note.proto.impl.version"/>
+         throws IOException {
+      return RPC.getProtocolVersion(FailoverProviderProtocolPB.class);
+   }
+
+   @Override
+   public ProtocolSignature getProtocolSignature(String protocol, <co id="co.proto.impl.sign" linkends="co.note.proto.impl.sign"/>
+         long clientVersion, int clientMethodsHash) throws IOException {
+      if (!protocol.equals(RPC.getProtocolName(FailoverProviderProtocolPB.class))) {
+         throw new IOException("Serverside implements "
+            + RPC.getProtocolName(FailoverProviderProtocolPB.class)
+            + ". The following requested protocol is unknown: "+ protocol);
+      }
+
+      return ProtocolSignature.getProtocolSignature(clientMethodsHash,
+            RPC.getProtocolVersion(FailoverProviderProtocolPB.class),
+            FailoverProviderProtocolPB.class);
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.proto.impl.getActivNN" arearefs="co.proto.impl.getActivNN" ><para>通过应用协议的getActiveNN方法获取当前ActiveNN的通信地址，然后序列化到response中进行返回；</para></callout>
+					<callout id="co.note.proto.impl.version" arearefs="co.proto.impl.version" ><para>获取通信协议声明的版本号；</para></callout>
+					<callout id="co.note.proto.impl.sign" arearefs="co.proto.impl.sign" ><para>获取协议的签名信息。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>实现应用协议服务端组件(构造Server实现)</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.protocol;
+@InterfaceAudience.LimitedPrivate("HDFS")
+@InterfaceStability.Evolving
+public class FailoverProviderRPCServer implements FailoverProviderProtocol {
+   private final FailoverProvider failoverProvider;
+   private Server server;
+
+   public FailoverProviderRPCServer(Configuration conf,
+         InetSocketAddress bindAddr, FailoverProvider failoverProvider,
+         PolicyProvider policy) throws IOException {
+      this.failoverProvider = failoverProvider;
+      RPC.setProtocolEngine(conf, FailoverProviderProtocolPB.class,
+            ProtobufRpcEngine.class); <co id="co.appproto.impl.engine" linkends="co.note.appproto.impl.engine"/>
+      FailoverProviderProtocolServerSideTranslatorPB translator = 
+            new FailoverProviderProtocolServerSideTranslatorPB(this); <co id="co.appproto.impl.pb" linkends="co.note.appproto.impl.pb"/>
+      BlockingService service = FailoverProviderProtocolService
+            .newReflectiveBlockingService(translator);
+      int handlerCount = conf.getInt("dfs.failoverprovider.handler.count", 10); 
+      this.server = new RPC.Builder(conf) <co id="co.appproto.impl.server" linkends="co.note.appproto.impl.server"/>
+            .setProtocol(FailoverProviderProtocolPB.class) <co id="co.appproto.impl.protocol" linkends="co.note.appproto.impl.protocol"/>
+            .setInstance(service) <co id="co.appproto.impl.instance" linkends="co.note.appproto.impl.instance"/>
+            .setBindAddress(bindAddr.getHostName()) <co id="co.appproto.impl.address" linkends="co.note.appproto.impl.address"/>
+            .setPort(bindAddr.getPort()) <co id="co.appproto.impl.port" linkends="co.note.appproto.impl.port"/>
+            .setNumHandlers(handlerCount) <co id="co.appproto.impl.handlers" linkends="co.note.appproto.impl.handlers"/>
+            .setVerbose(false) <co id="co.appproto.impl.verbose" linkends="co.note.appproto.impl.verbose"/>
+            .build();
+      if (conf.getBoolean(
+            CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, false)) {
+            server.refreshServiceAcl(conf, policy); <co id="co.appproto.impl.acl" linkends="co.note.appproto.impl.acl"/>
+      }
+   }
+
+   @Override
+   public String getActiveNN() throws IOException, AccessControlException {
+      return failoverProvider.getActiveNN(); <co id="co.appproto.impl.provider" linkends="co.note.appproto.impl.provider"/>
+   }
+
+   public void start() {
+      this.server.start();
+   }
+
+   public InetSocketAddress getAddress() {
+      return server.getListenerAddress();
+   }
+
+   public void stopAndJoin() throws InterruptedException{
+      this.server.join();
+      this.server.stop();
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.appproto.impl.engine" arearefs="co.appproto.impl.engine"><para>声明使用ProtobufRpcEngine作为该通信协议的引擎；</para></callout>
+					<callout id="co.note.appproto.impl.pb" arearefs="co.appproto.impl.pb"><para>实例化通信协议，并通过其来构建BlockingService(protobuf服务)；</para></callout>
+					<callout id="co.note.appproto.impl.server" arearefs="co.appproto.impl.server"><para>通过RPC.Builder来构建服务端组件；</para></callout>
+					<callout id="co.note.appproto.impl.protocol" arearefs="co.appproto.impl.protocol"><para>通过该方法设置通信协议；</para></callout>
+					<callout id="co.note.appproto.impl.instance" arearefs="co.appproto.impl.instance"><para>方法参数为BlockingService实例；</para></callout>
+					<callout id="co.note.appproto.impl.address" arearefs="co.appproto.impl.address"><para>设置服务绑定的机器IP；</para></callout>
+					<callout id="co.note.appproto.impl.port" arearefs="co.appproto.impl.port"><para>设置服务绑定的端口号；</para></callout>
+					<callout id="co.note.appproto.impl.handlers" arearefs="co.appproto.impl.handlers"><para>设置处理服务请求的线程数；</para></callout>
+					<callout id="co.note.appproto.impl.verbose" arearefs="co.appproto.impl.verbose"><para>是否启用调试功能(记录访问日志)；</para></callout>
+					<callout id="co.note.appproto.impl.acl" arearefs="co.appproto.impl.verbose"><para>刷新服务的访问控制列表(通过hadoop-policy.xml设置)；</para></callout>
+					<callout id="co.note.appproto.impl.provider" arearefs="co.appproto.impl.provider"><para>服务的业务实现部分是通过FailoverProvider类来完成的(详细参考服务主体)。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>实现应用协议客户端组件</para>
+			<para>客户端组件的主要作用是使用已有通信协议的代理服务，将请求序列化传递至Server端进行处理，并等待服务端的结果返回，具体实现如下：</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.protocolPB;
+public class FailoverProviderProtocolClientSideTranslatorPB implements
+      FailoverProviderProtocol, Closeable, ProtocolTranslator {
+
+   private final FailoverProviderProtocolPB rpcProxy;
+
+   public FailoverProviderProtocolClientSideTranslatorPB(
+         InetSocketAddress addr, Configuration conf,
+         SocketFactory socketFactory, int timeout) throws IOException {
+      RPC.setProtocolEngine(conf, FailoverProviderProtocolPB.class,
+            ProtobufRpcEngine.class); <co id="co.appproto.client.engine" linkends="co.note.appproto.client.engine"/>
+      rpcProxy = RPC.getProxy(FailoverProviderProtocolPB.class, <co id="co.appproto.client.proxy" linkends="co.note.appproto.client.proxy"/>
+            RPC.getProtocolVersion(FailoverProviderProtocolPB.class), addr,
+            UserGroupInformation.getCurrentUser(), conf, socketFactory,
+            timeout);
+   }
+
+   @Override
+   public Object getUnderlyingProxyObject() {
+      return rpcProxy;
+   }
+
+   @Override
+   public void close() throws IOException {
+      RPC.stopProxy(rpcProxy);
+   }
+
+   @Override
+   public String getActiveNN() throws IOException, AccessControlException { <co id="co.appproto.client.getActive" linkends="co.note.appproto.client.getActive"/>
+      try {
+         GetActiveNNRequestProto request = GetActiveNNRequestProto
+            .getDefaultInstance();
+         GetActiveNNResponseProto response = rpcProxy.getActiveNN(null, request);
+         return response.getActiveNN();
+      } catch (ServiceException e) {
+         throw ProtobufHelper.getRemoteException(e);
+      }
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.appproto.client.engine" arearefs="co.appproto.client.engine"><para>声明ProtobufRpcEngine作为通信协议引擎；</para></callout>
+					<callout id="co.note.appproto.client.proxy" arearefs="co.appproto.client.proxy"><para>通过RPC的getProxy方法获取指定通信协议的代理服务；</para></callout>
+					<callout id="co.note.appproto.client.getActive" arearefs="co.appproto.client.getActive"><para>通过代理通信协议将请求序列化传递至Server端进行处理并等待服务端的信息返回。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>服务主体</para>
+			<para>服务主体主要实现了ActiveNN的获取逻辑(通过监控zookeeper数据节点)，同时还启动了应用协议的服务端组件供客户端程序进行访问连接。</para>
+			<programlistingco>
+				<programlisting>
+package org.apache.hadoop.hdfs.tools;
+public class FailoverProvider implements Watcher,StatCallback{
+   private Configuration conf;
+   private FailoverProviderRPCServer rpcServer;
+   private String fatalError = null;
+   private ZooKeeper zkClient;
+   private String znode;
+   private String activeNN = null;
+   private String nsId;
+   static final Log LOG = LogFactory.getLog(FailoverProvider.class);
+
+   public FailoverProvider(Configuration conf) {
+      this.conf = DFSHAAdmin.addSecurityConfiguration(conf);
+      this.nsId = DFSUtil.getNamenodeNameServiceId(this.conf);
+   }
+
+   private void initRPC() throws IOException{
+      String host = InetAddress.getLocalHost().getHostAddress();
+      String[] hosts = conf.getStrings("dfs.failover.provider.host", 
+          "127.0.0.1:8018");
+      InetSocketAddress bindAddr = null;
+      for(String h:hosts){
+         if(h.startsWith(host)){
+            bindAddr = NetUtils.createSocketAddr(h);
+            break;
+         }
+      }
+      if(bindAddr == null){
+         int port = conf.getInt("dfs.failover.provider.port", 8018);
+         bindAddr = NetUtils.createSocketAddr(host,port);
+      }
+      rpcServer = new FailoverProviderRPCServer(conf, bindAddr, this, 
+         new HDFSPolicyProvider());
+      rpcServer.start();
+   }
+
+   private void mainLoop() throws InterruptedException {
+      while (fatalError == null) {
+         wait();
+      }
+      assert fatalError != null;
+      throw new RuntimeException("Failover Provider failed: " + fatalError);
+   }
+
+   public void run(){
+      try {
+         initZookeeper(); <co id="co.app.initzk" linkends="co.note.app.initzk"/>
+         initRPC(); <co id="co.app.initrpc" linkends="co.note.app.initrpc"/>
+         mainLoop(); <co id="co.app.mainloop" linkends="co.note.app.mainloop"/>
+      } catch (IOException e) {
+         e.printStackTrace();
+      } catch (InterruptedException e) {
+         e.printStackTrace();
+      } finally{
+         try {
+            rpcServer.stopAndJoin();
+            zkClient.close();
+         } catch (InterruptedException e) {
+            e.printStackTrace();
+         }
+      }
+   }
+
+   private void initZookeeper() throws IOException {
+      String zkConn = conf.get(ZKFailoverController.ZK_QUORUM_KEY);
+      int sessionTimeout = conf.getInt("ha.zookeeper.session-timeout.ms", 5 * 1000);
+      zkClient = new ZooKeeper(zkConn, sessionTimeout, this);
+      String znode = conf.get("ha.zookeeper.parent-znode", "/hadoop-ha");
+      if (!znode.endsWith("/")) {
+         znode += "/";
+      }
+      znode = znode + nsId + "/ActiveStandbyElectorLock";
+      this.znode = znode;
+      zkClient.exists(znode, true, this, null);
+   }
+
+   public synchronized String getActiveNN(){
+      if(activeNN == null){
+         LOG.info("ActiveNN is null, fetch it...");
+         fetchZNode();
+         LOG.info("fetch success, ActiveNN is :" + activeNN);
+      }
+      return activeNN;
+   }
+   private void fetchZNode(){ <co id="co.app.fetch" linkends="co.note.app.fetch"/>
+      try {
+         byte[] data = zkClient.getData(znode, false, new Stat());
+         ActiveNodeInfo proto = ActiveNodeInfo.parseFrom(data);
+         activeNN = proto.getHostname() + ":" + proto.getPort();
+      } catch (KeeperException e) {
+         e.printStackTrace();
+      } catch (InterruptedException e) {
+         e.printStackTrace();
+      } catch (InvalidProtocolBufferException e) {
+         e.printStackTrace();
+      }
+   }
+   @Override
+   public void processResult(int rc, String path, Object ctx, Stat stat) { <co id="co.app.state" linkends="co.note.app.state"/>
+      switch (rc) {
+      case 0:
+         fetchZNode();
+         break;
+      default:
+         return;
+      }
+   }
+   
+   @Override
+   public void process(WatchedEvent event) { <co id="co.app.watcher" linkends="co.note.app.watcher"/>
+      String path = event.getPath();
+      if (path != null &amp;&amp; path.equals(znode)) {
+         zkClient.exists(znode, true, this, null);
+      }
+   }
+
+   public static void main(String[] args) {
+      FailoverProvider failoverProvider = new FailoverProvider(new HdfsConfiguration());
+      failoverProvider.run();
+   }
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.app.initzk" arearefs="co.app.initzk" ><para>初始化zookeeper连接，监控active锁文件的状态，以此来获取哪一台节点是ActiveNN；</para></callout>
+					<callout id="co.note.app.initrpc" arearefs="co.app.initrpc" ><para>初始化启动应用协议服务端组件供客户端程序进行连接；</para></callout>
+					<callout id="co.note.app.mainloop" arearefs="co.app.mainloop" ><para>所有服务初始化完成之后进入循环等待状态，确保进程持续对外提供服务；</para></callout>
+					<callout id="co.note.app.fetch" arearefs="co.app.fetch" ><para>读取zookeeper数据节点，获取ActiveNN信息；</para></callout>
+					<callout id="co.note.app.watcher" arearefs="co.app.watcher" ><para>通过实现zookeeper的Watcher接口来得到数据节点的事件反馈；</para></callout>
+					<callout id="co.note.app.state" arearefs="co.app.state" ><para>通过实现StatCallback接口来得到数据节点的状态变化反馈。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+		<listitem>
+			<para>启动服务</para>
+			<para>hadoop中，很多服务进程的启动都是通过hdfs脚本来实现的，可向该脚本中添加如下语句来完成FailoverProvider服务的启动：</para>
+			<programlisting>
+    elif [ "$COMMAND" = "failoverprovider" ] ; then
+       CLASS='org.apache.hadoop.hdfs.tools.FailoverProvider'
+       HADOOP_OPTS="$HADOOP_OPTS $HADOOP_FAILOVER_PROVIDER_OPTS"
+			</programlisting>
+			<para>同时，向hadoop-daemon.sh文件中添加如下语句：</para>
+			<programlisting>
+    case $command in
+       namenode|secondarynamenode|datanode|journalnode|dfs|dfsadmin|fsck|balancer|zkfc|
+       failoverprovider)
+			</programlisting>
+			<para>这时便可通过hadoop-daemon.sh start failoverprovider命令来启动该服务。</para>
+			<para>另外，还可通过修改start-dfs.sh和stop-dfs.sh脚本，让该服务同其他服务进程一块启动/停止。</para>
+			<programlisting>
+start-dfs.sh脚本追加如下语句：
+    FAILOVER_PROVIDER_HOSTS=$($HADOOP_PREFIX/bin/hdfs getconf 
+       -confKey dfs.failover.provider.host)
+    FAILOVER_PROVIDER_NODES=$(echo "$FAILOVER_PROVIDER_HOSTS" | 
+       sed 's/,/ /g; s/:[0-9]*//g')
+    echo "Starting FailoverProvider nodes [$FAILOVER_PROVIDER_NODES]"
+    "$HADOOP_PREFIX/sbin/hadoop-daemons.sh" \
+       --config "$HADOOP_CONF_DIR" \
+       --hostnames "$FAILOVER_PROVIDER_NODES" \
+       --script "$bin/hdfs" start failoverprovider
+				
+stop-dfs.sh脚本追加如下语句：
+    FAILOVER_PROVIDER_HOSTS=$($HADOOP_PREFIX/bin/hdfs getconf 
+       -confKey dfs.failover.provider.host)
+    FAILOVER_PROVIDER_NODES=$(echo "$FAILOVER_PROVIDER_HOSTS" | 
+       sed 's/,/ /g; s/:[0-9]*//g')
+    echo "Stopping FailoverProvider nodes [$FAILOVER_PROVIDER_NODES]"
+    "$HADOOP_PREFIX/sbin/hadoop-daemons.sh" \
+       --config "$HADOOP_CONF_DIR" \
+       --hostnames "$FAILOVER_PROVIDER_NODES" \
+       --script "$bin/hdfs" stop failoverprovider
+			</programlisting>
+		</listitem>
+		<listitem>
+			<para>为服务启用acl认证功能</para>
+			<para>由服务主体代码可以看到，在构建FailoverProviderRPCServer时使用的安全策略是HDFSPolicyProvider，该策略对外声明了以下应用协议的安全认证服务，包括ZKFCProtocol、ClientProtocol、DatanodeProtocol等。可通过修改该类来为FailoverProvider引入安全认证功能：</para>
+			<programlisting>
+public class HDFSPolicyProvider extends PolicyProvider {
+   private static final Service[] hdfsServices = new Service[] {
+    ...
+    new Service(CommonConfigurationKeys.SECURITY_ZKFC_PROTOCOL_ACL, 
+       ZKFCProtocol.class),
+    new Service("security.failoverprovider.protocol.acl", 
+       FailoverProviderProtocol.class),    
+    ...
+   };
+   ...
+}				
+
+同时在hadoop-policy.xml文件中追加如下配置项：
+&lt;configuration>
+   ...
+   &lt;property>
+      &lt;name>security.failoverprovider.protocol.acl&lt;/name>
+      &lt;value>admin&lt;/value>
+   &lt;/property>
+   ...
+&lt;/configuration>
+自此，只有admin用户具备权限访问该服务。
+			</programlisting>
+		</listitem>
+		<listitem>
+			<para>服务配置明细</para>
+			<para>服务配置在hdfs-site.xml文件中进行声明，具体的配置项如下：</para>
+			<programlistingco>
+				<programlisting>
+&lt;property>
+   &lt;name>dfs.failover.provider.host&lt;/name> <co id="co.proto.conf.host" linkends="co.note.proto.conf.host"/>
+   &lt;value>host1:8018,host2:8018,host3:8018&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>dfs.failover.provider.port&lt;/name> <co id="co.proto.conf.port" linkends="co.note.proto.conf.port"/>
+   &lt;value>8018&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>dfs.failover.provider.timeout&lt;/name> <co id="co.proto.conf.timeout" linkends="co.note.proto.conf.timeout"/>
+   &lt;value>5000&lt;/value>
+&lt;/property>
+&lt;property>
+   &lt;name>dfs.failoverprovider.handler.count&lt;/name> <co id="co.proto.conf.handler" linkends="co.note.proto.conf.handler"/>
+   &lt;value>10&lt;/value>
+&lt;/property>
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.proto.conf.host" arearefs="co.proto.conf.host" ><para>服务通信地址，可配置多个以防止单点故障的出现；</para></callout>
+					<callout id="co.note.proto.conf.port" arearefs="co.proto.conf.port" ><para>服务通信端口，默认为8018；</para></callout>
+					<callout id="co.note.proto.conf.timeout" arearefs="co.proto.conf.timeout" ><para>服务连接访问超时时间；</para></callout>
+					<callout id="co.note.proto.conf.handler" arearefs="co.proto.conf.handler" ><para>Server端处理服务请求的线程数，默认为10。</para></callout>
+				</calloutlist>
+			</programlistingco>
+		</listitem>
+	</orderedlist>
+</section>

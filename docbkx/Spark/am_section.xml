@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>ApplicationMaster组件</title>
+	<para>ApplicationMaster组件是通过org.apache.spark.deploy.yarn.ApplicationMaster类来实现的，该类作为Spark应用的宿主程序负责向YARN环境申请Container计算资源，同时还可充当DriverProgram角色用来管理SparkContext上下文对象。</para>
+	<para>组件启动后，会依次执行如下处理：</para>
+	<orderedlist>
+		<listitem>
+			<para>初始化准备操作</para>
+			<para>(1)设置spark.local.dir属性值为${yarn.nodemanager.local-dirs}；</para>
+			<para>(2)设置spark.ui.port属性值为0；</para>
+			<para>(3)初始化AMRMClient服务，通过其内部封装的ApplicationMasterService代理服务来实现AM注册和Container计算资源申请；</para>
+		</listitem>
+		<listitem>
+			<para>加载App应用程序</para>
+			<para>App应用程序的加载是通过开启单独的线程(userThread)来实现的，加载过程中会初始化SparkContext对象，通过它来执行与RDD相关的动作，对象初始化成功后会对Main线程进行通知以便其进行后续处理。</para>
+			<para>userThread线程的运行需要依赖于Container计算资源，因此在SparkContext成功初始化之后该线程至少会休眠1秒以此来等待Container的出现，线程关系如图所示：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" scalefit="1" fileref="../media/spark/thread.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+		</listitem>
+		<listitem>
+			<para>申请Container计算资源</para>
+			<para>Container计算资源的申请要等到SparkContext初始化结束之后才能进行，为此Spark对外声明了spark.yarn.applicationMaster.waitTries配置参数用来表示等待次数，默认等待10次，每次等待10秒，如果100秒之后SparkContext依然没有成功初始化，则放弃等待，造成的影响是对Container的申请没法满足资源本地性(Node_local)的需求。</para>
+			<para>同MapReduce应用类似，Container计算资源的申请也是在AM与RM之间不断的心跳通信过程中来实现的，AM端主要是构建ResourceRequest对象，然后通过RPC服务将资源申请注入到Yarn资源调度器中进行处理。在AM端，这部分逻辑是通过YarnAllocationHandler类来封装的，其对外声明了两个核心方法，分别为：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>addResourceRequests(int n)，构造指定数量的资源申请</para>
+					<para>由于Spark对YARN资源的申请是粗粒度的(即Container不是按需使用随时申请，而需要指定申请数量，待指定数量的Container全部申请下来之后在对这些Container进行循环使用)所以需要通过方法参数来指定要申请Container的个数。</para>
+					<para>同MapReduce应用一样，针对每一个要申请的Container，AM端要构建3种类型的资源申请(NodeLocal、RackLocal和OffSwith)，调度器端会优先匹配NodeLocal形式的申请，其次是RackLocal和OffSwith，一旦其中一种申请得到满足便会取消其他形式的申请(参考资源调度器)。</para>
+					<para>有关NodeLocal和RackLocal形式的资源申请主要是参照preferredNodeLocationData这个Map来构建的，其作为SparkContext的构造参数数据存储结构如下：</para>
+					<blockquote><para>Map&lt;hostname, Set&lt;SplitInfo>></para></blockquote>
+					<para>在SparkContext初始化成功之后，preferredNodeLocationData变量便会注入到YarnAllocationHandler服务里，因此在申请Container之前需要等待SparkContext初始化结束，否则只能构建OffSwitch类型的资源申请，而不能满足资源本地性的需求。</para>
+					<tip>
+						<para>preferredNodeLocationData的计算可通过org.apache.spark.scheduler.InputFormatInfo类的computePreferredLocations方法来实现，具体的构造逻辑可参考org.apache.spark.examples.SparkHdfsLR类。</para>
+						<para>另外所申请的Container数量最好等于SplitInfo的个数，以便充分满足资源本地性的需求。</para>
+					</tip>
+				</listitem>
+				<listitem>
+					<para>allocateResources，获取申请结果</para>
+					<para>ApplicationMaster组件会每隔0.1秒调用一次该方法来获取调度器端的Container分配情况，直到已申请的Container数量达到使用需求为止。</para>
+					<para>方法在执行过程中主要通过ApplicationMasterService代理服务的allocate方法向RM申请Container计算资源，RM端处理完毕后会发送如下响应信息供AM执行回调处理：</para>
+					<para>(1)新申请到的Container资源</para>
+					<para>针对每一个新申请到的Container资源，AM端会开启ExecutorRunnable线程来执行该Container的加载操作，加载逻辑是通过使用NMClient服务来封装的(参考ExecutorRunnable线程)。</para>
+					<para>(2)RM端运行结束的Container信息</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>任务调度处理</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>ExecutorRunnable线程</title>
+		<para>ExecutorRunnable线程用于实现Container加载操作，加载逻辑是通过调用NMClient服务来实现的，服务内部间接使用了ContainerManagementProtocol代理服务，将Container的加载请求发送到NM端进行处理。</para>
+		<para>在发送Container加载请求之前，AM端需要构建出该Container的运行环境，环境信息是通过ContainerLaunchContext对象来封装的，具体包括：</para>
+		<orderedlist>
+			<listitem>
+				<para>Container运行所需要的资源</para>
+				<para>主要是存在于DistributeCache中的文件，包括：spark-assembly*.jar、封装APP应用的jar包、log4j配置文件等。</para>
+			</listitem>
+			<listitem>
+				<para>Container启动所需要的环境变量信息</para>
+				<para>ExcutorContainer与AMContainer的启动环境变量类似，只是CLASSPATH的变量值略有不同，两类Container都为自己声明了相关的属性来引入额外的CLASSPATH信息，AMContainer是spark.driver.extraClassPath属性，而ExcutorContainer是spark.executor.extraClassPath属性，除此之外还可通过SPARK_YARN_USER_ENV变量为所有的Container引入相同的CLASSPATH信息，如SPARK_YARN_USER_ENV="CLASSPATH=/foo/bar"，则/foo/bar会追加到每一个Container的CLASSPATH下。</para>
+			</listitem>
+			<listitem>
+				<para>Container的启动命令</para>
+				<programlistingco>
+					<programlisting>
+$JAVA_HOME/bin/java -server -XX:OnOutOfMemoryError='kill %p' 
+-Xms1024m -Xmx1024m <co id="co.spark.executor.memory" linkends="co.note.spark.executor.memory"/>
+-XX:+UseConcMarkSweepGC -XX:+CMSIncrementalMode -XX:+CMSIncrementalPacing <co id="co.spark.executor.opt" linkends="co.note.spark.executor.opt"/>
+  -XX:CMSIncrementalDutyCycleMin=0 -XX:CMSIncrementalDutyCycle=10 
+-Djava.io.tmpdir=$PWD/tmp <co id="co.spark.executor.tmp" linkends="co.note.spark.executor.tmp"/>
+-Dlog4j.configuration=log4j.properties <co id="co.spark.executor.log4j" linkends="co.note.spark.executor.log4j"/>
+org.apache.spark.executor.CoarseGrainedExecutorBackend <co id="co.spark.executor.class" linkends="co.note.spark.executor.class"/>
+akka.tcp://spark@&lt;master-host>:&lt;port>/user/CoarseGrainedScheduler <co id="co.spark.executor.master" linkends="co.note.spark.executor.master"/>
+1 <co id="co.spark.executor.id" linkends="co.note.spark.executor.id"/>
+&lt;executor-host> <co id="co.spark.executor.host" linkends="co.note.spark.executor.host"/>
+1 <co id="co.spark.executor.cores" linkends="co.note.spark.executor.cores"/>
+1>${LOG_DIR}/${appId}/${containerId}/stdout
+2>${LOG_DIR}/${appId}/${containerId}/stderr
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.spark.executor.memory" arearefs="co.spark.executor.memory" ><para>Executor的堆内存大小，通过spark.executor.memory指定，或部署时通过--executor-memory参数指定；</para></callout>
+						<callout id="co.note.spark.executor.opt" arearefs="co.spark.executor.opt" ><para>Executor的jvm启动参数，通过spark.executor.extraJavaOptions来指定；</para></callout>
+						<callout id="co.note.spark.executor.tmp" arearefs="co.spark.executor.tmp" ><para>Container临时目录，默认在Container的工作目录下；</para></callout>
+						<callout id="co.note.spark.executor.log4j" arearefs="co.spark.executor.log4j" ><para>log4j配置文件通过SPARK_LOG4J_CONF环境变量来指定；</para></callout>
+						<callout id="co.note.spark.executor.class" arearefs="co.spark.executor.class" ><para>通过该类加载启动Executor；</para></callout>
+						<callout id="co.note.spark.executor.master" arearefs="co.spark.executor.master" ><para>与ApplicationMaster的通讯地址；</para></callout>
+						<callout id="co.note.spark.executor.id" arearefs="co.spark.executor.id" ><para>Executor唯一标识；</para></callout>
+						<callout id="co.note.spark.executor.host" arearefs="co.spark.executor.host" ><para>Executor所在机器的hostName；</para></callout>
+						<callout id="co.note.spark.executor.cores" arearefs="co.spark.executor.cores" ><para>Executor所用cpu个数。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

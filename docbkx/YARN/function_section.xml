@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>事件串联</title>
+	<section>
+		<title>AM Container分配</title>
+		<para>分配事件流程如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/scheduler-event.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>参与该功能实现的服务包括：</para>
+		<orderedlist>
+			<listitem>
+				<para>作业提交</para>
+				<para>客户端通过ApplicationClientProtocol代理服务向RM提交作业。</para>
+			</listitem>
+			<listitem>
+				<para>开启RMApp状态机实例</para>
+				<para>作业提交后，RM端会通过RMAppManager服务来响应客户端的提交申请，响应过程主要是开启RMApp状态机实例并触发START事件使其做相应处理。</para>
+			</listitem>
+			<listitem>
+				<para>RMApp状态保存</para>	
+				<para>RMApp状态机实例开启后，首先调用RMStateStore的storeApplication方法将RMApp的状态进行保存以便容灾恢复。</para>
+			</listitem>
+			<listitem>
+				<para>开启RMAppAttempt状态机实例</para>
+				<para>RMApp的部署可能需要经过多次尝试才会成功，针对每次尝试使用RMAppAttempt状态机实例进行封装。</para>	
+			</listitem>
+			<listitem>
+				<para>构造ResourceRequest用于申请AMContainer</para>
+				<para>RMAppAttempt状态机实例开启后开始构造ResourceRequest用于申请加载AM的Container，对象的构造过程是通过触发APP_ADDED事件来实现的(详细参考资源调度器)。</para>
+			</listitem>
+			<listitem>
+				<para>ResourceRequest注册</para>
+				<para>ResourceRequest对象构建成功后需要注入到调度器中进行处理，注册过程是通过触发APP_ACCEPTED事件来实现的，事件触发后相应的回调函数会通过YarnScheduler的allocate方法将ResourceRequest进行注册。</para>
+			</listitem>
+			<listitem>
+				<para>响应ResourceRequest申请来完成Container分配</para>
+				<para>Container是在RM与NM不断的心跳通信过程中来完成分配处理的，心跳逻辑通过NodeStatusUpdater服务开启(参考NodeStatusUpdater服务)，每次心跳都会触发NODE_UPDATE事件，调度器接受到事件以后开始响应ResourceRequest申请来完成Container的分配处理(参考资源调度器)。</para>
+			</listitem>
+			<listitem>
+				<para>RMAppAttempt状态保存</para>
+				<para>Container成功申请后会触发START事件使RMContainer状态机做相应处理，事件回调函数中会接连触发CONTAINER_ALLOCATED事件将RMAppAttempt状态机实例进行保存(通过RMStateStore的storeApplicationAttempt方法)以便容灾恢复。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>AM Container加载</title>
+		<para>AMContainer的加载是通过触发LAUNCH事件来实现的(RMAppAttempt成功保存后触发该事件)，事件触发后ApplicationMasterLauncher服务会开启相应的AMLauncher线程，线程在运行期间会调用ContainerManager服务的startContainers方法将Container进行启动(参考ContainerManager服务)，启动细节大致如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>Application初始化</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/app_lanch_1.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>初始化操作是通过触发INIT_APPLICATION事件来实现的，当执行ContainerManager服务的startContainers方法时，方法会首先判断要启动的Container所属Application是否成功初始化，如果没有则触发该事件，事件触发后首先通知LogHandler做好日志准备工作(参考LogHandler服务)，然后注册LocalResourcesTracker用来跟踪PRIVATE资源和APPLICATION资源的获取情况(参考ResourceLocalizationService服务)。</para>
+			</listitem>
+			<listitem>
+				<para>AMContainer初始化及加载</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/app_lanch_2.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>Application初始化成功后开始执行AMContainer的初始化操作，该操作是通过触发INIT_CONTAINER事件来实现的，针对每一个要启动的Container，ContainerManager服务在执行过程中都会触发该事件，事件触发后首先通知辅助服务做好相应的准备工作(参考辅助服务)，然后触发INIT_CONTAINER_RESOURCES事件，开始从HDFS下载Container运行所需要的资源(job.xml、封装job的jar包以及输入源切片等信息)，下载逻辑是通过ResourceLocalizationService服务封装的(参考ResourceLocalizationService服务)。</para>
+					</listitem>
+					<listitem>
+						<para>Container运行所需要的资源下载成功后开始对其执行加载操作，加载逻辑是通过触发LAUNCH_CONTAINER事件来实现的，事件触发后ContainersLauncher服务会做好相应的回调处理来完成Container加载(参考ContainersLauncher服务)。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>App终止事件流</title>
+		<orderedlist>
+			<listitem>
+				<para>首先将RMApp状态机实例从RMStateStore中进行移除，整个过程是通过执行ApplicationMasterService服务的finishApplicationMaster方法来触发的，具体的事件流程如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/stop-app1.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem><para>在NM端，ApplicationMaster服务以RPC的方式远程调用ApplicationMasterService的finishApplicationMaster方法，向RM端告知AM已处理完成；</para></listitem>
+					<listitem><para>在RM端，通过一连串的事件传递，最后由RMApp状态机触发APP_REMOVED事件，将自己从RMStateStore中进行移除。</para></listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>其次，对App执行RM端清理，具体事件流程如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/stop-app2.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem><para>当ApplicationMaster执行System.exit()方法退出时，会触发CONTAINER_EXITED_WITH_SUCCESS事件，执行对AMContainer的清理操作(参考ContainersLauncher服务)，清理结束后将自身标记为COMPLETE状态，在通过心跳通信逻辑传递至RM端进行处理；</para></listitem>
+					<listitem><para>RM端收到心跳响应信息之后，首先通过containerId来定位该AMContainer对应的RMContainer对象，然后通过其触发CONTAINER_FINISHED事件，使AppAttempt状态机做相应处理；</para></listitem>
+					<listitem>
+						<para>AppAttempt状态机主要做两方面处理：</para>
+						<blockquote>
+							<para>(1)首先触发ATTEMPT_FINISHED事件，将RMApp切换成FINISHED状态；</para>
+							<para>(2)然后触发APP_REMOVED事件，对App所占用的资源进行回收。</para>
+						</blockquote>
+						<para>以上事件处理完毕后，会分别将要清理的App和Container信息传递至RMNode状态机实例，等到下次心跳通信时再将这些信息传递至NM端进行处理。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>最后，对App执行NM端清理，具体事件流程如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/yarn/stop-app3.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<itemizedlist make='bullet'>
+					<listitem><para>在RM端，RMNode状态机记录了所有待清理的App与Container集合，每次心跳会传递至NM端进行处理(参考NodeStatusUpdater服务)；</para></listitem>
+					<listitem><para>NM收到这些信息后，针对每一个要清理的Container会触发KILL_CONTAINER事件来杀死该Container进程(通过ContainersLauncher服务来实现)，同时会接着触发CLEANUP_CONTAINER_RESOURCES事件对Container运行所依赖的文件资源进行清理(通过ResourceLocalizationService服务来实现)，待清理工作完成之后在通知LogHandler与辅助服务做最后的收尾；</para></listitem>
+					<listitem><para>除此之外针对每一个待清理的App，NodeStatusUpdater服务还会触发FINISH_APPLICATION事件来使Application状态机进行相应的处理，处理过程中如果该App还有未运行结束的Container，则触发KILL_CONTAINER事件对其进行杀死，否则触发DESTROY_APPLICATION_RESOURCES事件来清理App运行所依赖的资源(文件、辅助服务等)。</para></listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

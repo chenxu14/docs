@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Java API应用</title>
+	<orderedlist>
+		<listitem>
+			<para>Configuration</para>
+			<para>在使用Java API时，Client端需要知道HBase的配置环境，如存储地址，zookeeper等信息。这些信息通过Configuration对象来封装，可通过如下代码构建该对象：</para>
+			<blockquote>
+				<para>Configuration config=HBaseConfiguration.create();</para>
+			</blockquote>
+			<para>在调用HBaseConfiguration.create()方法时，HBase首先会在classpath下查找hbase-site.xml文件，将里面的信息解析出来封装到Configuration对象中，如果hbase-site.xml文件不存在，则使用默认的hbase-core.xml文件。</para>
+			<para>除了将hbase-site.xml放到classpath下，开发人员还可通过config.set(name, value)方法来手工构建Configuration对象：</para>
+			<blockquote>
+				<para>Configuration.set(String name, String value);</para>
+			</blockquote>
+		</listitem>
+		<listitem>
+			<para>HBaseAdmin</para>
+			<para>HBaseAdmin用于创建数据库表格，并管理表格的元数据信息，通过如下方法构建：</para>
+			<blockquote>
+				<para>HBaseAdmin admin=new HBaseAdmin(config);</para>
+			</blockquote>
+			<para>常用方法如列表所示：</para>
+			<table frame='all'>
+				<title>HBaseAdmin常用方法</title>
+				<tgroup cols='2' align='left' colsep='1' rowsep='1'>
+					<colspec colname='c1' colwidth="20em"/>
+					<colspec colname='c2'/>
+					<thead>
+						<row>
+							<entry>方法名</entry>
+							<entry>方法描述</entry>
+						</row>
+					</thead>
+					<tbody>
+						<row>
+							<entry>addColumn(tableName,column)</entry>
+							<entry>为表格添加栏位</entry>
+						</row>
+						<row>
+							<entry>deleteColumn(tableName,column)</entry>
+							<entry>删除指定栏位</entry>
+						</row>
+						<row>
+							<entry>balanceSwitch(boolean)</entry>
+							<entry>是否启用负载均衡</entry>
+						</row>
+						<row>
+							<entry>createTable(HTableDescriptor desc)</entry>
+							<entry>创建表格</entry>
+						</row>
+						<row>
+							<entry>deleteTable(tableName)</entry>
+							<entry>删除表格</entry>
+						</row>
+						<row>
+							<entry>tableExists(tableName)</entry>
+							<entry>判断表格是否存在</entry>
+						</row>
+					</tbody>
+				</tgroup>
+			</table>
+			<example>
+				<title>创建表格</title>
+				<programlistingco>
+					<programlisting>
+HBaseAdmin admin=new HBaseAdmin(config);
+If(!admin.tableExists(“test”)){
+    HTableDescriptor tableDesc=new HTableDescriptor(“test”);<co id="co.table.name" linkends="co.note.table.name"/>
+    HColumnDescriptor cf=new HColumnDescriptor(“cf”);
+    tableDesc.addFamily(cf);<co id="co.table.cf" linkends="co.note.table.cf"/>
+    admin.createTable(tableDesc);
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.table.name" arearefs="co.table.name" ><para>指定表格名称为test。</para></callout>
+						<callout id="co.note.table.cf" arearefs="co.table.cf" ><para>为表格创建ColumnFamily，名称为cf。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</example>
+		</listitem>
+		<listitem>
+			<para>HTable</para>
+			<para>在HBase中，HTable封装表格对象，对表格的增删改查操作主要通过它来完成，构造方法如下：</para>
+			<blockquote><para>HTable table=new HTable(config,tableName);</para></blockquote>
+			<para>在构建多个HTable对象时，HBase推荐所有的HTable使用同一个Configuration。这样，HTable之间便可共享HConnection对象、zookeeper信息以及Region地址的缓存信息。</para>
+			<example>
+				<title>Get操作</title>
+				<programlisting>
+Get get=new Get(rowKey);
+Result res=table.get(get);
+				</programlisting>
+			</example>
+			<example>
+				<title>Put操作</title>
+				<programlisting>
+Put put=new Put(rowKey);
+put.add(columnFamily,column,value);
+table.put(put);
+注：在HBase中，实体的新增和更新都是通过Put操作来实现。
+				</programlisting>
+			</example>
+			<example>
+				<title>Delete操作</title>
+				<programlisting>
+Delete delete=new Delete();
+table.delete(delete);
+				</programlisting>
+			</example>
+			<example>
+				<title>Scan操作</title>
+				<programlistingco>
+					<programlisting>
+Scan scan=new Scan( );  
+scan.addColumn(columnFamily,column);<co id="co.scan.column" linkends="co.note.scan.column"/>
+scan.setReversed(false); <co id="co.scan.reversed" linkends="co.note.scan.reversed"/>
+scan.setBatch(10); <co id="co.scan.batch" linkends="co.note.scan.batch"/>
+scan.setIsolationLevel(IsolationLevel.READ_COMMITTED); <co id="co.scan.isolation" linkends="co.note.scan.isolation"/>
+scan.setRaw(false); <co id="co.scan.raw" linkends="co.note.scan.raw"/>
+scan.setSmall(true); <co id="co.scan.small" linkends="co.note.scan.small"/>
+SingleColumnValueFilter filter=new SingleColumnValueFilter(  
+        columnFamily,column,<co id="co.scan.column.filter" linkends="co.note.scan.column.filter"/>  
+        CompareOp.EQUAL,value<co id="co.scan.column.condition" linkends="co.note.scan.column.condition"/>  
+);
+scan.setFilter(filter);<co id="co.scan.filter" linkends="co.note.scan.filter"/>  
+ResultScanner scanner=table.getScanner(scan);<co id="co.scan.scaner" linkends="co.note.scan.scaner"/>
+Iterator&lt;Result> res=scanner.iterator( );<co id="co.scan.iterator" linkends="co.note.scan.iterator"/>
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.scan.column" arearefs="co.scan.column" ><para>指定查询要返回的column。</para></callout>
+						<callout id="co.note.scan.reversed" arearefs="co.scan.reversed"><para>是否为倒叙查询，可用于获取最后一条记录。</para></callout>
+						<callout id="co.note.scan.batch" arearefs="co.scan.batch"><para>每次执行ResultScanner.next()返回多少条记录。</para></callout>
+						<callout id="co.note.scan.isolation" arearefs="co.scan.isolation"><para>设置隔离级别，如果参数值为READ_UNCOMMITTED表示未提交的数据也一并读取，此时违背了读一致性(具体参考读写一致性章节)。</para></callout>
+						<callout id="co.note.scan.raw" arearefs="co.scan.raw"><para>是否返回已经被删除的记录。</para></callout>
+						<callout id="co.note.scan.small" arearefs="co.scan.small"><para>通常情况下，如果要检索的数据只存在于一个Block中，认为其是smallScan，这时将采用pread方式查询，而不是seek+read。</para></callout>
+						<callout id="co.note.scan.column.filter" arearefs="co.scan.column.filter" ><para>指定要过滤的column。</para></callout>
+						<callout id="co.note.scan.column.condition" arearefs="co.scan.column.condition" ><para>指定过滤条件。</para></callout>
+						<callout id="co.note.scan.filter" arearefs="co.scan.filter" ><para>为查询指定过滤器。</para></callout>
+						<callout id="co.note.scan.scaner" arearefs="co.scan.scaner" ><para>执行扫描查找。</para></callout>
+						<callout id="co.note.scan.iterator" arearefs="co.scan.iterator" ><para>返回查询遍历器。</para></callout>
+				</calloutlist>
+				</programlistingco>
+			</example>
+			<para>注：更多的过滤器信息请查看org.apache.hadoop.hbase.filter包。</para>
+			<example>
+				<title>遍历Result结果集</title>
+				<programlistingco>
+					<programlisting>
+NavigableMap&lt;byte[], NavigableMap&lt;byte[], NavigableMap&lt;Long, byte[]>>> maps = res.getMap();
+for(byte[] family:maps.keySet()){ <co id="co.result.cf" linkends="co.note.result.cf"/>
+    System.out.println("columnFamily:"+new String(family));
+    for(byte[] column:maps.get(family).keySet()){ <co id="co.result.column" linkends="co.note.result.column"/>
+        System.out.print("column:"+new String(column)+"; ");
+        for(Long time:maps.get(family).get(column).keySet()){ <co id="co.result.value" linkends="co.note.result.value"/>
+            System.out.println("value:"+new String(maps.get(family).get(column).get(time)));
+        }
+    }
+}
+					</programlisting>
+					<calloutlist>
+						<callout id="co.note.result.cf" arearefs="co.result.cf" ><para>结果集用Map封装，最外层的key为columnFamily；</para></callout>
+						<callout id="co.note.result.column" arearefs="co.result.column" ><para>第二层key为column；</para></callout>
+						<callout id="co.note.result.value" arearefs="co.result.value" ><para>第三层key为时间戳信息，value为column值。</para></callout>
+					</calloutlist>
+				</programlistingco>
+			</example>
+		</listitem>
+	</orderedlist>
+</section>

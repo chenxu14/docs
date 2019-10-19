@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>HFile存储格式</title>
+	<para>HFile是参照谷歌的SSTable存储格式进行设计的，所有的数据记录都是通过它来完成持久化，其内部主要采用分块的方式进行存储，如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/hfile-v2-architecture.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>每个HFile内部包含多种不同类型的块结构，这些块结构从逻辑上来讲可归并为两类，分别用于数据存储和数据索引(简称数据块和索引块)，其中数据块包括：</para>
+	<blockquote>
+		<para>(1) DATA_BLOCK：存储表格数据</para>
+		<para>(2) BLOOM_CHUNK：存储布隆过滤器的位数组信息</para>
+		<para>(3) META_BLOCK：存储元数据信息</para>
+		<para>(4) FILE_INFO：存储HFile文件信息</para>
+	</blockquote>
+	<para>索引块包括：</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>表格数据索引块(ROOT_INDEX、INTERMEDIATE_INDEX、LEAF_INDEX)</para>
+			<para>在早期的HFile版本中(version-1)，表格数据是采用单层索引结构进行存储的，这样当数据量上升到一定规模时，索引数据便会消耗大量内存，导致的结果是Region加载效率低下(A region is not considered opened until all of its block index data is loaded)。</para>
+			<para>因此在version-2版本中，索引数据采用多层结构进行存储，加载HFile时只将根索引(ROOT_INDEX)数据载入内存，中间索引(INTERMEDIATE_INDEX)和叶子索引(LEAF_INDEX)在读取数据时按需加载，从而提高了Region的加载效率。</para>
+		</listitem>
+		<listitem>
+			<para>元数据索引块(META_INDEX)</para>
+			<para>新版本的元数据索引依然是单层结构，通过它来获取元数据块信息。</para>
+		</listitem>
+		<listitem>
+			<para>布隆索引信息块(BLOOM_META)</para>
+			<para>通过索引信息来遍历要检索的数据记录是通过哪一个BLOOM_CHUNK进行映射处理的。</para>
+		</listitem>
+	</itemizedlist>
+	<para>从存储的角度来看，这些数据块会划分到不同的区域进行存储。</para>
+	<orderedlist>
+		<listitem>
+			<para>Trailer区域</para>
+			<para>该区域位于文件的最底部，HFile主要通过它来实现相关数据的定位功能，因此需要最先加载，其数据内容是采用protobuf进行序列化处理的，protocol声明如下：</para>
+			<programlistingco>
+				<programlisting>
+message FileTrailerProto {
+    optional uint64 file_info_offset = 1; <co id="co.hfile.info" linkends="co.note.hfile.info"/>
+    optional uint64 load_on_open_data_offset = 2; <co id="co.hfile.rootIndex" linkends="co.note.hfile.rootIndex"/>
+    optional uint64 uncompressed_data_index_size = 3; <co id="co.hfile.indexSize" linkends="co.note.hfile.indexSize"/>
+    optional uint64 total_uncompressed_bytes = 4; <co id="co.hfile.totalBytes" linkends="co.note.hfile.totalBytes"/>
+    optional uint32 data_index_count = 5; <co id="co.hfile.indexCount" linkends="co.note.hfile.indexCount"/>
+    optional uint32 meta_index_count = 6; <co id="co.hfile.metaCount" linkends="co.note.hfile.metaCount"/>
+    optional uint64 entry_count = 7; <co id="co.hfile.entryCount" linkends="co.note.hfile.entryCount"/>
+    optional uint32 num_data_index_levels = 8; <co id="co.hfile.indexLevel" linkends="co.note.hfile.indexLevel"/>
+    optional uint64 first_data_block_offset = 9; <co id="co.hfile.offserFirst" linkends="co.note.hfile.offserFirst"/>
+    optional uint64 last_data_block_offset = 10; <co id="co.hfile.offserLast" linkends="co.note.hfile.offserLast"/>
+    optional string comparator_class_name = 11; <co id="co.hfile.comparator" linkends="co.note.hfile.comparator"/>
+    optional uint32 compression_codec = 12; <co id="co.hfile.codec" linkends="co.note.hfile.codec"/>
+    optional bytes encryption_key = 13; <co id="co.hfile.encryption" linkends="co.note.hfile.encryption"/>
+}
+				</programlisting>
+				<calloutlist>
+					<callout id="co.note.hfile.info" arearefs="co.hfile.info"><para>FileInfo数据块在HFile中的偏移量信息；</para></callout>
+					<callout id="co.note.hfile.rootIndex" arearefs="co.hfile.rootIndex"><para>Load-on-open区域在HFile中的偏移量信息；</para></callout>
+					<callout id="co.note.hfile.indexSize" arearefs="co.hfile.indexSize"><para>所有表格索引块在压缩前的总大小；</para></callout>
+					<callout id="co.note.hfile.totalBytes" arearefs="co.hfile.totalBytes"><para>所有表格数据块在压缩前的总大小；</para></callout>
+					<callout id="co.note.hfile.indexCount" arearefs="co.hfile.indexCount"><para>根索引块中包含的索引实体个数；</para></callout>
+					<callout id="co.note.hfile.metaCount" arearefs="co.hfile.metaCount"><para>元数据索引块中包含的索引实体个数；</para></callout>
+					<callout id="co.note.hfile.entryCount" arearefs="co.hfile.entryCount"><para>文件所包含的KeyValue总数；</para></callout>
+					<callout id="co.note.hfile.indexLevel" arearefs="co.hfile.indexLevel"><para>表格数据的索引层级数；</para></callout>
+					<callout id="co.note.hfile.offserFirst" arearefs="co.hfile.offserFirst"><para>第一个表格数据块在HFile中的偏移量信息；</para></callout>
+					<callout id="co.note.hfile.offserLast" arearefs="co.hfile.offserLast"><para>最后一个表格数据块在HFile中的偏移量信息；</para></callout>
+					<callout id="co.note.hfile.comparator" arearefs="co.hfile.comparator"><para>KeyValue的排序比较类；</para></callout>
+					<callout id="co.note.hfile.codec" arearefs="co.hfile.codec"><para>表格采用的数据压缩算法；</para></callout>
+					<callout id="co.note.hfile.encryption" arearefs="co.hfile.encryption"><para>HFile加密密钥。</para></callout>
+				</calloutlist>
+			</programlistingco>
+			<para>在代码层面上Trailer是通过FixedFileTrailer类来封装的，可通过其readFromStream方法用来读取指定HFile的Trailer信息。</para>
+		</listitem>
+		<listitem>
+			<para>Load-on-open区域</para>
+			<para>HFile被加载之后，位于该区域中的数据将会被载入内存，该区域的起始位置通过Trailer来定位(通过其load_on_open_data_offset属性)。从该位置起依次保存的数据信息为：根索引快、元数据索引块、文件信息块以及布隆索引块。</para>
+		</listitem>
+		<listitem>
+			<para>Scanned-Block区域</para>
+			<para>在执行HFile顺序扫描时，位于该区域中的所有块信息都需要被加载，包括：表格数据块、布隆数据块和叶子索引块(后两者称之为InlineBlock)。</para>
+		</listitem>
+		<listitem>
+			<para>Non-Scanned-Block区域</para>
+			<para>在执行HFile顺序扫描时，位于该区域中的存储块可不被加载，包括：元数据块和中间索引块。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>Block块结构</title>
+		<para>每个Block块是由3部分信息组成的，分别是：header信息、data信息以及用于data校验的checksum信息。不同类型的block只是在data信息的存储结构上存在差异，而header信息和checksum信息存储结构基本一致。</para>
+		<orderedlist>
+			<listitem>
+				<para>header主要用于存储每个Block块的元数据信息</para>
+				<para>这些信息包括：</para>
+				<para>(1)blockType：块类型，HFile一共对外声明了10种不同类型的Block，分别是：DATA(表格数据块)、META(元数据块)、BLOOM_CHUNK(布隆数据块)、FILE_INFO(文件信息块)、TRAILER、LEAF_INDEX(叶子索引块)、INTERMEDIATE_INDEX(中间索引块)、ROOT_INDEX(根索引快)、BLOOM_META(布隆索引块)、和META_INDEX(元数据索引块)；</para>
+				<para>(2)onDiskSizeWithoutHeader：data信息与checksum信息所占用的磁盘空间大小；</para>
+				<para>(3)onDiskDataSizeWithHeader：data信息与header信息所占用的磁盘空间大小；</para>
+				<para>(4)uncompressedSizeWithoutHeader：每个block块在完成解压缩之后的大小(不包括header和checksum占用的空间)；</para>
+				<para>(5)prevBlockOffset：距离上一个同类型block块的存储偏移量大小。</para>
+				<para>在v2版本中，header的长度为固定的33字节。</para>
+			</listitem>
+			<listitem>
+				<para>data主要用于封装每个block块的核心数据内容</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果是根索引块其数据内容如下：</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/hfile-rootIndex.png"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>主要包含多条索引实体信息(索引实体的个数记录在Trailer中)以及midKey相关信息，其中每条索引实体信息是由3部分数据组成的，分别为：</para>
+						<para>(1)Offset：索引指向的Block块在文件中的偏移量位置；</para>
+						<para>(2)DataSize：索引指向的Block块所占用的磁盘空间大小(在HFile中的长度)；</para>
+						<para>(3)Key：如果索引指向的是表格数据块(DATA_BLOCK)，该值为目标数据块中第一条数据记录的key值(0.95版本之前是这样的，之后的版本参考HBASE-7845)；如果索引指向的是其他索引块，该值为目标索引块中第一条索引实体的blockKey值。</para>
+						<para>而midKey信息主要用于定位HFile的中间位置，以便于对该HFile执行split拆分处理，其数据内容同样由3部分信息组成，分别为：</para>
+						<para>(1)midLeafBlockOffset：midKey所属叶子索引块在HFile中的偏移量位置；</para>
+						<para>(2)midLeafBlockOnDiskSize：midKey所属叶子索引块的大小(在HFile中的长度)；</para>
+						<para>(3)midKeyEntry：midKey在其所属索引块中的偏移量位置。</para>
+					</listitem>
+					<listitem>
+						<para>如果是非根索引块其数据内容如下：</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="85%" scalefit="1" fileref="../media/hbase/hfile-noRootIndex.png"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>同样包含多条索引实体信息，但不包含midKey信息。除此之外还包含了索引实体的数量信息以及每条索引实体相对于首个索引实体的偏移量位置。</para>
+					</listitem>
+					<listitem>
+						<para>如果是表格数据块其数据内容为多条KeyValue记录，每条KeyValue的存储结构可参考Memstore组件实现章节。</para>
+					</listitem>
+					<listitem><para>如果是元数据索引块其数据内容同叶子索引块类似，只不过索引实体引向的是META数据块。</para></listitem>
+					<listitem><para>如果是布隆数据块其数据内容为布隆过滤器的位数组信息。</para></listitem>
+					<listitem>
+						<para>如果是布隆索引块其数据内容如下：</para>
+						<mediaobject>
+							<imageobject>
+								<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/hfile-bloomIndex.png"></imagedata>
+							</imageobject>
+						</mediaobject>
+						<para>同其他索引块类似，包含多条索引实体信息，每条索引实体引向布隆数据块(BLOOM_CHUNK)。除此之外还包含与布隆过滤器相关的元数据信息，包括：</para>
+						<para>(1)version：布隆过滤器版本，在新版本HBase中布隆过滤器通过CompoundBloomFilter类来实现，其对应的版本号为3；</para>
+						<para>(2)totalByteSize：所有布隆数据块占用的磁盘空间总大小；</para>
+						<para>(3)hashCount：元素映射过程中所使用的hash函数个数；</para>
+						<para>(4)hashType：元素映射过程中所采用的hash函数类型(通过hbase.hash.type属性进行声明)；</para>
+						<para>(5)totalKeyCount：所有布隆数据块中已映射的元素数量；</para>
+						<para>(6)totalMaxKeys：在满足指定误报率的情况下(默认为百分之一)，所有布隆数据块能够映射的元素总量；</para>
+						<para>(7)numChunks：目前已有布隆数据块的数量；</para>
+						<para>(8)comparator：所映射元素的排序比较类，默认为org.apache.hadoop.hbase.KeyValue.RawBytesComparator</para>
+					</listitem>
+					<listitem>
+						<para>如果是文件信息块其数据内容采用protobuf进行序列化，相关protocol声明如下：</para>
+						<programlisting>
+message FileInfoProto {
+    repeated BytesBytesPair map_entry = 1; // Map of name/values
+}
+						</programlisting>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>checksum信息用于校验data数据是否正确</para>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>块信息读取</title>
+			<para>数据块的读取操作主要是通过FSReader类的readBlockData方法来实现的，在执行数据读取操作之前，需要首先知道目标数据块在HFile中的偏移量位置，有一些数据块的偏移量信息是可通过Trailer进行定位的，如：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>根索引块(ROOT_INDEX)的偏移量信息可通过Trailer的load_on_open_data_offset属性来定位，在知道了根索引块的存储信息之后，便可通过它来定位所有DATA_BLOCK在HFile中的偏移量位置；</para></listitem>
+				<listitem><para>首个DATA_BLOCK的偏移量信息可通过Trailer的first_data_block_offset属性来定位。</para></listitem>
+			</itemizedlist>
+			<para>在不知道目标数据块大小的情况下需要对HFile执行两次查询才能读取到最终想要的HFileBlock数据。第一次查询主要是为了读取目标Block的header信息，由于header具有固定的长度(HFileV2版本为33字节)，因此在知道目标Block的偏移量之后，便可通过读取指定长度的数据来将header获取。</para>
+			<para>获取到header之后便可通过其onDiskSizeWithoutHeader属性来得知目标数据块的总大小。</para>
+			<blockquote><para>totalSize = headerSize + onDiskSizeWithoutHeader</para></blockquote>
+			<para>然后再次从Block的偏移量处读取长度为totalSize字节的数据，以此来构造完整的HFileBlock实体。</para>
+			<para>由以上逻辑来看，如果在读取数据块之前，能够事先知道该数据块的大小，那么便可省去header的查询过程，从而有效降低IO次数。为此，HBase采用的做法是在读取指定Block数据的同时，将下一个Block的header也一并读取出来(通过读取totalSize + headerSize长度的数据)，并通过ThreadLocal将该header进行缓存。这样如果当前线程所访问的数据是通过两个连续的Block进行存储的，那么针对第二个Block的访问只需执行一次IO即可。</para>
+			<para>获取到HFileBlock实体之后，可通过其getByteStream方法来获取内部数据的输入流信息，在根据不同的块类型来选择相应的API进行信息读取：</para>
+			<para>(1)如果block为根索引块，其信息内容可通过BlockIndexReader进行读取，通过其readMultiLevelIndexRoot方法；</para>
+			<para>(2)如果为元数据索引块，同样采用BlockIndexReader进行读取，通过其readRootIndex方法；</para>
+			<para>(3)如果为非根索引块，可通过BlockIndexReader的locateNonRootIndexEntry方法来将数据指针定位到目标block的索引位置上，从而对目标block的偏移量、大小进行读取；</para>
+			<para>(4)如果为文件信息块，通过FileInfo类的read方法进行读取；</para>
+			<para>(5)如果为布隆索引块，通过HFile.Reader实体的getGeneralBloomFilterMetadata方法进行读取；</para>
+			<para>(6)如果为布隆数据块，通过该HFileBlock实体的getBufferWithoutHeader方法来获取布隆数据块的位数组信息(参考CompoundBloomFilter类的实现)。</para>
+		</section>
+		<section>
+			<title>块数据生成</title>
+			<para>Block数据在写入HFile之前是暂存于内存中的，通过字节数组进行存储，当其数据量大小达到指定阀值之后，在开始向HFile进行写入。写入成功后，需要再次开启一个全新的Block来接收新的数据记录，该逻辑通过HFileBlock.Writer类的startWriting方法来封装，方法执行后，会首先开启ByteArrayOutputStream输出流实例，然后在将其包装成DataOutputStream对象，用于向目标字节数组写入要添加的Block实体信息。</para>
+			<para>在HFile.Writer内部，不同类型的数据块是通过不同的Writer进行写入的，其内部封装了3种不同类型的子Writer(这些Writer共用一个FSDataOutputStream用于向HFile写入Block数据)，分别如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>HFileBlock.Writer</para>
+					<para>通过该Writer完成表格数据块(DataBlock)向HFile的写入逻辑，大致流程如下：</para>
+					<para>每当执行HFile.Writer类的append方法进行添加数据时，会检测当前DataBlock的大小是否已经超过目标阀值，如果没有，直接将数据写入DataBlock，否则需要进行如下处理：</para>
+					<orderedlist>
+						<listitem>
+							<para>将当前DataBlock持久化写入HFile</para>
+							<para>写入之前需要首先生成目标数据块的header和checksum信息，其中checksum信息可通过ChecksumUtil的generateChecksums方法进行获取，而header信息可通过putHeader方法来生成。</para>
+						</listitem>
+						<listitem>
+							<para>生成当前DataBlock的索引信息</para>
+							<para>索引信息是由索引key，数据块在HFile中的偏移量位置和数据块的总大小3部分信息组成的，其中索引key可通过CellComparator.getMidpoint方法进行获取，方法会试图返回一条数据记录能够满足如下约束条件：</para>
+							<para>(1)索引key在排序上大于上一个DataBlock的最后一条记录；</para>
+							<para>(2)索引key在排序上小于当前DataBlock的第一条记录；</para>
+							<para>(3)索引key的size是最小的。</para>
+							<para>经过这样处理之后能够整体降低索引块的数据量大小，从而节省了内存空间的使用，并提高了加载效率。</para>
+						</listitem>
+						<listitem>
+							<para>将索引信息写入索引块</para>
+							<para>通过HFileBlockIndex.BlockIndexWriter的addEntry方法。</para>
+						</listitem>
+						<listitem>
+							<para>判断是否有必要将InlineBlock进行持久化</para>
+							<para>InlineBlock包括叶子索引块和布隆数据块，它们的持久化逻辑分别通过BlockIndexWriter和CompoundBloomFilterWriter来完成。</para>
+						</listitem>
+						<listitem>
+							<para>开启新的DataBlock进行数据写入，同时将老的数据块退役</para>
+							<para>如果集群开启了hbase.rs.cacheblocksonwrite配置，需要将老数据块缓存至BlockCache中。</para>
+						</listitem>
+					</orderedlist>
+				</listitem>
+				<listitem>
+					<para>HFileBlockIndex.BlockIndexWriter</para>
+					<para>通过该Writer完成索引数据块(IndexBlock)向HFile的写入逻辑。</para>
+					<para>在HFile内部，索引数据是分层级进行存储的，包括根索引块、中间索引块和叶子索引块。其中叶子索引块又称之为InlineBlock，因为它会穿插在DataBlock之间进行存储。同DataBlock类似，IndexBlock一开始也是缓存在内存里的，每当DataBlock写入HFile之后，都会向当前叶子索引块添加一条索引实体信息。如果叶子索引块的大小超过hfile.index.block.max.size限制，便开始向HFile进行写入。写入格式为：索引实体个数、每条索引实体相对于块起始位置的偏移量信息，以及每条索引实体的详细信息(参考Block块结构)。</para>
+					<para>这主要是叶子索引块的写入逻辑，而根索引块和中间索引块的写入则主要在HFile.Writer关闭的时候进行，通过BlockIndexWriter的writeIndexBlocks方法。</para>
+					<para>在HFile内部，每一个索引块是通过BlockIndexChunk对象进行封装的，其对内声明了如下数据结构：</para>
+					<para>(1)blockKeys，封装每一条索引所指向的Block中第一条记录的key值；</para>
+					<para>(2)blockOffsets，封装每一条索引所指向的Block在HFile中的偏移量位置；</para>
+					<para>(3)onDiskDataSizes，封装每一条索引所指向的Block在HFile中的长度。</para>
+					<para>除此之外，根索引块还比较特殊，其对内声明了numSubEntriesAt集合，集合类型为List&lt;Long>，每当有叶子索引块写入HFile之后都会向该集合添加一条实体信息，实体的index为当前叶子索引块的个数，value为索引实体总数。这样，通过numSubEntriesAt集合便能确定midKey(中间索引)处在哪个叶子索引块上，在通过blockKeys、blockOffsets和onDiskDataSizes便能够获取最后的midkey信息。然后将其作为根索引块的一部分写入HFile，并通过FixedFileTrailer来标记根索引块的写入位置。</para>
+					<para>需要注意的是根索引块的大小也是受上限约束的，如果其大小大于hfile.index.block.max.size参数阀值(默认为128kb)，需要将其拆分成多个中间索引块，然后在对这些中间索引块创建根索引，以此来降低根索引块的大小，具体逻辑可参考BlockIndexWriter类的writeIntermediateLevel方法实现。</para>
+				</listitem>
+				<listitem>
+					<para>CompoundBloomFilterWriter</para>
+					<para>通过该Writer完成布隆数据向HFile的写入逻辑。</para>
+					<para>布隆数据在HFile内部同样是分块进行存储的，每一个数据块通过ByteBloomFilter类来封装，负责存储指定区间的数据集映射信息(参考布隆过滤器实现章节)。</para>
+					<para>每当执行HFile.Writer的append方法向DataBlock添加KeyValue数据之前，都要调用ByteBloomFilter的add方法来生成该KeyValue的布隆映射信息，为了满足目标容错率，每个ByteBloomFilter实体能够映射的KeyValue数量是受上限约束的，如果达到目标上限值需要将其持久化到HFile中进行存储，然后开启新的ByteBloomFilter实例来接管之前的逻辑。</para>
+					<para>每当布隆数据块写入成功之后，都会执行BlockIndexWriter的addEntry方法来创建一条布隆索引实体，实体的key值为布隆数据块所映射的第一条KeyValue的key值。</para>
+					<para>同叶子索引块一样，布隆数据块也被称之为InlineBlock，在写入DataBlock的同时会对该类型的数据块进行穿插写入。这主要是布隆数据块的写入逻辑，而布隆索引块主要是在HFile.Writer关闭的时候进行创建的，通过CompoundBloomFilterWriter.MetaWriter的write方法，将布隆索引数据连同meta信息一同写入HFile。</para>
+				</listitem>
+			</itemizedlist>
+		</section>
+		<section>
+			<title>数据块编码</title>
+			<para>TODO</para>
+		</section>
+	</section>
+	<section>
+		<title>HFile读取</title>
+		<para>HFile的读取逻辑主要通过HFile.Reader接口来实现，具体的调用方法如下：</para>
+		<programlistingco>
+			<programlisting>
+Configuration conf = HBaseConfiguration.create();
+HFile.Reader reader = HFile.createReader( <co id="co.hfile.reader" linkends="co.note.hfile.reader"/>
+    HFileSystem.get(conf), filePath, new CacheConfig(conf), conf);
+HFileScanner scanner = reader.getScanner(cacheBlocks, pread, isCompaction); <co id="co.hfile.scanner" linkends="co.note.hfile.scanner"/>
+
+String targetRow ... <co id="co.hfile.targetrow" linkends="co.note.hfile.targetrow"/>
+byte[] key = targetRow.getBytes();
+scanner.seekTo(new KeyValue.KeyOnlyKeyValue(key, 0, key.length)); <co id="co.hfile.seekto" linkends="co.note.hfile.seekto"/>
+Cell cell = scanner.getKeyValue(); <co id="co.hfile.getkv" linkends="co.note.hfile.getkv"/>
+
+scanner.next(); <co id="co.hfile.next" linkends="co.note.hfile.next"/>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.hfile.reader" arearefs="co.hfile.reader"><para>通过createReader静态方法构造HFile.Reader实例，不同的HFile版本会返回不同的实现类；</para></callout>
+				<callout id="co.note.hfile.scanner" arearefs="co.hfile.scanner">
+					<para>获取到HFile.Reader实例后，可通过其getScanner方法来返回HFileScanner实例用于数据扫描，方法中共包含3个boolean类型的参数：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>cacheBlocks：是否缓存已读取的block；</para></listitem>
+						<listitem><para>pread：是否启用pread随机读模式 (pread is better for random reads, seek+read is better scanning)；</para></listitem>
+						<listitem><para>isCompaction: 该Scanner是否用于整理操作。</para></listitem>
+					</itemizedlist>
+				</callout>
+				<callout id="co.note.hfile.targetrow" arearefs="co.hfile.targetrow"><para>要检索目标记录的rowKey值；</para></callout>
+				<callout id="co.note.hfile.seekto" arearefs="co.hfile.seekto">
+					<para>通过seekTo方法来定位目标数据位置，实现过程如下：</para>
+					<itemizedlist make='bullet'>
+						<listitem>
+							<para>首先通过BlockIndexReader类的loadDataBlockWithScanInfo方法定位到目标数据块，定位逻辑如图所示：</para>
+							<mediaobject>
+								<imageobject>
+									<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/hfile-read.png"></imagedata>
+								</imageobject>
+							</mediaobject>
+							<para>首先定位到根索引位置，然后定位到下级索引位置，依次向下递归，最后定位到目标数据块。</para>
+						</listitem>
+						<listitem><para>然后通过HFileScanner实例的blockSeek方法定位到目标记录(从目标数据块的第一条记录开始顺序读取)。</para></listitem>
+					</itemizedlist>
+				</callout>
+				<callout id="co.note.hfile.getkv" arearefs="co.hfile.getkv"><para>读取目标记录的第一个Cell；</para></callout>
+				<callout id="co.note.hfile.next" arearefs="co.hfile.next"><para>读取目标记录的下一个Cell。</para></callout>
+			</calloutlist>
+		</programlistingco>
+		<para>为了便于HFile信息内容的查看，HBase对外声明了HFilePrettyPrinter工具类，具体使用规则如下：</para>
+		<blockquote><para>hbase org.apache.hadoop.hbase.io.hfile.HFilePrettyPrinter [option]</para></blockquote>
+		<para>常用option如下：</para>
+		<para>-f：通过该选项来指定目标HFile的存储路径；</para>
+		<para>-p：打印出目标文件的KeyValue数据；</para>
+		<para>-m：打印出目标文件的元数据信息，包括Trailer信息、FileInfo信息以及布隆过滤器的相关信息；</para>
+		<para>-b：打印表格的索引块信息；</para>
+		<para>-h：打印block的header信息；</para>
+		<para>-w：通过该选项来指定要检索的目标记录的rowkey值。</para>
+	</section>
+	<section>
+		<title>HFile生成</title>
+		<para>HFile的生成逻辑主要通过HFile.Writer接口来实现，具体的调用方法如下：</para>
+		<programlistingco>
+			<programlisting>
+Configuration conf = HBaseConfiguration.create();
+CacheConfig cacheConf = new CacheConfig(conf);
+HFileContext fileContext = new HFileContextBuilder() <co id="co.hfile.context" linkends="co.note.hfile.context"/>
+    .withIncludesMvcc(true) <co id="co.hfile.writer.includemvcc" linkends="co.note.hfile.writer.includemvcc"/>
+    .withIncludesTags(true)
+    .withCompression(Algorithm.LZO)
+    .withCompressTags(true)
+    .withChecksumType(ChecksumType.CRC32) <co id="co.hfile.writer.checksum" linkends="co.note.hfile.writer.checksum"/>
+    .withBytesPerCheckSum(16 * 1024) <co id="co.hfile.writer.checksumbytes" linkends="co.note.hfile.writer.checksumbytes"/>
+    .withBlockSize(64 * 1024)
+    .withHBaseCheckSum(true)
+    .withDataBlockEncoding(DataBlockEncoding.PREFIX_TREE)
+    .withEncryptionContext(Encryption.Context.NONE)
+    .build();
+    
+HFile.Writer writer = HFile.getWriterFactory(conf, cacheConf)
+    .withPath(HFileSystem.get(conf), path)
+    .withComparator(KeyValue.COMPARATOR) <co id="co.hfile.writer.comparator" linkends="co.note.hfile.writer.comparator"/>
+    .withFavoredNodes(favoredNodes) <co id="co.hfile.writer.favored" linkends="co.note.hfile.writer.favored"/>
+    .withFileContext(fileContext)
+    .create(); <co id="co.hfile.writer.create" linkends="co.note.hfile.writer.create"/>
+    
+BloomFilterWriter bloomWriter = BloomFilterFactory
+    .createGeneralBloomAtWrite(conf, cacheConf, BloomType.ROW, maxKeys, writer)) <co id="co.hfile.writer.bloomWriter" linkends="co.note.hfile.writer.bloomWriter"/>
+
+KeyValue cell = new KeyValue(row, family, qualifier, value); <co id="co.hfile.writer.cell" linkends="co.note.hfile.writer.cell"/>
+bloomWriter.add(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength());
+writer.append(cell); <co id="co.hfile.writer.append" linkends="co.note.hfile.writer.append"/>
+
+bloomWriter.compactBloom();
+writer.addGeneralBloomFilter(bloomWriter);
+writer.appendFileInfo(Bytes.toBytes("BLOOM_FILTER_TYPE"), Bytes.toBytes("ROW")); <co id="co.hfile.writer.fileinfo" linkends="co.note.hfile.writer.fileinfo"/>
+writer.appendMetaBlock("blockName", blockContent); <co id="co.hfile.writer.meta" linkends="co.note.hfile.writer.meta"/>
+writer.close(); <co id="co.hfile.writer.close" linkends="co.note.hfile.writer.close"/>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.hfile.context" arearefs="co.hfile.context"><para>构造HFileContext对象用于封装目标HFile的上下文环境。</para></callout>
+				<callout id="co.note.hfile.writer.includemvcc" arearefs="co.hfile.writer.includemvcc">
+					<para>是否向FileInfo块写入MAX_MEMSTORE_TS_KEY信息和KEY_VALUE_VERSION信息。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.checksum" arearefs="co.hfile.writer.checksum">
+					<para>校验和算法，在HBase框架中通过hbase.hstore.checksum.algorithm参数进行指定。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.checksumbytes" arearefs="co.hfile.writer.checksumbytes">
+					<para>校验和字节数，在HBase框架中通过hbase.hstore.bytes.per.checksum参数进行指定。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.comparator" arearefs="co.hfile.writer.comparator">
+					<para>通过writer写入的Cell数据一定是按照顺序进行添加的。通过该排序器进行比较。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.favored" arearefs="co.hfile.writer.favored">
+					<para>希望将目标HFile文件写入到哪些机器上进行存储。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.create" arearefs="co.hfile.writer.create">
+					<para>create方法会创建FSDataOutputStream实例用于向目标HFile写入数据，所有子Writer共用该实例(参考块数据生成章节)。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.bloomWriter" arearefs="co.hfile.writer.bloomWriter">
+					<para>创建BloomFilterWrite用于生成布隆数据信息，这里返回的是CompoundBloomFilterWriter实例。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.cell" arearefs="co.hfile.writer.cell">
+					<para>构造KeyValue向目标HFile进行写入，由于只是测试，这里只准备了一条KeyValue数据。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.append" arearefs="co.hfile.writer.append">
+					<para>append方法执行后会向HFile的Scanned-Block区域写入数据。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.fileinfo" arearefs="co.hfile.writer.fileinfo">
+					<para>通过appendFileInfo方法向FileInfo数据块添加实体信息。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.meta" arearefs="co.hfile.writer.meta">
+					<para>通过appendMetaBlock方法向HFile添加MetaBlock，其中blockContent要实现Writable接口。</para>
+				</callout>
+				<callout id="co.note.hfile.writer.close" arearefs="co.hfile.writer.close">
+					<para>writer关闭时开始向HFile的Load-on-open区域、Non-Scanned-Block区域和Trailer区域写入相应的块信息。</para>
+				</callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

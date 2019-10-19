@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>NodeManager组件</title>
+	<para>NodeManager作为组合服务封装了以下服务列表：</para>
+	<para>NodeStatusUpdater：与RM保持心跳通信的逻辑，来不断的更新自身状态。</para>
+	<para>NodeHealthCheckerService：检测节点健康状态；</para>
+	<section>
+		<title>ContainerExecutor服务</title>
+		<para>YARN对外提供了两种类型的ContainerExecutor，分别是DefaultContainerExecutor(默认)和LinuxContainerExecutor，可通过yarn.nodemanager.container-executor.class配置参数来指定使用哪一个。</para>
+		<para>ContainerExecutor服务的主要功能职责包括：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>下载Container依赖资源(startLocalizer方法)；</para></listitem>
+			<listitem><para>执行Container启动脚本(launchContainer方法)；</para></listitem>
+		</itemizedlist>
+		<para>不同的实现类其处理逻辑也不尽相同。</para>
+		
+	</section>
+	<section>
+		<title>ContainerManager服务</title>
+		<para>ContainerManagementProtocol作为RPC服务主要负责NodeManager和ApplicationMaster之间的交互(服务发布在NodeManager端)，ApplicationMaster通过它来启动/停止Container，和查询Container的运行状态。</para>
+		<para>该服务继承至CompositeService，是一个组合服务，其内部封装的服务列表包括：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>ResourceLocalizationService：资源定位服务，从HDFS中下载Container运行需要的资源；</para></listitem>
+			<listitem><para>ContainersLauncher：通过线程池加载Container；</para></listitem>
+			<listitem><para>AuxServices：通过它来引入辅助服务；</para></listitem>
+			<listitem><para>ContainersMonitor：监控Container的资源使用情况；</para></listitem>
+			<listitem><para>AsyncDispatcher：事件触发器；</para></listitem>
+			<listitem><para>LogHandler：日志聚合服务。</para></listitem>
+		</itemizedlist>
+		<para>服务接口对外声明了3个方法，分别是：</para>
+		<orderedlist>
+			<listitem>
+				<para>startContainers：启动方法参数对应的Container；</para>
+				<para>方法在执行过程中首先获取Client端或AM端创建的ContainerLaunchContext对象(参考YARNClient服务和TaskAttempt状态机)，然后由该对象构建出Container对象和Application对象并依次加入ContainerManager的上下文环境。</para>
+				<para>在Application对象加入上下文环境之前，系统会首先判断该对象是否已经存在，如不存在则触发ApplicationEvent事件，事件类型为INIT_APPLICATION，完成对Application的初始化操作。</para>
+				<para>而针对每一个要启动的Container，系统都会触发INIT_CONTAINER事件来使Application状态机做相应处理。</para>
+				<tip>由于Container的加载是通过事件驱动机制来实现的，因此当客户端以RPC的方式执行该方法时无需等待Container加载结束，只需触发相应的事件便可立即返回，这种异步操作的机制有效降低了系统响应的延迟性。</tip>
+			</listitem>
+			<listitem><para>stopContainers方法</para></listitem>
+			<listitem><para>getContainerStatuses方法</para></listitem>
+		</orderedlist>
+		<section>
+			<title>ResourceLocalizationService服务</title>
+			<para>资源本地化服务，Container在加载过程中是需要使用一些资源的，拿MapReduce应用中的AMContainer来讲，需要有job.xml配置文件、封装job的jar包以及输入源切片信息，这些资源在作业提交时是会上传到HDFS里的，Container在运行时需要将其下载到本地，这个过程是通过ResourceLocalizationService服务来实现的，服务组件如下图：</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="65%" scalefit="1" fileref="../media/yarn/reslocalization.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>同其他服务组件一样，ResourceLocalizationService的工作也是通过事件驱动机制来触发的，当LocalizationEvent事件触发时，执行如下回调处理：</para>
+			<orderedlist>
+				<listitem>
+					<para>INIT_APPLICATION_RESOURCES事件</para>
+					<para>注册LocalResourcesTracker用来跟踪PRIVATE资源和APPLICATION资源的获取情况；</para>
+					<para>针对PUBLIC类型的资源，服务已预定义与之对应的LocalResourcesTracker，用来跟踪所有PUBLIC资源的获取情况。</para>
+				</listitem>
+				<listitem>
+					<para>INIT_CONTAINER_RESOURCES事件</para>
+					<para>从事件对象中获取Container需要的LocalResource列表，按照资源能见度的不同，采用对应的LocalResourceTracker进行处理，通过其handle(ResourceRequestEvent)方法。</para>
+					<tip>LocalResourcesTracker在逻辑上主要起到事件过渡器的作用，负责将ResourceEvent事件传递给LocalizedResource状态机进行处理，同时其内部还封装了LocalizedResource列表用来跟踪资源的获取情况，不同的LocalResourcesTracker用来跟踪不同能见度的资源。</tip>
+					<para>需要本地化的资源是通过LocalResource对象来封装的，所封装的信息包括：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>URL：资源所在HDFS的存储路径；</para></listitem>
+						<listitem><para>Size：资源大小；</para></listitem>
+						<listitem><para>timestamp：资源所在HDFS的最后更新时间；</para></listitem>
+						<listitem><para>LocalResourceType：资源类型，包括FILE(普通文件)，ARCHIVE(归档文件)或PATTERN(归档文件中的部分文件)；</para></listitem>
+						<listitem><para>Pattern：如果资源类型是PATTERN，该属性用于指定是归档文档中的哪一部分文件；</para></listitem>
+						<listitem><para>LocalResourceVisibility：资源可见性，共有3中类型，分别是：PUBLIC(所有用户部署的所有Applications都可见)、PRIVATE(指定用户部署的Applications可见)和APPLICATION(指定的Application可见)。</para></listitem>
+					</itemizedlist>
+					<tip>对于Container来讲LocalResource最好是只读性质的文件，因为当不同的Container去加载同一个LocalResource时，如果LocalResource不一致的话，将会导致Container的启动环境也不一致，这时YARN会阻止相应Container的运行。</tip>
+					<para>正在本地化或已完成本地化的资源通过LocalizedResource对象来封装，所封装的信息包括：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>localPath：资源的本地存储路径；</para></listitem>
+						<listitem><para>size：资源大小；</para></listitem>
+						<listitem><para>ref：使用该资源的container队列。</para></listitem>
+					</itemizedlist>
+					<para>资源本地化之后，是按照如下目录结构来进行存储的：</para>
+					<para>PUBLIC资源：${yarn.nodemanager.local-dirs}/filecache</para>
+					<para>PRIVATE资源：${yarn.nodemanager.local-dirs}/usercache/${user}/filecache</para>
+					<para>APPLICATION资源：${yarn.nodemanager.local-dirs}/usercache/${user}/appcache/${appId}/filecache</para>
+				</listitem>
+				<listitem>
+					<para>CLEANUP_CONTAINER_RESOURCES事件</para>
+					<para>该事件是在Container运行结束后触发的，事件回调函数中主要用来执行对Container运行资源的清理工作，所清理的数据内容包括：</para>
+					<itemizedlist make='bullet'>
+						<listitem><para>杀死负责下载Container运行资源的LocalizerRunner线程(参考LocalizerTracker服务)；</para></listitem>
+						<listitem>
+							<para>删除Container工作目录</para>
+							<para>${yarn.nodemanager.local-dirs}/usercache/${user}/appcache/${appId}/${containerId}</para>
+						</listitem>
+						<listitem>
+							<para>删除Container私有目录</para>
+							<para>${yarn.nodemanager.local-dirs}/nmPrivate/${appId}/${containerId}</para>
+						</listitem>
+					</itemizedlist>
+				</listitem>
+				<listitem>
+					<para>DESTROY_APPLICATION_RESOURCES事件</para>
+					<para>该事件是在Application运行结束时触发的，主要用于清理作业所依赖的文件资源及app的工作目录，清理结束后触发ApplicationEvent事件(事件类型为APPLICATION_RESOURCES_CLEANEDUP)，使Application状态机做相应处理。</para>
+				</listitem>
+			</orderedlist>
+			<section>
+				<title>LocalizerTracker服务</title>
+				<para>LocalizerTracker作为ResourceLocalizationService的子服务是真正处理资源下载的业务类，其功能是通过LocalizerEvent事件来触发的，具体的工作流程如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="68%" scalefit="1" fileref="../media/yarn/LocalizerTracker.jpg"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<tip>LocalizedResource状态转变是通过其内部的状态机来实现的，当由INIT状态转变成DOWNLOADING状态时，会触发LocalizerResourceRequestEvent事件使LocalizerTracker开始下载资源(参考LocalizedResource状态机)。</tip>
+				<para>LocalizerResourceRequestEvent事件触发后服务首先判断要下载的资源属于哪一种类型：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果是PUBLIC类型交由PublicLocalizer线程负责处理。</para>
+						<para>PublicLocalizer是全局公用的，任何PUBLIC类型的资源都会交由它负责处理，针对每一个要下载的资源PublicLocalizer会开启单独的下载线程，然后执行FSDownload这个callable。</para>
+						<tip>FSDownload在处理过成功中主要使用了FileSystem类的copyToLocalFile方法将LocalResource下载到本地，然后赋予文件访问权限为755(folder)或555(file)。</tip>
+					</listitem>
+					<listitem>
+						<para>如果是PRIVATE或APPLICATION类型，开启LocalizerRunner线程负责下载(将资源加入其pending队列)。</para>
+						<para>针对每一个Container，服务都会开启与之对应的LocalizerRunner用来下载LocalResource资源，下载逻辑是通过ContainerExecutor类的startLocalizer方法来封装的。</para>
+						<tip>YARN对外提供了两种类型的ContainerExecutor，分别是DefaultContainerExecutor(默认)和LinuxContainerExecutor，可通过yarn.nodemanager.container-executor.class配置参数来指定使用哪一个。</tip>
+						<para>ContainerExecutor的处理逻辑大致如下：</para>
+						<para>(1)首先创建资源文件的本地存储路径并赋予710权限编码；</para>
+						<para>(2)然后开启ContainerLocalizer实例与ResourceLocalizationService代理服务(ServiceProxy)保持心跳通信的逻辑，每次通信都会将下载完成的资源通知给ServiceProxy进行处理，ServiceProxy通过调度LocalResourcesTracker来更新相关资源的获取情况，同时遍历LocalizerRunner的pending队列将下一个下载任务发送给ContainerLocalizer进行处理；</para>
+						<tip>目前LocalizerRunner的处理逻辑并不是很完善，每次心跳只能分配一个下载任务，尚未提供资源的批量下载功能。该问题已经反馈到缺陷系统中，有望在以后的版本中进行修复，https://issues.apache.org/jira/browse/YARN-574</tip>
+						<para>(3)下载过程同PUBLIC资源类似，主要使用了FileSystem类的copyToLocalFile方法，只不过文件下载后的权限编码不同，如果是folder赋予700权限编码，如果是file赋予500权限编码。</para>
+					</listitem>
+				</itemizedlist>
+			</section>
+		</section>
+		<xi:include href="launcher_section.xml"/>
+		<section>
+			<title>ContainersMonitor服务</title>
+			<para>ContainersMonitor服务主要用于监控每个Container进程的资源使用情况，如果资源使用额度超标会打印相应的警告信息到日志文件中去并杀死目标Container进程。</para>
+			<para>服务启动后会在后台开启MonitoringThread线程来进行不断迭代(每次迭代的时间间隔为3秒，通过yarn.nodemanager.container-monitor.interval-ms参数指定)。迭代过程中会检测当前所有正在运行的Container，看其内存使用是否超标。</para>
+			<para>在每次检测过程中，线程会首先调用ResourceCalculatorProcessTree类的getResourceCalculatorProcessTree方法来获取目标Container所占用的物理内存(pmem)和虚拟内存(vmem)，如果是Linux操作系统方法会返回ProcfsBasedProcessTree实例，该实例通过解析/proc/$pid/stat文件来获取目标值。获取到pmem和vmem之后开始检测其当前使用是否已经超过上限阈值(通过isProcessTreeOverLimit方法来判断)。</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>如果目标Container中针对世代大于1的线程(即前后两次检测目标线程都运行在进程中)所使用的pmem或vmem超过了上限阈值，打印如下警告信息并杀死进程。</para>
+					<para>Process tree for container: $containerId has processes older than 1 iteration running over the configured limit.</para>
+				</listitem>
+				<listitem>
+					<para>如果目标Container所使用的pmem或vmem(线程不分世代进行统计)已经超过了2倍的上限阈值，打印如下警告信息并杀死进程。</para>
+					<para>Process tree for container: $containerId running over twice the configured limit.</para>
+				</listitem>
+			</itemizedlist>
+			<tip>如果是mapreduce应用，物理内存上限分别通过mapreduce.map.memory.mb(map任务)和mapreduce.reduce.memory.mb(reduce任务)参数来控制。而虚拟内存的上限 = 物理内存上限 * yarn.nodemanager.vmem-pmem-ratio</tip>
+			<para>相关配置参数如下：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>yarn.nodemanager.container-monitor.interval-ms</para>
+					<para>每隔多久对Container进程的内存使用情况进行一次检测，默认为3秒。</para>
+				</listitem>
+				<listitem>
+					<para>yarn.nodemanager.vmem-pmem-ratio</para>
+					<para>虚拟内存上限与物理内存上限的比例，默认为2.1。</para>
+				</listitem>
+				<listitem>
+					<para>yarn.nodemanager.pmem-check-enabled</para>
+					<para>是否对物理内存的使用上限进行校验，默认为true。</para>
+				</listitem>
+				<listitem>
+					<para>yarn.nodemanager.vmem-check-enabled</para>
+					<para>是否对虚拟内存的使用上限进行校验，默认为true。</para>
+				</listitem>
+			</itemizedlist>
+		</section>
+		<xi:include href="aux_section.xml" />
+		<section>
+			<title>LogHandler服务</title>
+			<para>LogHandler接口继承至EventHandler，其对外声明了handler方法用来响应LogHandlerEvent事件，以便事件触发后及时对日志做相应处理，事件类型包括：</para>
+			<blockquote>
+				<itemizedlist make='bullet'>
+					<listitem><para>APPLICATION_STARTED：App启动事件；</para></listitem>
+					<listitem><para>APPLICATION_FINISHED：App运行结束事件；</para></listitem>
+					<listitem><para>CONTAINER_FINISHED：Container运行结束事件。</para></listitem>
+				</itemizedlist>
+			</blockquote>
+			<tip>Yarn对外声明了两种类型的LogHandler服务，分别是NonAggregatingLogHandler和LogAggregationService，在不指定yarn.log-aggregation-enable配置的情况下默认使用前者。</tip>
+			<section>
+				<title>NonAggregatingLogHandler服务</title>
+				<para>NonAggregatingLogHandler只完成日志数据的清理功能，相关事件触发时其处理逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem><para>当App启动时，记录appId和user到内存；</para></listitem>
+					<listitem>
+						<para>当App运行结束时</para>
+						<blockquote>
+							<para>1.将appId和user从内存中移除；</para>
+							<para>2.经过指定时间后(yarn.nodemanager.log.retain-seconds参数配置，默认3小时)通过DeletionService清空本地作业日志；</para>
+						</blockquote>
+					</listitem>
+					<listitem><para>当Container运行结束时，不做任何处理。</para></listitem>
+				</itemizedlist>
+				<para>相关配置参数如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>yarn.nodemanager.log-dirs</para>
+						<para>操作日志的本地存储目录；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.nodemanager.log.retain-seconds</para>
+						<para>本地日志的保留时间，默认为3小时；</para>
+					</listitem>
+				</orderedlist>
+			</section>
+			<section>
+				<title>LogAggregationService服务</title>
+				<para>App的Log输出默认是保存在本地磁盘上的，这样在调试时会带来查询上的不便(需要ssh到指定机器上进行查看)。同时在某些应用场景下，操作日志可能是十分重要的数据信息，比如其本身可当做是MapReduce的输入数据源来进行日志分析，此时便需要将日志数据转移到HDFS进行存储，同时执行相应的日志聚合操作，LogAggregationService服务实现了该功能，当相关事件触发时其处理逻辑如下：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>当App启动时</para>
+						<para>初始化日志聚合目录，并赋予770权限编码；</para>
+						<para>针对每一个App开启AppLogAggregator线程，线程开启后进入循环等待状态，直到App运行结束开始执行日志聚合操作；</para>
+					</listitem>
+					<listitem>
+						<para>当Container运行结束时</para>
+						<para>首先判断Container是否运行成功，然后根据日志聚合策略来判断该Container是否需要聚合，聚合策略是通过ContainerLogAggregationPolicy类来封装的，常用的实现类包括：</para>
+						<orderedlist>
+							<listitem>
+								<para>AllContainerLogAggregationPolicy：所有的Container日志都需要聚合，无论其运行成功还是失败；</para>
+							</listitem>
+							<listitem>
+								<para>AMOnlyLogAggregationPolicy：只对AMContainer的运行日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>AMOrFailedContainerLogAggregationPolicy：对AMContainer和运行出错的TaskContainer日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>AMOrFailedContainerLogAggregationPolicy：对AMContainer和运行出错的TaskContainer日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>FailedContainerLogAggregationPolicy：只对运行出错的TaskContainer日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>FailedOrKilledContainerLogAggregationPolicy：对运行出错的以及被Kill的TaskContainer日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>NoneContainerLogAggregationPolicy：不对任何Container日志进行聚合；</para>
+							</listitem>
+							<listitem>
+								<para>SampleContainerLogAggregationPolicy：筛选一定比例运行成功的Container以及所有运行失败的Container进行日志聚合；</para>
+							</listitem>
+						</orderedlist>
+						<tip>有关日志聚合的相关配置可在客户端构造ApplicationSubmissionContext对象时通过调用其setLogAggregationContext方法来进行指定，如不指定将采用NM端的默认配置。</tip>
+					</listitem>
+					<listitem>
+						<para>当App运行结束时</para>
+						<para>通过AppLogAggregator类的finishLogAggregation方法完成日志聚合操作；</para>
+						<para>日志聚合成功后，删除本地的Log记录。</para>
+						<tip>日志聚合过程主要通过LogWriter来实现，先将日志保存到临时目录中，待所有Container的日志聚合成功后在转移至目标目录。</tip>
+					</listitem>
+				</itemizedlist>
+				<para>相关配置参数如下：</para>
+				<orderedlist>
+					<listitem>
+						<para>yarn.log-aggregation-enable</para>
+						<para>是否启用日志聚合功能，默认为false；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.nodemanager.remote-app-log-dir</para>
+						<para>聚合日志的hdfs存储目录，默认/tmp/logs；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.nodemanager.remote-app-log-dir-suffix</para>
+						<para>聚合日志按如下目录结构存储：${yarn.nodemanager.remote-app-log-dir}/${user}/{thisParam}，thisParam默认为logs；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.log-aggregation.retain-seconds</para>
+						<para>聚合日志保留时间，默认为-1表示永久保留；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.log-aggregation.retain-check-interval-seconds</para>
+						<para>retain检测每隔多久执行一次；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.nodemanager.log-aggregation.policy.class</para>
+						<para>判断日志是否需要聚合的策略实现类，默认聚合所有类型的Container日志；</para>
+					</listitem>
+					<listitem>
+						<para>yarn.nodemanager.log-aggregation.policy.parameters</para>
+						<para>日志聚合策略所需要的额外运行参数，拿Sample策略举例，该参数值用来决定需要聚合的Container比例。假设作业申请了100个Container，该参数值设置为SR:0.2,MIN:20，则需要对36个运行成功的Container进行聚合(20 + (100-20) * 0.2)。</para>
+					</listitem>
+				</orderedlist>
+			</section>
+		</section>
+	</section>
+	<section>
+		<title>NodeHealthCheckerService服务</title>
+		<para>NodeHealthCheckerService服务用于检测NodeManager节点是否处于健康状态，在与RM心跳过程中，会将自身的节点健康状态传递过去，如果状态为unhealthy，RM会将该节点加入到黑名单中，不在为其分配任务，直至节点恢复healthy状态为止。</para>
+		<para>节点健康状态检测是通过其子服务来实现的：</para>
+		<itemizedlist make='bullet'>
+			<listitem><para>NodeHealthScriptRunner：通过自定义脚本的方式来执行检测；</para></listitem>
+			<listitem><para>LocalDirsHandlerService：检测本地local目录和log目录是否出现磁盘坏死。</para></listitem>
+		</itemizedlist>
+		<section>
+			<title>NodeHealthScriptRunner服务</title>
+			<para>NodeHealthScriptRunner服务的主要作用是通过自定义脚本来监测当前节点的健康状态，该功能默认是关闭的，可通过yarn.nodemanager.health-checker.script.path配置参数来开启，参数值指向检测脚本存放的位置。</para>
+			<para>服务启动后会开启TimerTask任务线程，默认情况下会每隔10分钟来执行一次脚本检测，检测频率是可通过yarn.nodemanager.health-checker.interval-ms参数来设置的。如果检测过程中出现以下问题，则认为NM节点没有处于健康状态：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>脚本执行超时(超过yarn.nodemanager.health-checker.script.timeout-ms参数指定时间后依然没有得到返回值)；</para></listitem>
+				<listitem><para>脚本执行的返回值不为0；</para></listitem>
+				<listitem><para>脚本执行过程中，打印了以ERROR开头的文字信息。</para></listitem>
+			</itemizedlist>
+			<para>NodeHealthCheckerService服务的使用主要由以下几点好处(参考资料)：</para>
+			<orderedlist make='bullet'>
+				<listitem>
+					<para>可作为节点负载的反馈</para>
+					<para>当前YARN仅对CPU和内存两种资源进行了隔离，其他资源(如网路、磁盘IO)尚未有隔离措施，这使得不同任务之间会产生干扰。而健康脚本检测可从一定程度上缓解该问题，比如，可让健康检测脚本检查网路、磁盘、文件系统等运行状况，一旦发现特殊情况(如网络阻塞、磁盘空间不足、或文件系统出错等问题)，可将健康状况变为unhealthy，暂时不接收新的任务，待所有问题恢复正常后在接收新的任务。</para>
+				</listitem>
+				<listitem>
+					<para>人为暂时维护NodeManager</para>
+					<para>如果发现NodeManager所在节点出现故障，可通过控制脚本输出让其暂时停止接收新任务以便进行维护，待维护完成后，修改脚本输出以让其继续接收新任务。</para>
+				</listitem>
+			</orderedlist>
+			<para>示例脚本如下(当节点剩余内存量低于内存总量的10%时，打印ERROR信息，标记节点为unhealthy)：</para>
+			<programlisting>
+#!/bin/bash
+MEMORY_RATIO=0.1
+freeMem=`grep MemFree /proc/meminfo | awk '{print $2}'`
+totalMem=`grep MemTotal /proc/meminfo | awk '{print $2}'`
+limitMem=`echo | awk '{print int("'$totalMem'"*"'$MEMORY_RATIO'")}'`
+if [ $freeMem -lt $limitMem ]
+then
+    echo "ERROR,totalMem=$totalMem,freeMem=$freeMem,limitMem=$limitMem"
+else
+    echo "OK,totalMem=$totalMem,freeMem=$freeMem,limitMem=$limitMem"
+fi
+			</programlisting>
+		</section>
+		<section>
+			<title>LocalDirsHandlerService服务</title>
+			<para>LocalDirsHandlerService服务用于检测yarn.nodemanager.local-dirs参数和yarn.nodemanager.log-dirs参数所配置的目录能否正常访问(没有出现磁盘坏死)，检测标准是判断目标目录能否对外提供读、写和执行操作，分别通过file.canRead()、file.canWrite()和file.canExecute()方法进行判断。</para>
+			<para>同NodeHealthScriptRunner服务一样，服务启动后会开启TimerTask线程来执行周期性检测，检测频率默认为2分钟，可通过yarn.nodemanager.disk-health-checker.interval-ms参数来设置。如果检测过程中，出现坏死的磁盘目录占总目录的四分之一(通过yarn.nodemanager.disk-health-checker.min-healthy-disks参数配置，默认为0.25)，标记NodeManager为unhealthy状态。</para>
+		</section>
+	</section>
+	<section>
+		<title>NodeStatusUpdater服务</title>
+		<para>NodeStatusUpdater作为NodeManager的子服务主要用于为RM和NM开启心跳通信线程，心跳间隔是通过yarn.resourcemanager.nodemanagers.heartbeat-interval-ms属性来配置的，默认为1秒，心跳过程如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="75%" scalefit="1" fileref="../media/yarn/nodeStatusUpdater.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>心跳线程开启后，NodeStatusUpdater负责将NM节点状态信息(NodeStatus)发送给ResourceTrackerService进行处理(处理过程参考ResourceTrackerService服务)，状态信息包括：</para>
+		<blockquote>
+			<para>(1)部署到该NM中的所有Container的状态信息；</para>
+			<para>(2)NM中目前正处于运行状态的ApplicationMaster信息；</para>
+			<para>(3)NM节点的健康状态信息(通过NodeHealthCheckerService服务来检测)。</para>
+		</blockquote>
+		<para>ResourceTrackerService处理完成之后会发送如下响应信息到NM端，针对不同的响应信息NodeStatusUpdater服务会做如下处理：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>如果是resync消息，调用NodeManager的resyncWithRM方法执行resync操作</para>
+				<para>方法在执行过程中会开启单独的线程来进行如下处理：</para>
+				<orderedlist>
+					<listitem><para>首先通知ContainerManager服务不再接受新的ContainerRequest申请，通过调用ContainerManagerImpl类的setBlockNewContainerRequests方法。</para></listitem>
+					<listitem><para>然后判断RM是否开启了work-preserving功能(通过yarn.resourcemanager.work-preserving-recovery.enabled参数设置，默认为true)，如果没有则杀死当前NM所部署的所有Container运行实例，通过调用ContainerManagerImpl类的cleanupContainersOnNMResync方法。</para></listitem>
+					<listitem><para>最后重新向RM端进行注册并开启新的线程来与RM端保持心跳通信的逻辑，心跳线程重新开启后，步骤2中所杀死的Container状态并没有被删除，依然会通过心跳逻辑汇报到RM端进行处理。</para></listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>如果消息中含有待清理的Container集合</para>
+				<para>针对每一个要清理的Container触发ContainerEvent事件(事件类型为KILL_CONTAINER)，杀死正在运行的NMContainer状态机实例。</para>
+			</listitem>
+			<listitem>
+				<para>如果消息中含有待清理的App集合</para>
+				<para>针对每一个要清理的App触发ApplicationEvent事件(事件类型为FINISH_APPLICATION)，使Application状态机做相应处理。</para>
+			</listitem>
+		</itemizedlist>
+	</section>
+</section>

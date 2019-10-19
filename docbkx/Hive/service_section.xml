@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Hive服务</title>
+	<para>Hive对外声明了以下实用服务：</para>
+	<blockquote>
+		<orderedlist>
+			<listitem><para>cli：执行hive命令时默认启动的服务(hive shell)；</para></listitem>
+			<listitem><para>metastore：处理元数据的CURD操作；</para></listitem>
+			<listitem><para>hiveserver：以Server的方式来启动Hive，允许客户端通过Thrift，JDBC和ODBC的方式进行连接；</para></listitem>
+			<listitem><para>hwi：hive web访问接口.</para></listitem>
+		</orderedlist>
+	</blockquote>
+	<para>具体的服务可通过hive --service [servicename]命令来启动。</para>
+	<section>
+		<title>MetaStore服务</title>
+		<para>MetaStore服务负责处理hive元数据的CURD操作，客户端的所有建表操作最终都是通过MetaStore服务来向数据库写入元数据的。</para>
+		<para>默认情况下，MetaStore服务和Hive的其他服务部署在同一台机器上，然而为了提高数据库的保密性，通常需要将MetaStore服务独立出来单独部署(因其封装了数据库的连接环境)，客户端在通过远程通信的方式与其交互。部署模型见下图：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="80%" width="80%" fileref="../media/hive/metastore_deploy.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>hive对外声明了以下常用配置参数用来决定MetaStore的行为：</para>
+		<programlistingco>
+			<programlisting>
+&lt;configuration>
+  &lt;property>
+    &lt;name>hive.metastore.warehouse.dir&lt;/name> <co id="co.metastore.warehouse" linkends="co.note.metastore.warehouse"/>
+    &lt;value>/user/hive/warehouse&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>hive.metastore.local&lt;/name> <co id="co.metastore.local" linkends="co.note.metastore.local"/>
+    &lt;value>true&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>hive.metastore.uris&lt;/name> <co id="co.metastore.uris" linkends="co.note.metastore.uris"/>
+    &lt;value>thrift://host:9083&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>javax.jdo.option.ConnectionURL&lt;/name> <co id="co.metastore.dburl" linkends="co.note.metastore.dburl"/>
+    &lt;value>jdbc:derby:;databaseName=metastore_db;create=true&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>javax.jdo.option.ConnectionDriverName&lt;/name>
+    &lt;value>org.apache.derby.jdbc.EmbeddedDriver&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>javax.jdo.option.ConnectionUserName&lt;/name>
+    &lt;value>APP&lt;/value>
+  &lt;/property>
+  &lt;property>
+    &lt;name>javax.jdo.option.ConnectionPassword&lt;/name>
+    &lt;value>mine&lt;/value>
+  &lt;/property>
+&lt;/configuration>
+			</programlisting>
+			<calloutlist>
+				<callout id="co.note.metastore.warehouse" arearefs="co.metastore.warehouse">
+					<para>数据存储地址，默认为/user/hive/warehouse；</para>
+				</callout>
+				<callout id="co.note.metastore.local" arearefs="co.metastore.local">
+					<para>是否和Hive的其他服务集成部署(默认为true)，如果想将metastore服务独立出来单独部署(remote方式)，需将属性设置成false，同时指定hive.metastore.uris；</para>
+				</callout>
+				<callout id="co.note.metastore.uris" arearefs="co.metastore.uris">
+					<para>当metastore以remote方式部署时，通过该参数来指定其通信地址。metastore服务是可以部署多个的，在配置的时候使用逗号来进行分隔，客户端会以轮训的方式来访问每一个metastore。</para>
+					<tip>当以remote方式部署时默认的通信端口为9083，可在hive-env.sh中通过export METASTORE_PORT=[port]命令来指向其他端口。</tip>
+				</callout>
+				<callout id="co.note.metastore.dburl" arearefs="co.metastore.dburl">
+					<para>默认使用Derby数据库，以内嵌的方式进行部署，如果想要部署多个metastore，需要更换Derby为其他非嵌入式数据库(如mysql)。</para>
+				</callout>
+			</calloutlist>
+		</programlistingco>
+	</section>
+</section>

@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>MemStore实现</title>
+	<para>由HFile存储结构我们可以知道在物理层面上，HBase主要通过HFile来实现数据的持久化存储，然而客户端的数据并不是直接写入到HFile中的，在执行持久化操作之前会暂存于内存中进行缓存，当缓存总量达到一定规模时在进行批量写入，这部分缓存空间便称之为MemStore。</para>
+	<para>MemStore中的数据记录是通过KeyValue对象来封装的，每个KeyValue对应表格的一个单元格，其内部封装了以下数据信息：</para>
+	<blockquote>
+		<itemizedlist make='bullet'>
+			<listitem><para>row：单元格所在行(rowkey值)；</para></listitem>
+			<listitem><para>columnQualifier：单元格所在列；</para></listitem>
+			<listitem><para>columnFamily：单元格所属列簇信息；</para></listitem>
+			<listitem><para>timestamp：单元格的添加时间；</para></listitem>
+			<listitem><para>type：单元格的操作类型(Put表示新增, Delete表示删除)；</para></listitem>
+			<listitem><para>value：单元格数据。</para></listitem>
+			<listitem><para>mvcc：单元格的写入编号(参考读写一致性章节)。</para></listitem>
+		</itemizedlist>
+	</blockquote>
+	<para>每个KeyValue在HFile中是按如下格式进行存储的：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/keyvalue.jpg"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>其中row、columnFamily、columnQualifier、timestamp和type作为Key的组成部分用于定位单元格的位置信息，Value用于封装单元格的数据内容。针对KeyValue的存储特点，MemStore对外声明了CellSkipListSet数据结构用来存储所有的KeyValue信息，该集合具有以下特点：</para>
+	<orderedlist>
+		<listitem>
+			<para>存储在其中的KeyValue实体是经过排序处理的(KeyValue实体在进行排序比较时，只比对Key值，而不考虑Value值)；</para>
+		</listitem>
+		<listitem>
+			<para>新增实体记录时，新数据会覆盖掉以前的旧数据，如果两者的Key值相同(判断key值是否相同的逻辑可参考KVComparator类的compare方法，具体是先比较rowkey，然后依次比较columnFamily、columnQualifier、timestamp和type，最后比较mvcc)。</para>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>MemStoreLAB</title>
+		<para>MemStore在使用上面临与BlockCache同样的问题，即如果内存空间分配不当，有可能会产生大量的内存碎片，从而降低整个堆内存的使用效率。对此，MemStore的处理办法是将内存数据划分成多个Chunk，每个Chunk称之为一个存储单元，其大小通过hbase.hregion.memstore.mslab.chunksize参数来指定，并且在内存上占据着连续的地址空间。当新增记录时，将KeyValue数据保存到Chunk里，待Chunk写满之后，在申请下一个Chunk进行写入，如果MemStore执行了flush操作，那么便可以对对整个chunk进行回收，从而防止了内存碎片的产生，Chunk结构如图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/mslab.jpg"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>在HBase中，Chunk的申请与释放是通过MemStoreLAB类来封装的，其对外声明了以下常用方法：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>getOrMakeChunk</para>
+				<para>获取一个Chunk块，如果启用了chunkPool功能，那么Chunk的获取逻辑是通过MemStoreChunkPool类来完成的。</para>
+				<para>MemStoreChunkPool是从0.95版本起引入的新功能(详细可参考https://issues.apache.org/jira/browse/HBASE-8163)，该类起到了Chunk池的作用，可以对已经flush过的Chunk进行回收使用而不是通过gc将其进行垃圾回收处理，从而有效降低新生代向老年代晋升对象的大小，提高gc效率。对Chunk的回收使用主要是覆写其之前的数据内容而不改变它的物理存储空间，因此chunkPool所占用的内存基本都是常驻内存，即使进行了gc操作其空间也不会被回收处理。在存储媒介的选择上可以像BucketCache一样使用堆外内存来进行数据存储，虽然MemStoreChunkPool目前并没有这么做(依然采用堆内存)。</para>
+				<para>Chunk池的大小是通过hbase.hregion.memstore.chunkpool.maxsize参数来指定的，RegionServer启动后，默认会分配40%的堆内存空间作为MemStore的使用上限(通过hbase.regionserver.global.memstore.upperLimit参数指定)，在这40%的堆内存中，用于chunkPool的比例便是hbase.hregion.memstore.chunkpool.maxsize参数值，如果参数值为0(默认)，表示不启用chunkPool功能，因此chunkPool的空间大小可通过如下公式来计算：</para>
+<programlisting>
+    chunkPoolSize = heapSize * hbase.regionserver.global.memstore.upperLimit
+                             * hbase.hregion.memstore.chunkpool.maxsize
+</programlisting>
+				<para>chunkpool所占用的物理空间并不是一次性全部分配的，可通过hbase.hregion.memstore.chunkpool.initialsize参数来指定初始分配比例，当使用空间达到该比例时会按使用需要进行额外的分配处理，只要使用空间没有超过chunkPoolSize上限值。</para>
+				<tip>MemStoreChunkPool在构建的时候会开启StatisticsThread线程来周期性的打印当前chunkpoll的使用情况，可通过在log4j.properties中添加如下logger来跟踪当前chunkpool的状态，进而决定chunkpool的大小是否需要调整：log4j.logger.org.apache.hadoop.hbase.regionserver.MemStoreChunkPool=DEBUG</tip>
+			</listitem>
+			<listitem>
+				<para>allocateBytes</para>
+				<para>从Chunk块中获取可用的物理空间用于存放KeyValue，如果当前Chunk已经没有足够的剩余空间用来存放KeyValue数据，则会申请下一个Chunk来完成写入逻辑。</para>
+				<para>并不是所有的KeyValue数据都会保存在Chunk之中，如果其大小超过了hbase.hregion.memstore.mslab.max.allocation参数值，则KeyValue将直接存储在新申请的内存空间上，而不是写入到Chunk中进行存储。这样做是为了保证Chunk空间的使用率能够足够高效，防止剩余空间的过度闲置。</para>
+			</listitem>
+			<listitem>
+				<para>tryRetireChunk</para>
+				<para>Chunk空间写满之后，会执行该方法将其保存到BlockingQueue集合之中，待MemStore执行flush操作后，将BlockingQueue集合中的Chunk块归还给MemStoreChunkPool，以实现Chunk的重复使用。</para>
+			</listitem>
+		</itemizedlist>
+	</section>
+	<section>
+		<title>读写一致性</title>
+		<para>HBase的事务处理只能限制到行级别，对于跨行的处理操作，满足不了ACID原则。在写一致性上采用对行加锁的办法来实现，而读一致性上使用的是MVCC方法(MultiVersionConsistencyControl)，具体可参考https://blogs.apache.org/hbase/entry/apache_hbase_internals_locking_and。</para>
+		<orderedlist>
+			<listitem>
+				<para>写一致性</para>
+				<para>写一致性要满足的需求是针对同一行数据的写入操作是按照先后顺序来执行的，而不会出现数据穿插写入的应用场景，如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/rowlock.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>执行了两条put操作，分别将{rowkey : Grep, company : Cloudera, role : Engineer}和{rowkey : Grep, company : Restaurant, role : Waiter}添加到数据库表格中。当执行get操作时，希望返回第二条数据，而实际的返回结果却是两条记录的穿插，如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/rowlock-2.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>这样便违背了数据写入一致性的原则。为了完善该逻辑，HBase采用的做法是对行数据的写入进行加锁操作，如果数据在写入表格之前，发现目标行已被其他线程锁住，则当前线程会进入等待状态，直至目标锁被释放为止(或等待时间超过hbase.rowlock.wait.duration毫秒，此时将抛出异常)。</para>
+				<para>在HBase中，每条行数据的锁信息是通过RowLockContext对象来封装的，这些信息包括：</para>
+				<blockquote>
+					<itemizedlist make='bullet'>
+						<listitem><para>row：数据类型为HashedBytes，用于封装rowKey值；</para></listitem>
+						<listitem><para>thread：表示该行锁被哪一个线程所占有；</para></listitem>
+						<listitem><para>latch：java并发包中的CountDownLatch对象，不同线程之间主要通过它来实现行锁释放的通知逻辑。</para></listitem>
+					</itemizedlist>
+				</blockquote>
+				<para>针对这些RowLockContext对象，在HRegion中是采用lockedRows集合进行管理的，其数据结构为ConcurrentHashMap&lt;HashedBytes, RowLockContext>，用来映射行与行锁信息。同时HRegion还对外声明了getRowLock方法用于获取指定行对应的行锁，线程在获取到行锁之后才可执行数据写入逻辑。</para>
+				<para>假设两个线程(Thread-A和Thread-B)同时对某一行(row-1)执行了数据写入操作，则它们一开始都会执行HRegion的getRowLock方法来抢占行锁(通过lockedRows集合的putIfAbsent方法，看谁先将自己创建的RowLockContext实体加入到lockedRows集合中)。</para>
+				<para>如果Thread-A先于Thread-B获取到row-1的行锁，那么lockedRows集合中，row-1所对应的RowLockContext实体将会被Thread-A线程所占有(即其thread属性为Thread-A)。而当Thread-B在尝试获取row-1的行锁时它会优先进行判断，看RowLockContext的所属线程是否为自己，如果不是则开始引用RowLockContext实体中的CountDownLatch对象，通过其await方法来使Thread-B线程进入等待状态。</para>
+				<para>Thread-A在执行完写操作之后，会释放它所占用的行锁，当所有的行锁都释放成功时，Thread-A会继续引用RowLockContext实体中的CountDownLatch对象，通过其countDown方法，来唤醒Thread-B线程使其进入执行状态。</para>
+				<para>执行完countDown方法后，可能会同时唤醒多个线程(如果这些线程都在等待row-1的行锁)，这时所有被通知到的线程开始执行行锁抢占(回到最开始时的逻辑)，以此轮回来实现数据写入一致性的需求。</para>
+			</listitem>
+			<listitem>
+				<para>读一致性</para>
+				<para>针对读一致性需要满足的应用需求是在写操作彻底将某行数据写入到数据库之前，该行数据对于客户端来讲是不可见的，以下便是一个错误的应用场景：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/mvcc.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>{rowkey : Grep, company : Restaurant, role : Waiter}这条数据写入到一半的时候，有客户端对该行数据执行了读取操作，导致的结果是company是最新写入的数据而role还是以前的旧数据，如图所示：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/mvcc-2.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>出现了数据前后不一致的问题。为了解决该问题，HBase采用的是MVCC办法(多版本一致性控制)，即执行数据写入操作前为其分配唯一的事务编号(writeNum)，writeNum是按照写操作的先后顺序来增长的，并在每一个单元格中进行存储(通过KeyValue的setMvccVersion方法)。当写操作运行结束时，将其事务编号暴露给客户端进行使用，这样客户端在执行数据查询操作时，如果其读取到的KeyValue数据中mvcc的属性值大于该事务编号，便将其过滤掉，从而防止了数据在未写入完全的情况下即被加载的可能。</para>
+				<para>在HBase中，MVCC功能是通过MultiVersionConsistencyControl类来实现的，该类对外声明了以下实用方法：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>beginMemstoreInsert</para>
+						<para>每当执行行数据的写入操作之前都会调用该方法用来生成写事务的唯一编号。在MultiVersionConsistencyControl类中，写事务是通过WriteEntry类来封装的，该对象内部声明了如下两个参数信息：</para>
+						<blockquote>
+							<itemizedlist make='bullet'>
+								<listitem><para>writeNumber：写操作编号，用来唯一标识每条写操作记录；</para></listitem>
+								<listitem><para>completed：该写操作是否已经完成；</para></listitem>
+							</itemizedlist>
+						</blockquote>
+						<para>其中writeNumber在每个Region环境中是顺序增长的，beginMemstoreInsert方法在执行时会根据上一条事务的编号来生成当前事务的writeNumber，并构造出WriteEntry实体将其加入到writeQueue集合中，待事务成功提交之后在将其从writeQueue集合中移除。从而保证了writeQueue集合只存储尚未提交的事务。</para>
+						<tip>0.99版本以后，writeNumber不再采用单独的计数方式进行处理，而是与WAL的sequenceId进行统一，这样在执行LogReplay等其他操作时能够确保每条记录的全局顺序性(详细参考HBASE-8701)</tip>
+					</listitem>
+					<listitem>
+						<para>advanceMemstore</para>
+						<para>执行该方法用于标识写操作已经运行结束，可以进行事务提交。只有当写操作成功提交之后，其所写入的数据内容才能被客户端访问到，在满足以下条件时，写操作是被认为提交成功的：</para>
+						<blockquote>
+							<para>在writeQueue集合中当前事务的写操作编号是最小的。</para>
+						</blockquote>
+						<para>由于writeQueue集合只存储尚未提交的事务，因此如果有事务编号小于当前事务，那说明在该事务启动之前还有更早的其他事务尚未提交(能够出现该情况说明这些事务与当前事务所操纵的数据并不是同一行)，为了保证数据前后的一致性，需要等待这些事务处理完成之后才可对当前事务进行提交。</para>
+						<para>待事务提交成功之后，将其从writeQueue集合中移除，此时客户端可以访问到新提交的数据。</para>
+					</listitem>
+					<listitem>
+						<para>waitForPreviousTransactionsComplete</para>
+						<para>等待所有目标事务之前的事务全部提交。</para>
+					</listitem>
+					<listitem>
+						<para>memstoreReadPoint</para>
+						<para>返回客户端当前能够访问到的最大数据版本。</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Flush操作</title>
+		<para>MemStore的使用空间写满之后需要执行flush操作，以便将内存中的数据持久化到HFile中进行存储。在HBase中，flush逻辑是通过MemStoreFlusher线程来封装的，RegionServer启动后会开启该线程。</para>
+		<para>MemStoreFlusher基于生产者-消费者模式来设计，其对内声明了flushQueue消费队列(通过DelayQueue来实现)，同时对外提供了requestFlush生产方法，用于将需要执行flush操作的Region注入到flushQueue消费队列中，以便消费者对其进行消费处理。</para>
+		<para>在以下几种情况下会执行MemStoreFlusher的requestFlush方法：</para>
+		<orderedlist>
+			<listitem><para>Region的MemStore大小达到hbase.hregion.memstore.flush.size限制时，对其执行flush操作；</para></listitem>
+			<listitem>
+				<para>RegionServer中所有MemStore的使用空间达到如下百分比时，开始对所有的MemStore执行flush操作：</para>
+				<programlisting>
+rate = hbase.regionserver.global.memstore.size * 
+       hbase.regionserver.global.memstore.size.lower.limit
+				</programlisting>
+				<para>如果flush操作不够及时，导致MemStore的使用空间达到hbase.regionserver.global.memstore.size百分比，则服务端将会阻塞所有客户端的写操作5秒钟，并打印如下日志异常：Blocking updates on {server}: the global memstore size {curSize} is >= than blocking {globalMemStoreLimit} size</para>
+			</listitem>
+			<listitem><para>客户端执行HBaseAdmin.flush方法时，会对指定表格的Region执行flush操作；</para></listitem>
+			<listitem><para>执行日志回滚操作后，如果现有HLog的数量大于hbase.regionserver.maxlogs参数值，则HBase会选择最老的HLog文件，对其所记录的Region执行flush操作。</para></listitem>
+			<listitem>
+				<para>RegionServer会在后台开启PeriodicMemstoreFlusher线程用来周期性的检测其上部署的Region是否需要执行flush操作，检测阀值通过如下两个配置参数来设置：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>hbase.regionserver.optionalcacheflushinterval</para>
+						<para>距离上次flush经历了多长时间，默认为3600秒</para>
+					</listitem>
+					<listitem>
+						<para>hbase.regionserver.flush.per.changes</para>
+						<para>距离上次flush之后共产生了多少次修改，默认为3000万次</para>
+					</listitem>
+				</itemizedlist>
+			</listitem>
+		</orderedlist>
+		<para>生产者生产出数据以后，需要有消费者对其进行消费处理，在MemStoreFlusher中，FlushHandler充当消费者的角色。由于DelayQueue是线程安全的，因此针对同一个消费队列可以同时存在多个消费者，其数量通过hbase.hstore.flusher.count来指定。消费者在消费过程中，主要执行MemStoreFlusher类的flushRegion方法，将指定Region的MemStore数据进行冲洗，方法逻辑如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>执行flush操作前首先检测Region中的每一个Store，看其所存储的StoreFile文件数量是否达到hbase.hstore.blockingStoreFiles阀值(默认为7)，如果是，flush将会推迟一段时间在执行(推迟时间为hbase.hstore.blockingWaitTime/100)，同时通知CompactSplitThread线程，对已有的StoreFiles进行合并处理(通过其requestSystemCompaction方法)；</para>
+			</listitem>
+			<listitem>
+				<para>如果StoreFile的数量没有达到hbase.hstore.blockingStoreFiles上限值，或者flush的累计推迟时间已经达到hbase.hstore.blockingWaitTime毫秒，执行HRegion的flushcache方法来对MemStore进行冲洗，方法执行过程中涉及以下操作：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>首先对HStore进行筛选，看哪些Store适合做flush操作。</para>
+						<para>筛选策略通过FlushPolicy类来封装，HBase对外声明了两种类型的实现，分别为FlushAllStoresPolicy(对所有Store执行flush)和FlushAllLargeStoresPolicy(对大小满足指定阈值的Store进行flush)，默认采用FlushAllLargeStoresPolicy，大小阈值通过如下公式计算得出：max(hbase.hregion.percolumnfamilyflush.size.lower.bound.min, hbase.hregion.memstore.flush.size/column_family_number)。</para>
+					</listitem>
+					<listitem>
+						<para>针对筛选出的HStore执行flush操作</para>
+						<para>(1)打包MemStore数据，生成数据快照；</para>
+						<para>(2)将快照数据导出生成StoreFile文件(通过StoreFlusher的flushSnapshot方法)；</para>
+						<para>(3)将新生成的StoreFile文件加入到Store数据集，同时清理掉快照信息。</para>
+					</listitem>
+				</itemizedlist>
+				<tip>flush在执行过程中会向HLog写入FlushMarker记录，如果由于HDFS的原因导致该marker写入失败，那么系统将会抛出DroppedSnapshotException异常，RegionServer对该类异常的捕获是执行abort操作，以便于其他RegionServer执行LogReplay来将该Region数据还原。因此如果在执行flush操作的时候失败将有可能造成RegionServer进程异常退出，相关日志如下：[MemStoreFlusher.0] regionserver.HRegionServer: STOPPED: Replay of WAL required. Forcing server shutdown。</tip>
+				<para>如果采用FlushAllStoresPolicy策略，在执行flush操作后，产生的StoreFile文件数量是由列簇的个数来决定的，因此如果表格包含多个列簇，执行flush后有可能产生StoreFile分布极不均匀的情况。</para>
+			</listitem>
+			<listitem>
+				<para>flush运行结束之后，需要根据具体的拆分及整理策略来判断当前Region是否需要进行拆分和整理，详细的执行逻辑可参考Region整理和拆分章节。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

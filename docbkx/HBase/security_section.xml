@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>安全控制</title>
+	<section>
+		<title>表格访问IP限制</title>
+		<para>HBase针对表格的ACL控制主要是通过引入AccessController协处理器来进行实现的(参考ACL权限管理)，然而截至到目前为止，AccessController只能对用户和用户组信息进行过滤，无法满足过滤IP的应用需求。为此可对AccessController稍做改进，来限制目标表格只能在指定机器上通过指定用户进行访问。</para>
+		<para>改动方法如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>拆解用户信息为“用户名”加“IP”。</para>
+				<para>为此，授权语句需要做以下调整，将：</para>
+				<blockquote><para>grant 'zhangsan','RW','test'</para></blockquote>
+				<para>调整为：</para>
+				<blockquote><para>grant 'zhangsan@10.39.5.44','RW','test'</para></blockquote>
+				<para>表示用户zhangsan在10.39.5.44这台机器上对test表格拥有读写权限。</para>
+			</listitem>
+			<listitem>
+				<para>重构对PermissionCache的访问。</para>
+				<para>PermissionCache主要用于缓存acl信息到内存，从而加快acl的获取速度，用户可通过调用其getUser(String userName)方法来获取目标用户当前具备哪些acl。</para>
+				<para>在PermissionCache的内部，缓存信息是通过ListMultimap进行组织的，其中map的key值格式为“用户名@IP”(步骤1授权时指定)，因此在调用getUser(userName)方法时，需要将userName手动拼凑成“用户名@IP”的格式，否则将定位不到目标key。</para>
+			</listitem>
+			<listitem>
+				<para>重构TableAuthManager类的相关方法(AccessController类所用到的)，加入新的方法参数(IP信息)。</para>
+				<para>比如，将：</para>
+				<blockquote><para>authorize(User user, Permission.Action action)</para></blockquote>
+				<para>方法重构成：</para>
+				<blockquote><para>authorize(User user, Permission.Action action, String remoteAddr)</para></blockquote>
+				<para>这样，在authorize方法的内部对PermissionCache进行引用时，便可通过user和remoteAddr拼凑出步骤2所需要的key信息。</para>
+				<tip>remoteAddr信息可通过RpcServer类的getRemoteIp静态方法来获取，在RpcServer的内部封装了ThreadLocal变量用于保存每个调用端的当前Call，ip信息便可从该Call对象中获取。</tip>
+			</listitem>
+		</orderedlist>
+		<para>完整的patch信息可参考：https://issues.apache.org/jira/secure/attachment/12798220/HBASE-11095.patch</para>
+	</section>
+	<section>
+		<title>Zookeeper节点ACL控制</title>
+		<para>在不启用kerberos认证的情况下，HBase对Zookeeper节点的访问是没有ACL过滤机制的，这在一定程度上为HBase集群带来了安全隐患，如果ZK的链接信息被泄漏，那么HBase的元数据信息便可被任意修改。因此，在创建HBase元数据节点时非常有必要集成ACL校验机制。</para>
+		<para>HBase有关ZK节点的ACL设置主要是通过调用ZKUtil的createACL方法来实现的，如果hbase.security.authentication设置为simple，那么方法会返回Ids.OPEN_ACL_UNSAFE，表示任何用户都可以随意修改，为此可以针对该方法做如下定制：即使authentication策略为simple，依然为节点设置ACL来限制客户端的访问。</para>
+		<para>具体的ACL策略如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>如果要创建的ZK节点为以下路径(代码参考ZooKeeperWatcher类的isClientReadable方法)，赋予所有用户读取权限。</para>
+				<programlisting>
+/hbase
+/hbase/meta-region-server
+/hbase/master
+/hbase/hbaseid
+/hbase/rs
+/hbase/table
+/hbase/table/$tableName
+				</programlisting>
+			</listitem>
+			<listitem>
+				<para>同时为所有ZK节点引入自定义的ACL配置来限制哪些用户可以对节点进行修改操作。</para>
+				<para>自定义的ACL信息主要通过hbase.zookeeper.acl参数来进行声明，参数可以配置多个ACL，不同的ACL之间用逗号分隔，每个ACL的信息格式为：</para>
+				<blockquote><para>schema:auth:perm</para></blockquote>
+				<para>比如digest:admin:0DPiKuNIrrVmD8IUCuw1hQxNqZc=:cdrwa表示为admin用户赋予所有权限，用户的校验方式为digest(可通过DigestAuthenticationProvider类的generateDigest方法生成)。</para>
+			</listitem>
+		</orderedlist>
+		<para>在对ZK节点进行ACL设置之后，需要在Master端和RegionServer端对访问它们的zkClient进行授权，以便进程启动后可以对目标节点进行状态修改。从而确保了只有RegionServer和Master可以修改ZK节点，而客户端只能对部分数据进行读取。</para>
+		<para>详细实现可参考：https://issues.apache.org/jira/browse/HBASE-15577</para>
+		<para>相关配置参数如下：</para>
+		<orderedlist>
+			<listitem>
+				<para>hbase.zookeeper.acl</para>
+				<para>要引入的acl配置，参数值可以是具体的acl信息，也可以是文件路径，格式为：@path/to/aclFile，表示要引入的acl信息存储在aclFile文件中。默认值为world:anyone:rwcda，表示所有用户具备全部的操作权限。</para>
+			</listitem>
+			<listitem>
+				<para>hbase.zookeeper.auth</para>
+				<para>RegionServer/Master启动后，为其所实例化的zkClient进行授权，授权信息可以为具体的值(如digest:admin)，可以以是文件路径，格式为：@path/to/authFile。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>数据文件加密</title>
+		<para>TODO</para>
+	</section>
+	<xi:include href="kerberos_section.xml"/>
+	<xi:include href="token_section.xml"/>
+</section>

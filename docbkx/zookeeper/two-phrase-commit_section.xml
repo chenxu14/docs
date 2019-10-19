@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Two-phase commit</title>
+	<para>Two-phase commit(二段事务提交)是解决分布式事务的一种有效方式，当数据库由于数据量较大而进行垂直拆分时，需要引入分布式事务来确保数组整体的一致性和完整性。</para>
+	<para>顾名思义，事务的提交分成两个阶段：准备阶段和提交阶段。</para>
+	<itemizedlist make='bullet'>
+		<listitem>
+			<para>准备阶段(Prepare Phase)</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/prepare-phase.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>准备阶段Slave所做事情</para>
+			<orderedlist>
+				<listitem>从Master获取写操作请求并在本地执行，同时将执行记录写入redo日志文件，便于出错后进行事务回滚；</listitem>
+				<listitem>锁定新数据，防止其他线程读取；</listitem>
+				<listitem>若前两步执行成功通知Master准备完成，否则通知Master准备失败。</listitem>
+			</orderedlist>
+		</listitem>
+		<listitem>
+			<para>提交阶段(Commit Phase)</para>
+			<mediaobject>
+				<imageobject>
+					<imagedata contentdepth="80%" width="80%" fileref="../media/zookeeper/commit-phase.jpg"></imagedata>
+				</imageobject>
+			</mediaobject>
+			<para>
+				Master汇总准备阶段Slave的反馈，若Slave全部进入准备状态，则通知每一个Slave进行事务提交，若有Slave没有进入准备状态，则通知每一个Slave进行事务回滚，以此来达到分布式事务的效果。
+				Slave执行提交/回滚后，归档redo日志，并开启一个新的entry，便于下一次操作。
+			</para>
+			<para>参考资料：<link>http://docs.oracle.com/cd/B28359_01/server.111/b28310/ds_txns003.htm</link></para>
+		</listitem>
+	</itemizedlist>
+</section>

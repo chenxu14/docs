@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>监控报警</title>
+	<section>
+		<title>常用监控指标</title>
+		<para>Connector相关</para>
+		<orderedlist>
+			<listitem>
+				<para>connector-task-metrics,connector="{connector}",task="{task}"</para>
+				<itemizedlist make='bullet'>
+            		<listitem>
+            			<para>batch-size-avg</para>
+            			<para>每次执行pull操作从kafka拉取记录条数(平均值)，通过该指标可反应task执行的繁忙情况。</para>
+            		</listitem>
+            		<listitem>
+            			<para>batch-size-max</para>
+            			<para>每次执行pull操作从kafka拉取记录条数(最大值)，每次pull的最大值默认为500，可通过consumer.max.poll.records参数进行设置(connect-distributed.properties文件中)。</para>
+            		</listitem>
+            		<listitem>
+            			<para>offset-commit-max-time-ms</para>
+            			<para>connector每隔一定周期(offset.flush.interval.ms参数控制，默认60秒)做一次offset提交，用来保存已消费完成的记录偏移量，该监控指标用于反映每次保存offset的耗时情况。</para>
+            		</listitem>
+            		<listitem>
+            			<para>offset-commit-failure-percentage</para>
+            			<para>保存offset超时失败的百分比，超时时间受offset.flush.timeout.ms参数控制，默认为5秒。</para>
+            		</listitem>
+            		<listitem>
+            			<para>running-ratio</para>
+            			<para>worker处于running状态的时间占比。</para>
+            		</listitem>
+            	</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>sink-task-metrics,connector="{connector}",task="{task}"</para>
+				<itemizedlist make='bullet'>
+            		<listitem>
+            			<para>partition-count</para>
+            			<para>分配给每个worker的partition数量。</para>
+            		</listitem>
+            		<listitem>
+            			<para>put-batch-avg-time-ms</para>
+            			<para>每次执行pull返回的数据称为一个批次，该指标用于反映每个批次记录的消费时延(平均值)。</para>
+            		</listitem>
+            		<listitem>
+            			<para>put-batch-max-time-ms</para>
+            			<para>每次执行pull返回的数据称为一个批次，该指标用于反映每个批次记录的消费时延(最大值)。</para>
+            		</listitem>
+            		<listitem>
+            			<para>sink-record-active-count</para>
+            			<para>The number of records that have been read from Kafka but not yet completely committed/flushed/acknowledged by the sink task.</para>
+            		</listitem>
+            		<listitem>
+            			<para>sink-record-lag-max</para>
+            			<para>The maximum lag in terms of number of records that the sink task is behind the consumer's position for any topic partitions.</para>
+            		</listitem>
+            		<listitem>
+            			<para>sink-record-read-rate</para>
+            			<para>平均每秒从kafka读取的记录数量(执行transformations之前)。</para>
+            		</listitem>
+            		<listitem>
+            			<para>sink-record-send-rate</para>
+            			<para>平均每秒从kafka读取的记录数量(执行transformations之后)。</para>
+            		</listitem>
+            	</itemizedlist>
+			</listitem>
+			<listitem>
+				<para>task-error-metrics,connector="{connector}",task="{task}"</para>
+				<itemizedlist make='bullet'>
+            		<listitem>
+            			<para>deadletterqueue-produce-failures</para>
+            			<para>The number of failed writes to the dead letter queue.</para>
+            		</listitem>
+            		<listitem>
+            			<para>deadletterqueue-produce-requests</para>
+            			<para>The number of attempted writes to the dead letter queue.</para>
+            		</listitem>
+            		<listitem>
+            			<para>last-error-timestamp</para>
+            			<para>The epoch timestamp when this task last encountered an error.</para>
+            		</listitem>
+            		<listitem>
+            			<para>total-errors-logged</para>
+            			<para>The number of errors that were logged.</para>
+            		</listitem>
+            		<listitem>
+            			<para>total-record-errors</para>
+            			<para>The number of record processing errors in this task.</para>
+            		</listitem>
+            		<listitem>
+            			<para>total-record-failures</para>
+            			<para>The number of record processing failures in this task.</para>
+            		</listitem>
+            		<listitem>
+            			<para>total-records-skipped</para>
+            			<para>The number of records skipped due to errors.</para>
+            		</listitem>
+            		<listitem>
+            			<para>total-retries</para>
+            			<para>The number of operations retried.</para>
+            		</listitem>
+            	</itemizedlist>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>cruise-control</title>
+		<para>TODO</para>
+	</section>
+</section>

@@ -31,6 +31,7 @@
 		<xi:include href="HDFS/architecture_section.xml" />
 		<xi:include href="HDFS/feature_section.xml" />
 		<xi:include href="HDFS/dev_section.xml" />
+		<xi:include href="HDFS/read_section.xml" />
 	</chapter>
 	<!-- 
 	<chapter>
@@ -74,6 +75,9 @@
 	<chapter>
 		<title>Kafka框架</title>
 		<xi:include href="kafka/dev_section.xml" />
+		<xi:include href="kafka/conf_section.xml" />
+		<xi:include href="kafka/operation_section.xml" />
+		<xi:include href="kafka/monitor_section.xml" />
 	</chapter>
 	<chapter>
 		<title>Hive框架</title>

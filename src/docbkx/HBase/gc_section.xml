@@ -217,9 +217,10 @@ export HBASE_REGIONSERVER_OPTS="-Xmx20g -Xms20g <co id="co.g1.heap" linkends="co
     -XX:G1RSetUpdatingPauseTimePercent=10 <co id="co.g1.rsetupdate" linkends="co.note.g1.rsetupdate"/>
     -XX:-OmitStackTraceInFastThrow -XX:+PerfDisableSharedMem -XX:-ResizePLAB
     -Xloggc:$GC_LOG_PATH -verbosegc -XX:+PrintGC -XX:+PrintGCDateStamps
-    -XX:+PrintAdaptiveSizePolicy -XX:+PrintGCDetails 
+    -XX:+PrintAdaptiveSizePolicy -XX:+PrintGCDetails -XX:+PrintHeapAtGC
     -XX:+PrintGCApplicationStoppedTime -XX:+PrintTenuringDistribution
-    -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=5 -XX:GCLogFileSize=20M
+    -XX:+PrintReferenceGC -XX:+UseGCLogFileRotation
+    -XX:NumberOfGCLogFiles=5 -XX:GCLogFileSize=20M
 			</programlisting>
 			<calloutlist>
 				<callout id="co.note.g1.heap" arearefs="co.g1.heap"><para>采用G1回收机制以后，无需在对新生代的内存大小进行设置，否则会影响到MaxGCPauseMillis运行策略。</para></callout>
@@ -247,7 +248,10 @@ export HBASE_REGIONSERVER_OPTS="-Xmx20g -Xms20g <co id="co.g1.heap" linkends="co
 				<callout id="co.note.g1.waste" arearefs="co.g1.waste"><para>mixedGc每次迭代可回收的内存空间要大于该阈值，否则将退出迭代。默认值为整个堆内存空间的10%，如果阈值比较低，mixedGc的时间可能会很长，因为Region中的liveObject较多，CopyObject的时间也会变长。</para></callout>
 				<callout id="co.note.g1.gcCount" arearefs="co.g1.gcCount"><para>mixedGc的迭代次数，每次迭代所处理的Region个数通过如下公式计算得出：reclaimable Tenured regions / -XX:G1MixedGCCountTarget。并且先回收liveObject占比相对较少的Region，因此最后一次迭代的执行时间往往是最长的，因其CopyObject会比较耗时。</para></callout>
 				<callout id="co.note.g1.maxRegion" arearefs="co.g1.maxRegion"><para>每次mixedGc，所处理的老年代Region数量不能大于该阈值，默认值为10%.</para></callout>
-				<callout id="co.note.g1.parallelRef" arearefs="co.g1.parallelRef"><para>当GC日志中，Ref Proc和GC ref-proc的时间占比比较长的时候需考虑开启该功能以便进行并发处理。</para></callout>
+				<callout id="co.note.g1.parallelRef" arearefs="co.g1.parallelRef">
+					<para>当GC日志中，Ref Proc和GC ref-proc的时间占比比较长的时候需考虑开启该功能以便进行并发处理。</para>
+					<para>在处理Ref Proc阶段，如果FinalReference处理比较耗时有可能是部分类覆盖了finalize方法(参考HDFS-8562)。</para>
+				</callout>
 				<callout id="co.note.g1.rsetupdate" arearefs="co.g1.rsetupdate"><para>GC过程中用于处理RSet更新操作的时间不能大于该阈值，默认值为10，表示不能超过总暂停时间的10%.</para></callout>
 			</calloutlist>
 		</programlistingco>

@@ -21,7 +21,7 @@
               <goal>generate-pdf</goal>
             </goals>
             <configuration>
-              <includes>hbase.xml</includes>
+              <includes>book.xml</includes>
               <bodyFontFamily>SimSun</bodyFontFamily>
               <titleFontFamily>SimHei</titleFontFamily>
               <monospaceFontFamily>SimSun</monospaceFontFamily>

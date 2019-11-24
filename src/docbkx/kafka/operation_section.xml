@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>常用操作</title>
+	<section>
+		<title>Topic相关</title>
+		<orderedlist>
+			<listitem>
+				<para>创建Topic</para>
+				<programlistingco>
+					<programlisting>
+bin/kafka-topics.sh --bootstrap-server host:9092 --create --topic connect-offsets
+  --partitions 10 --replication-factor 3 --config cleanup.policy=compact
+     				</programlisting>
+     			</programlistingco>
+			</listitem>
+			<listitem>
+				<para>删除Topic</para>
+				<programlistingco>
+					<programlisting>
+bin/kafka-topics.sh --bootstrap-server host:9092 --delete --topic usertable
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>查看所有Topic</para>
+				<programlistingco>
+					<programlisting>
+bin/kafka-topics.sh --bootstrap-server host:9092 --list
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>开启消费终端</para>
+				<programlistingco>
+					<programlisting>
+bin/kafka-console-consumer.sh --bootstrap-server host:9092
+    --topic usertable --from-beginning
+					</programlisting>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>Connector相关</title>
+		<orderedlist>
+			<listitem>
+				<para>查看所有已注册的plugin</para>
+				<para>http://host:8083/connector-plugins</para>
+			</listitem>
+			<listitem>
+				<para>查看所有已注册的connector</para>
+				<para>http://host:8083/connectors</para>
+			</listitem>
+			<listitem>
+				<para>查看某个connector的运行状态</para>
+				<para>http://host:8083/connectors/HBaseSinkConnector/status</para>
+			</listitem>
+			<listitem>
+				<para>查看某个connector所运行的Task</para>
+				<para>http://host:8083/connectors/HBaseSinkConnector/tasks</para>
+			</listitem>
+			<listitem>
+				<para>部署一个connector作业</para>
+				<programlistingco>
+					<programlisting>
+curl -s -X POST -H "Content-Type: application/json" --data '{"name":"HBaseSinkConnector",
+  "config":{"connector.class":"org.chen.service.hbase.HBaseSinkConnector",
+  "topics":"usertable", "tasks.max":"4","table":"usertable","zkServers":"host1,host2",
+  "modle":"sync", "username":"hbase-test","password":"hbase-test"}}'
+  http://host:8083/connectors
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>删除一个connector作业</para>
+				<programlistingco>
+					<programlisting>
+curl -s -X DELETE http://host:8083/connectors/HBaseSinkConnector
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>暂停一个connector作业</para>
+				<programlistingco>
+					<programlisting>
+curl -s -X PUT http://host:8083/connectors/HBaseSinkConnector/pause
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>恢复一个connector作业</para>
+				<programlistingco>
+					<programlisting>
+curl -s -X PUT http://host:8083/connectors/HBaseSinkConnector/resume
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>更新一个connector配置</para>
+				<programlistingco>
+					<programlisting>
+curl -s -X PUT -H "Content-Type: application/json" --data '{"name":"HBaseSinkConnector",
+  "connector.class":"org.chen.service.hbase.HBaseSinkConnector","topics":"usertable",
+  "tasks.max":"8","table":"usertable","zkServers":"host1,host2","modle":"sync",
+  "username":"hbase-test","password":"hbase-test"}'
+  http://host:8083/connectors/HBaseSinkConnector/config
+					</programlisting>
+				</programlistingco>
+			</listitem>
+			<listitem>
+				<para>查看消费延迟情况</para>
+				<programlistingco>
+					<programlisting>
+./bin/kafka-consumer-groups.sh --bootstrap-server host:9092
+    --describe --group connect-${connectorName}
+					</programlisting>
+				</programlistingco>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

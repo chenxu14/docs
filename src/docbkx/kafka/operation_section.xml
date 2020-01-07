@@ -8,8 +8,17 @@
 	xmlns:db="http://docbook.org/ns/docbook">
 	<title>常用操作</title>
 	<section>
-		<title>Topic相关</title>
+		<title>Topic&amp;Broker相关</title>
 		<orderedlist>
+			<listitem>
+				<para>启动broker进程</para>
+				<programlistingco>
+					<programlisting>
+nohup ./bin/kafka-server-start.sh config/server.properties
+  &gt; /path/to/broker.out 2&gt;&amp;1 &amp;
+					</programlisting>
+				</programlistingco>
+			</listitem>
 			<listitem>
 				<para>创建Topic</para>
 				<programlistingco>
@@ -44,11 +53,31 @@ bin/kafka-console-consumer.sh --bootstrap-server host:9092
 					</programlisting>
 				</programlistingco>
 			</listitem>
+			<listitem>
+				<para>查看消费偏移量</para>
+				<programlistingco>
+					<programlisting>
+bin/kafka-consumer-groups.sh --bootstrap-server host:9092
+    --describe --all-groups
+bin/kafka-consumer-groups.sh --bootstrap-server host:9092
+    --describe --group connect-$connectorName
+					</programlisting>
+				</programlistingco>
+			</listitem>
 		</orderedlist>
 	</section>
 	<section>
 		<title>Connector相关</title>
 		<orderedlist>
+			<listitem>
+				<para>启动Connector进程</para>
+				<programlistingco>
+					<programlisting>
+nohup ./bin/connect-distributed.sh config/connect-distributed.properties
+  &gt; /path/to/connector.out 2&gt;&amp;1 &amp;
+					</programlisting>
+				</programlistingco>
+			</listitem>
 			<listitem>
 				<para>查看所有已注册的plugin</para>
 				<para>http://host:8083/connector-plugins</para>

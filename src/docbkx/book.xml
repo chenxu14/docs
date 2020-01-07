@@ -55,6 +55,7 @@
 		<xi:include href="Spark/function_section.xml" />
 		<xi:include href="Spark/yarn_section.xml" />
 		<xi:include href="Spark/streaming_section.xml" />
+		<xi:include href="Spark/file_section.xml" />
 		<xi:include href="Spark/dev_section.xml" />
 	</chapter>
 	<!-- 

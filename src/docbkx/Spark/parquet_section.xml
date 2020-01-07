@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>parquet</title>
+	<para>先水平(按行)拆分成多个RowGroup，然后垂直(按列)拆分成多个ColumnChunk。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/spark/parquet.gif"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>每个物理文件是可以包含多个RowGroup的，理想情况下每个RowGroup的大小与一个HDFS块的大小相同(避免跨机器读块，不同的块保存在不同的机器上)，MR以RowGroup为粒度来做切片？</para>
+	<para>文件元数据信息主要保存在Footer中，通过文件大小减去FooterLength便可确认Footer的偏移量位置。</para>
+	<orderedlist>
+		<listitem>
+			<para>FileMetaData保存文件元数据信息</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>Schema</para>
+					<para>存储每条记录的shema定义。</para>
+				</listitem>
+				<listitem>
+					<para>extra KV pairs</para>
+					<para>自定义元数据信息，便于处理一些谓词下推逻辑?</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>RowGroupMetaData封装了每个ColumnChunk的元数据信息，每个Chunk的元数据包括：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>encoding/codec</para>
+					<para>所采用的编码及压缩算法，概念同HFile类似。</para>
+				</listitem>
+				<listitem>
+					<para>numValues</para>
+					<para>包含的记录数量。</para>
+				</listitem>
+				<listitem>
+					<para>offset of first data page</para>
+					<para>第一个数据页所在文件的偏移量位置。</para>
+				</listitem>
+				<listitem>
+					<para>extra KV pairs</para>
+					<para>自定义元数据信息。</para>
+					<para>疑问：谓词下推逻辑主要借助该字段来保存一些统计信息(最大值、最小值、平均值等)？</para>
+				</listitem>
+			</itemizedlist>
+		</listitem>
+		<listitem>
+			<para>每个page的header会包含与该页相关的元数据信息，包含page大小，crc校验值以及pageType。目前有三种类型的pageType：</para>
+			<itemizedlist make='bullet'>
+				<listitem><para>数据页用于存储当前行组中该列的值</para></listitem>
+				<listitem>
+					<para>字典页存储该列值的编码字典(字典压缩?)</para>
+					<para>每一个ColumnChunk最多包含一个字典页，防止字典利用率不高，占用过多空间。</para>
+				</listitem>
+				<listitem><para>索引页用来存储当前行组下该列的索引信息(尚未实现)</para></listitem>
+			</itemizedlist>
+		</listitem>
+	</orderedlist>
+	<section>
+		<title>嵌套Column的扁平化处理</title>
+		<para>Parquet所描述的schema定义与PB类似，可将其映射成一棵树，树的叶子节点(column)可通过如下两个属性来描述其在树中的位置。</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>Definition levels</para>
+				<para>column的节点路径上有多少个父节点被定义了，这些父节点的类型只能是repeated和optional，required类型的节点不做统计。</para>
+			</listitem>
+			<listitem>
+				<para>Repetition levels</para>
+				<para>指明该column节点路径在哪个父节点(repeted类型)上出现了元素重复，如果值为0则表明是一条全新的记录。</para>
+			</listitem>
+		</itemizedlist>
+		<para>以论文中的demo为例，Document可映射成如下树形结构：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/spark/parquet-tree.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>相关记录经过扁平化处理后可得到如下映射结果。</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/spark/parquet-record.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>其中第二个Name在r1中没有包含任何Code值。为了确定‘en-gb’出现在第三个Name而不是第二个，我们添加一个NULL值在‘en’和‘en-gb’之间。</para>
+	</section>
+</section>

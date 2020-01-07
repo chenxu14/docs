@@ -39,7 +39,7 @@
         </itemizedlist>
         <tip>
           <para>补丁移除了HStore.bulkLoadHFile方法中有关notifyChangedReadersObservers的执行操作，因此在Scan过程中如果有新的HFile通过bulkhead方式导入该Scanner是看不到的，需要构建新的StoreScanner才可以。</para>
-          <para>另外该补丁存在一个比较重大缺陷，为此HBase已在1.3.0版本中进行了修复，详细可参考HBASE-16964。</para>
+          <para>同时该补丁存在一个比较重大缺陷，为此HBase已在1.3.0版本中进行了修复，详细可参考HBASE-16964。另外如果表格的全表扫描操作比较多，且在扫描过程中有大量小文件参与到整理，则扫描效率相比之前应该是低效的，因为旧Scanner的文件列表并不会发生变动，可通过RS_COMPACTED_FILES_DISCHARGER_queued指标的积压情况来对该问题进行权衡，如果积压严重最好在整理操作结束之后在触发全表扫描操作。</para>
         </tip>
     </section>
 </section>

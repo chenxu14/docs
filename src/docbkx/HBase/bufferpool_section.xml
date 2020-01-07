@@ -9,7 +9,7 @@
 	<title>CellBlock池化管理</title>
 	<para>无论是客户端还是服务端都需要有对CellBlock报文执行序列化的操作，服务端主要体现在返回response信息给客户端的过程(代码参考ServerCall#setResponse方法)，而客户端体现在发送request信息到服务端的过程(代码参考RpcClientImpl#writeRequest)。服务端的序列化处理是基于ByteBuffAllocator来处理的(HBASE-21879提供的内存池管理工具)，而针对客户端组件还没有提供类似的池化管理机制，为此我们可以引入netty内存池对其进行管理。</para>
 	<tip>社区在2.0版本提供了异步RPC功能，并基于netty对客户端代码做了相应重构，因此异步客户端已基于netty内存池对CellBlock做了序列化管理(HBASE-21879)，但是同步客户端依然要申请临时内存(代码可参考BlockingRpcConnection#writeRequest方法)。</tip>
-	<para>核心补丁代码逻辑如下：</para>
+	<para>核心补丁代码逻辑如下(详细参考HBASE-22905)：</para>
 	<programlistingco>
 		<programlisting>
 +++ org/apache/hadoop/hbase/ipc/IPCUtil.java

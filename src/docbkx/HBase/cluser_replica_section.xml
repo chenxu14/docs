@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>双集群访问</title>
+	<para>集群基于ActiveToActive模式部署之后，为了提升整体服务的查询效率，可对双集群进行并发访问来获取优先成功的执行结果，这样即使单集群的访问出现了故障，也不影响最终的整体时延。针对数据访问只需满足最终一致性的业务场景，可有效提升SLA诉求。</para>
+	<para>客户端组件的工作流程如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/compositeConn.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>首先我们基于组合模式全新设计了HBase的Connection实现(即这里的CompositeConnection)，其内部会封装两个单独的Connection实例来用于访问不同的集群。针对每个RPC请求(put或者get)，首先通过CompositeConnection实例构建一个MTable，然后通过MTable提交两个不同的ConnectionCallable实例到线程池中去运行处理(每个ConnectionCallable对应不同的集群访问)，如果是put请求需要执行线程池的invokeAll操作，待所有集群成功保存数据之后在进行返回；而如果是get请求只需执行invokeAny，优先返回执行成功的结果即可。</para>
+</section>

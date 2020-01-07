@@ -82,7 +82,7 @@
                 <imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/bufferpool_after.png"></imagedata>
             </imageobject>
         </mediaobject>
-        <para>针对缓存块的池化管理机制主要是基于HBASE-21879补丁做了相应的扩展，通过其提供的ByteBufferAllocator工具类，核心的补丁修复逻辑如下：</para>
+        <para>针对缓存块的池化管理机制主要是基于HBASE-21879补丁做了相应的扩展，通过其提供的ByteBufferAllocator工具类，核心的补丁修复逻辑如下(具体参考HBASE-22802)：</para>
         <programlistingco>
 			<programlisting>
 +++ org/apache/hadoop/hbase/io/hfile/bucket/FileIOEngine.java

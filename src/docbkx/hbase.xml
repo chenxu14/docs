@@ -16,7 +16,7 @@
       		<year>2015</year>
       		<holder role="mailto:444080606@qq.com">444080606@qq.com</holder>
     	</copyright>
-    	<releaseinfo>书籍归作者所有，请尊重产权，未经允许不得用于商业。</releaseinfo>
+    	<releaseinfo></releaseinfo>
   	</bookinfo>
 	<chapter>
 		<title>体系结构</title>
@@ -68,6 +68,7 @@
 		<xi:include href="HBase/monitor_section.xml" />
 		<xi:include href="HBase/security_section.xml" />
 		<xi:include href="HBase/performance_section.xml" />
+		<xi:include href="HBase/stable_section.xml" />
 		<xi:include href="HBase/maintenance_section.xml" />
 		<xi:include href="HBase/other_section.xml" />
 	</chapter>

@@ -47,7 +47,11 @@
 				<para>原生实现里，WAL的sequenceId和MVCC的事务ID是采用同一套ID生成器的，由于WAL的写入和memstore的写入处在同一个事务里，采用相同的计数ID可以让应用变得更加简洁。</para>
 				<para>然而在WAL解耦到kafka之后，写WAL和写memstore变成了一个异步的过程，并且分散在不同的进程中来完成，在想使用同一套ID生成器变得不太可能，因此我们需要将WAL的sequenceId从原生的计数逻辑中解耦出来，不在与MVCC公用同一套ID生成器，而是将其与kafka的分区偏移量进行绑定，以便在执行LogSplit操作时通过指定偏移量来对消息进行回溯处理。</para>
 				<para>WAL的sequenceId主要用于服务LogSplit操作，RS端是通过SequenceIdAccounting来跟踪每个Region最后一次flush时的sequenceId的，并且以心跳通信的方式将其汇报到HMaster端进行保存，以便HMaster在处理LogSplit操作时能够过滤掉已被持久化的无用记录。为此我们可以考虑将kafka的消费偏移量从Consumer端传递到RS端，使其能够汇总到SequenceIdAccounting中进行保存，这样便可以复用已有的心跳汇报流程，整个OFFSET的传递过程如图所示：</para>
-				<para>图片</para>
+                <mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="90%" fileref="../media/hbase/offset_pass.png"></imagedata>
+					</imageobject>
+				</mediaobject>
 				<para>Consumer在执行kafka消费过程中，可以拿到每条WAL日志记录对应的offset，然后通过执行Mutation#setAttribute方法将其序列化到Mutation对象实例中进行保存，这样HBaseClient在执行RPC远程调用时便可将其发送到RegionServer端进行处理。</para>
 				<para>RegionServer端收到请求之后，可通过Mutation#getAttribute方法将offset信息反序列化出来，在通过自定义的KafkaClientWAL将其传入SequenceIdAccounting中进行统计。KafkaClientWAL与原生WAL最大的区别便是这里只需记录每条日志的offset而无需对日志内容进行保存，因为保存操作已经在客户端完成。而我们基于kafka所实现的WALProvider主要目的便是用来创建出KafkaClientWAL对象实例。</para>
 			</listitem>

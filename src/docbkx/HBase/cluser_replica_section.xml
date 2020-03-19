@@ -15,4 +15,59 @@
 		</imageobject>
 	</mediaobject>
 	<para>首先我们基于组合模式全新设计了HBase的Connection实现(即这里的CompositeConnection)，其内部会封装两个单独的Connection实例来用于访问不同的集群。针对每个RPC请求(put或者get)，首先通过CompositeConnection实例构建一个MTable，然后通过MTable提交两个不同的ConnectionCallable实例到线程池中去运行处理(每个ConnectionCallable对应不同的集群访问)，如果是put请求需要执行线程池的invokeAll操作，待所有集群成功保存数据之后在进行返回；而如果是get请求只需执行invokeAny，优先返回执行成功的结果即可。</para>
+	<section>
+		<title>问题修复</title>
+		<para>在双集群并发访问的场景下，针对访问较慢的hbase集群，其执行线程在被cancel的时候有可能会触发InterruptedException异常(详细参考RpcClientImpl#call方法)，对应的异常堆栈如下：</para>
+		<programlistingco>
+			<programlisting>
+java.io.InterruptedIOException: Origin: InterruptedException
+   at o.a.h.hbase.util.ExceptionUtil.asInterrupt(ExceptionUtil.java:66)
+   at o.a.h.hbase.shaded.protobuf.ProtobufUtil
+       .makeIOExceptionOfException(ProtobufUtil.java:2960)
+   at o.a.h.hbase.shaded.protobuf.ProtobufUtil
+       .handleRemoteException(ProtobufUtil.java:2951)
+   at o.a.h.hbase.client.ScannerCallable.close(ScannerCallable.java:364)
+   at o.a.h.hbase.client.ScannerCallable.rpcCall(ScannerCallable.java:252)
+   at o.a.h.hbase.client.ScannerCallable.rpcCall(ScannerCallable.java:58)
+   at o.a.h.hbase.client.RegionServerCallable.call(RegionServerCallable.java:120)
+   at o.a.h.hbase.client.ScannerCallableWithReplicas
+       .call(ScannerCallableWithReplicas.java:133)
+   at o.a.h.hbase.client.ScannerCallableWithReplicas
+       .call(ScannerCallableWithReplicas.java:56)
+   at o.a.h.hbase.client.RpcRetryingCaller.callWithoutRetries(RpcRetryingCaller.java:210)
+   at o.a.h.hbase.client.ClientScanner.call(ClientScanner.java:276)
+   at o.a.h.hbase.client.ClientScanner.close(ClientScanner.java:550)
+   at o.a.h.hbase.client.ConnectionManager$HConnectionImplementation
+       .locateRegionInMeta(ConnectionManager.java:1222)
+   at o.a.h.hbase.client.ConnectionManager$HConnectionImplementation
+       .locateRegion(ConnectionManager.java:1079)
+   at o.a.h.hbase.client.AsyncRequestFutureImpl
+       .findAllLocationsOrFail(AsyncRequestFutureImpl.java:574)
+   at o.a.h.hbase.client.AsyncRequestFutureImpl
+       .groupAndSendMultiAction(AsyncRequestFutureImpl.java:487)
+   at o.a.h.hbase.client.AsyncProcess.submitAll(AsyncProcess.java:559)
+   at o.a.h.hbase.client.HTable.batch(HTable.java:883)
+   at o.a.h.hbase.client.HTable.get(HTable.java:856)
+   at com.meituan.hbase.client.MTable$7.call(MTable.java:165)
+   at com.meituan.hbase.client.MTable$7.call(MTable.java:162)
+   at java.util.concurrent.FutureTask.run(FutureTask.java:266)
+   at java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:511)
+   at java.util.concurrent.FutureTask.run(FutureTask.java:266)
+   at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+   at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+   at java.lang.Thread.run(Thread.java:745)
+Caused by: java.lang.InterruptedException
+   at java.lang.Object.wait(Native Method)
+   at o.a.h.hbase.ipc.RpcClientImpl.call(RpcClientImpl.java:1293)
+   at o.a.h.hbase.ipc.AbstractRpcClient.callBlockingMethod(AbstractRpcClient.java:253)
+   at o.a.h.hbase.ipc.AbstractRpcClient$BlockingRpcChannelImplementation
+       .callBlockingMethod(AbstractRpcClient.java:364)
+   at o.a.h.hbase.shaded.protobuf.generated.ClientProtos$ClientService$BlockingStub
+       .scan(ClientProtos.java:36846)
+   at o.a.h.hbase.client.ScannerCallable.close(ScannerCallable.java:362)
+   ... 23 more
+			</programlisting>
+		</programlistingco>
+		<para>由于在原生实现里调用端的上层并没有对该异常进行很好的捕获，导致客户端访问有可能会出现一些问题，改动后的代码逻辑会在HTable层面对InterruptedException异常进行捕获，并打印如下debug信息：slow * request may be cancelled in the dual cluster access scenario</para>
+	</section>
 </section>

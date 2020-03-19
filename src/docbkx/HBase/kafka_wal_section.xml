@@ -21,7 +21,7 @@
 			<imagedata contentdepth="100%" width="90%" fileref="../media/hbase/wal_kafka.png"></imagedata>
 		</imageobject>
 	</mediaobject>
-	<para>WAL写操作不在由RS端触发，而是交由客户端负责去写；数据内容也不在保存到HDFS，而是基于kafka来做数据存储。kafka针对单个broker的宕机是有相应的容灾恢复能力的，原broker宕机后，处在ISR列表中的其他broker可迅速接管之前的写操作，这样便有效缓解了客户端写操作因MTTR时间过长而导致的响应延迟变慢的问题。</para>
+	<para>WAL写操作不在由RS端触发，而是交由客户端负责去写；数据内容也不在保存到HDFS，而是基于kafka来做数据存储。kafka针对单个broker的宕机容灾恢复能力是要优于hbase的，原broker宕机后，处在ISR列表中的其他broker可迅速接管之前的写操作，这样便有效缓解了客户端写操作因MTTR时间过长而导致的响应延迟变慢的问题。</para>
     <para>另外解耦之后还能带来如下额外的好处：</para>
     <orderedlist>
 		<listitem>
@@ -43,17 +43,17 @@
     	<para>HBase原生对外提供了2种类型的WALProvider，都是基于HDFS来做数据存储的，一种是基于pipeline的写入方式(FSHLogProvider)，另一种是基于扇出的写入方式(AsyncFSWALProvider)。在将WAL转存到kafka之后，我们需要引入与之相应的WALProvider来满足以下功能需求。</para>
     	<orderedlist>
 			<listitem>
-				<para>将WAL的sequenceId和MVCC的事务ID进行解耦</para>
-				<para>原生实现里，WAL的sequenceId和MVCC的事务ID是采用同一套ID生成器的，由于WAL的写入和memstore的写入处在同一个事务里，采用相同的计数ID可以让应用变得更加简洁。</para>
-				<para>然而在WAL解耦到kafka之后，写WAL和写memstore变成了一个异步的过程，并且分散在不同的进程中来完成，在想使用同一套ID生成器变得不太可能，因此我们需要将WAL的sequenceId从原生的计数逻辑中解耦出来，不在与MVCC公用同一套ID生成器，而是将其与kafka的分区偏移量进行绑定，以便在执行LogSplit操作时通过指定偏移量来对消息进行回溯处理。</para>
-				<para>WAL的sequenceId主要用于服务LogSplit操作，RS端是通过SequenceIdAccounting来跟踪每个Region最后一次flush时的sequenceId的，并且以心跳通信的方式将其汇报到HMaster端进行保存，以便HMaster在处理LogSplit操作时能够过滤掉已被持久化的无用记录。为此我们可以考虑将kafka的消费偏移量从Consumer端传递到RS端，使其能够汇总到SequenceIdAccounting中进行保存，这样便可以复用已有的心跳汇报流程，整个OFFSET的传递过程如图所示：</para>
+				<para>记录下kafka的消费偏移量信息以便RS宕机时做日志回放处理</para>
+				<para>WAL的每行记录是通过sequenceId来进确定唯一性的，引入sequenceId主要是为了便于服务LogSplit操作。在原生实现里，sequenceId和MVCC的事务ID采用的是同一套ID生成器(代码参考WALKey#setWriteEntry方法)，由于WAL的写入和memstore的写入处在同一个事务里，采用相同的计数ID可以让应用变得更加简洁。解耦到kafka之后，sequenceId的概念转变成了kafka的offset，RS端需要把已持久化完成的offset保存下来，并且以心跳通信的方式将其汇报到HMaster，以便HMaster在处理LogSplit操作时能够过滤掉已被持久化的无用记录。</para>
+				<para>为此我们可以考虑将kafka的消费偏移量从Consumer端传递到RS端，使其能够汇总到KafkaOffsetAccounting中进行保存，同时利用已有的心跳汇报流程，在与HMaster心跳通信过程中将kafka的偏移量信息一并传递到master端去做处理，整个OFFSET的传递过程如图所示：</para>
                 <mediaobject>
 					<imageobject>
 						<imagedata contentdepth="100%" width="90%" fileref="../media/hbase/offset_pass.png"></imagedata>
 					</imageobject>
 				</mediaobject>
-				<para>Consumer在执行kafka消费过程中，可以拿到每条WAL日志记录对应的offset，然后通过执行Mutation#setAttribute方法将其序列化到Mutation对象实例中进行保存，这样HBaseClient在执行RPC远程调用时便可将其发送到RegionServer端进行处理。</para>
-				<para>RegionServer端收到请求之后，可通过Mutation#getAttribute方法将offset信息反序列化出来，在通过自定义的KafkaClientWAL将其传入SequenceIdAccounting中进行统计。KafkaClientWAL与原生WAL最大的区别便是这里只需记录每条日志的offset而无需对日志内容进行保存，因为保存操作已经在客户端完成。而我们基于kafka所实现的WALProvider主要目的便是用来创建出KafkaClientWAL对象实例。</para>
+				<para>Consumer在执行kafka消费过程中，可以拿到每条WAL日志记录对应的offset以及partition信息，然后通过执行Mutation#setAttribute方法将其序列化到Mutation对象实例中进行保存，这样HBaseClient在执行RPC远程调用时便可将其发送到RegionServer端进行处理。</para>
+				<para>RegionServer端收到请求之后，可通过Mutation#getAttribute方法将offset和partition信息反序列化出来，在通过自定义的KafkaClientWAL将其传入KafkaOffsetAccounting中进行统计。KafkaClientWAL与原生WAL最大的区别便是这里只需记录每条日志的offset而无需对日志内容进行保存，因为保存操作已经在客户端完成。而我们基于kafka所实现的WALProvider主要目的便是用来创建出KafkaClientWAL对象实例。</para>
+				<tip>针对每个批次的multi请求，Region端只会记录一条WALEntry(代码参考HRegion#doMiniBatchMutate)，因此需要针对每个请求批次进行筛选，取出offset最小的Mutation将其偏移量传递给KafkaOffsetAccounting，否则在执行logSplit操作时有可能产生丢数。</tip>
 			</listitem>
 			<listitem>
 				<para>针对Marker记录需要保留原生的WAL写入方式</para>
@@ -76,18 +76,186 @@
     </section>
     <section>
     	<title>LogSplit改造</title>
+    	<para>HBase的LogSplit逻辑是通过HMaster与RS的共同参与来完成的，HMaster端主要负责生成每一个SplitLogTask任务，RS端则会对具体的任务进行抢占和处理，其中的协调过程主要是通过ZK来进行控制的，大体的处理流程如图所示：</para>
+    	<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/logsplit.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>每个组件的大致职责描述如下：</para>
+		<itemizedlist make='bullet'>
+			<listitem>
+				<para>HMaster端组件</para>
+				<orderedlist>
+					<listitem><para>SplitLogManager主要负责生成每一个SplitLogTask任务，并将任务内容序列化写入ZK。</para></listitem>
+					<listitem>
+						<para>TimeoutMonitor负责监控每个SplitLogTask任务的执行情况</para>
+						<para>如果Task所在RegionServer宕机，或者执行时间超过了hbase.splitlog.manager.timeout阈值，TimeoutMonitor都会将其进行重新提交处理；而如果Task是在分配过程中超时(处于UNASSIGN状态达到hbase.splitlog.manager.unassigned.timeout阈值)，TimeoutMonitor还会触发相应的RESCAN逻辑来唤醒每个SplitLogWorker对任务进行再次的抢占；最后TimeoutMonitor还会负责对残留的znode进行清理(Task已经运行结束，但是znode尚未清除)。</para>
+					</listitem>
+					<listitem><para>TaskFinisher组件负责对运行结束的Task执行相关的cleanup操作。</para></listitem>
+				</orderedlist>
+			</listitem>
+			<listitem>
+				<para>RegionServer端组件</para>
+				<orderedlist>
+					<listitem><para>SplitLogWorker线程主要负责对已注册完成的SplitLogTask任务进行抢占，RS进程在启动过程中会开启该线程实例来对ZK的/hbase/splitWAL节点进行监听。</para></listitem>
+					<listitem><para>TaskExecutor是用来真正处理LogSplit逻辑的组件，处理过程中主要是对log数据源进行读取并对无用记录进行过滤。</para></listitem>
+					<listitem><para>OutputSink负责将TaskExecutor的处理结果输出到HDFS的每个Region目录，对应的子目录为recover.edits文件夹，Region在启动过程中会对该文件夹下的数据进行加载和回放。</para></listitem>
+				</orderedlist>
+			</listitem>
+		</itemizedlist>
+		<para>基于Kafka做日志回放与原生的实现逻辑相比主要有以下几个方面的不同，首先原生的WAL实现是具备滚动功能的，当日志量大了以后可通过滚动日志数据来生成新的日志文件，同时WAL的数量也是有上限约束的，当文件数量达到一定规模以后，hbase会对相关region做强行flush，以便对历史相对久远的WAL做归档处理，这样便有效限制了处于活跃状态的WAL数量，同时也限制了LogSplit操作时需要回放的WAL总量。</para>
+		<para>而将WAL转存到KAFKA之后，与之相应的WAL实现也便失去了滚动的功能，只能延着当前偏移量来做不断的递增写入，这样在执行LogSplit操作时，便需要对待回放的日志记录做区间过滤处理，而不能像之前一样对WAL数据做整体的过滤和回放。</para>
+		<para>另外，在原生实现里，SplitLogTask的执行并发度主要是由WAL的文件数量来决定的，而基于kafka做重构处理后，我们相当于只有一个WAL，因此还需要考虑新的并发度模型。</para>
+		<para>而从整个LogSplit的执行流程来看，其实我们只需对如下3个组件进行相应的功能定制，便可满足上述应用需求。</para>
+		<orderedlist>
+			<listitem>
+				<para>SplitLogManager</para>
+				<para>在原生实现里主要是针对每个HLog开启一个SplitLogTask，而基于KAFKA的实现方式可考虑针对partition纬度进行开启。</para>
+			</listitem>
+			<listitem>
+				<para>TaskFinisher</para>
+				<para>在原生实现里主要是对拆分完成之后的HLog进行归档，并对临时目录进行清理，而基于kafka则不需要做相关的归档操作。</para>
+			</listitem>
+			<listitem>
+				<para>TaskExecutor</para>
+				<para>在原生实现里主要是开启ProtobufLogReader对HLog进行读取，并对无用日志记录进行过滤，而基于kafka则需要根据region来定位partition，并通过offset来对partition数据进行过滤和读取。</para>
+			</listitem>
+		</orderedlist>
+		<section>
+			<title>SplitLogTask任务生成</title>
+			<para>在原生实现里，SplitLogTask任务生成逻辑主要是通过SplitLogManager类来进行封装的，其内部的一些功能函数针对KAFKA日志场景同样适用，这些函数包括：</para>
+			<itemizedlist make='bullet'>
+				<listitem>
+					<para>enqueueSplitTask</para>
+					<para>将构建好的SplitLogTask任务提交至ZK队列中，以便于RS端进行抢占和执行。</para>
+				</listitem>
+				<listitem>
+					<para>waitForSplittingCompletion</para>
+					<para>等待所有的SplitLogTask任务运行结束。</para>
+				</listitem>
+			</itemizedlist>
+			<para>为了对已有代码的功能逻辑形成复用，我们新抽象出了LogRecoveryManager功能类，并将这些方法从SplitLogManager类中上移做继承处理。然后针对KAFKA应用场景全新定义了KafkaRecoveryManager功能类并使其继承LogRecoveryManager，这样基于KAFKA的任务生成逻辑便独立到了单独的类中进行处理。</para>
+			<para>在基于KAFKA做任务生成时需要对如下因素进行考量。</para>
+			<orderedlist>
+				<listitem>
+					<para>SplitLogTask的任务生成粒度</para>
+					<para>如之前所描述，原生的SplitLogTask生成逻辑是以WAL为粒度进行的，而基于KAFKA做日志存储后，我们相当于只有一个WAL，需要考虑新的并发度模型，为此我们可以考虑将任务的生成粒度细化到Region级别。</para>
+					<para>HMaster收到RS的宕机事件后是可以通过RegionStates来获取目标RS都部署了哪些Region的(通过其getServerRegions方法)，同时RS端还会把每个Region与partition的映射关系以心跳的方式汇报给HMaster，这样在执行日志回放操作时，只需要对指定的partition进行数据回溯即可，而无需对所有topic数据进行回放。</para>
+				</listitem>
+				<listitem>
+					<para>日志回放区间的确定</para>
+					<para>在由Region定位到具体的partition之后，我们还需对partition的回溯区间进行确认，包括待回放的起始偏移量以及结束偏移量，从而避免不必要的数据冗余。</para>
+					<para>起始偏移量的确认可通过ServerManager来获取(通过其getLastFlushedKafkaOffsets方法)，RS在与HMaster心跳过程中会汇报每一个Region对应partition的offset信息。结束偏移量不能简单的指定为目标partition的lastOffset信息，因为RS宕机期间，partition数据的写入是不受阻塞的，其lastOffset值会持续增长，这样当Region重新上线以后，consumer继续之前的偏移量消费时便会产生一部分数据冗余。为此我们需要将结束偏移量设置为consumer的lastOffset信息。</para>
+				</listitem>
+			</orderedlist>
+			<para>基于以上考量我们需要对任务名称进行一些调整，按照如下规则来进行命名(调整前的任务名称是以WAL路径来进行命名的)</para>
+			<blockquote><para>topic_partition_startOffset_endOffset_regionName-startKey-endKey</para></blockquote>
+			<para>这样通过任务名称SplitLogWorker便可得知是对哪个topic的partition进行数据回溯，回放区间范围是多少，并且需要过滤出哪个region的数据(详见SplitLogTask任务执行章节)。</para>
+			<tip>当前处理方式的局限性：由于任务名称中各字段信息是以下划线来做分割的，因此topic名称中不能再有下划线信息，否则会导致字段信息解析出错。</tip>
+			<para>另外HBase还有一些系统表格是不走KAFKA日志逻辑的，当这些表格所在机器宕机时需要按照原生逻辑做日志回放处理，因此HMaster需要兼容两种使用模式，通过对宕机机器进行提前的判定(是否部署了系统表格)，来决定采用哪种机制进行日志回放(代码逻辑可参考ServerCrashProcedure类的splitLogs方法)。</para>
+		</section>
+		<section>
+			<title>SplitLogTask任务执行</title>
+			<para>SplitLogTask任务生成以后，HMaster会将其序列化写入ZK，然后交由RS端去负责抢占和执行。RS进程在启动过程中会开启相应的SplitLogWorker线程实例，以便对ZK的/hbase/splitWAL节点进行监听，进而完成任务抢占相关的逻辑。</para>
+			<para>在引入kafkaWal功能以后，HMaster端有可能生成两种类型的SplitLogTask任务(分别基于原生WAL和kafkaWal)，因此SplitLogWorker需要有感知任务类型的能力，只对自己能够处理的任务类型进行抢占(代码逻辑可参考ZkCoordinatedStateManager#initialize方法，以及ZkSplitLogWorkerCoordination#taskLoop方法)。</para>
+			<para>SplitLogWorker抢占到目标任务以后会交由TaskExecutor来负责具体的执行，在原生实现里主要是开启ProtobufLogReader来对目标HLog进行读取，而基于kafka的日志处理逻辑则主要是针对目标分区进行消息回溯(代码逻辑可参考KafkaWALSplitter#splitLogFile方法)。任务在处理过程中，需要首先对taskName进行解析，以便于获取与任务相关的元数据信息(topic、partition、startOffset、endOffset以及region信息)，然后根据topic、partition以及startOffset将consumer的消费指针定位到目标分区偏移量上，从该偏移量位置开始进行消费直至消费指针到达endOffset。整个消费过程中还需要满足region过滤，因为不同的region有可能映射到同一个partition上，这时我们需要将不符合region rowkey区间的记录进行过滤。</para>
+			<tip>WAL在转存到kafka之后，每条记录只会对应一个WALEntry实体(客户端做的限制)，因此可从WALEntry中解析出具体的rowkey信息，然后判断该rowkey是否隶属于目标region的[startkey,endkey)区间范围，便可完成相应的过滤处理逻辑(代码可参考KafkaWALSplitter#isRowkeyInRange方法)。</tip>
+			<para>针对满足过滤条件的WALEntry实体，OutputSink会将其转存到对应的Region目录下(写入每个region的recover.edits目录)，以便Region在启动加载过程中完成相应的回放处理(代码实现可参考HRegion#replayRecoveredEdits方法)。</para>
+		</section>
+		<section>
+			<title>LogSplit作业清理</title>
+			<para>LogSplit作业运行结束以后，需要对目标RS的历史WAL进行清理，否则HMaster每次启动都会认为其出现了宕机事件。在原生实现里，清理逻辑主要是通过TaskFinisher来封装的。引入kafkaWal之后(保留了一些原生的WAL逻辑用于存储marker)，由于TaskFinisher中不便于获取ServerName，清理逻辑转移到了ServerCrashProcedure类中去完成(当其处理SERVER_CRASH_FINISH事件时)。</para>
+		</section>
     </section>
     <section>
     	<title>其他变动调整</title>
     	<orderedlist>
     		<listitem>
     			<para>心跳汇报逻辑</para>
-    			<para>每个Region最后flush时的sequenceId是通过RS与HMaster的不断心跳来维持上报的，HMaster收到信息以后会对其进行持久化存储(HBASE-20727)，以便在执行LogSplit操作时确定数据回放的起始区间。</para>
-    			<para>在原生的汇报逻辑里面，MVCC的事务ID与WAL的sequenceId还尚未解耦，因此每次心跳汇报其实是每个Region最后flush时的MVCC信息(代码逻辑可参考HRegion的setCompleteSequenceId方法)。WAL解耦之后需要对汇报逻辑进行相应调整，如果某个Store从加载至今还没有触发过flush操作，将其对应的sequenceId设置成0进行汇报；否则通过KafkaClientWAL#getEarliestMemstoreSeqNum方法获取其最后flush时的sequenceId进行汇报。另外在Region的所有Store中取sequenceId最大的值来作为当前Region的sequenceId进行汇报。</para>
+    			<para>原生WAL实现里，每个Region最后flush时的sequenceId信息是通过SequenceIdAccounting进行统计的，可通过执行其getLowestSequenceId方法来进行获取，并以心跳的方式汇报给HMaster。</para>
+    			<para>解耦到kafka之后sequenceId的概念变成了kafka的offset，每个Region最后flush时的offset转存到了KafkaOffsetAccounting进行维护，同样我们可通过执行其getEarliestKakfaOffset方法来获取这些信息。</para>
+    			<para>为了将已有的offset信息上报给HMaster，我们需要对已有的心跳协议做一些调整，为PB声明引入如下定义：</para>
+    			<programlistingco>
+					<programlisting>
+hbase-protocol-shaded/src/main/protobuf/ClusterStatus.proto
++ /**
++  * offset info of each partition
++  */
++ message KafkaOffset {
++   required uint32 partition = 1;
++   required uint64 offset = 2;
++ }
++
+  message RegionLoad {
+    ...
+    optional uint64 cp_requests_count = 19;
++
++  /** the most recent kafka offset from cache flush */
++  repeated KafkaOffset kafka_offset = 20;
+  }
+					</programlisting>
+				</programlistingco>
+				<para>以此来完成offset向HMaster的汇报操作(RS端的汇报动作可参考HRegion的setCompleteSequenceId方法，HMaster端的响应处理可参考ServerManager的updateLastFlushedSequenceIds方法)。</para>
     		</listitem>
     		<listitem>
     			<para>Region加载逻辑</para>
+    			<para>Region在加载过程中，会去查看其对应的HDFS存储目录是否存在recover.edits数据文件，如果存在则需要对其数据内容进行相应的回放处理。这些文件是在执行LogSplit过程中生成的，文件的每行记录对应一个WALEntry，而文件名则取值所有WALKey中最大的sequenceId，如果其值小于当前Region的最小MVCC则可以对其进行过滤和屏蔽。</para>
+    			<tip>Region在加载过程中，最小MVCC是通过如下方式来进行确认的：首先遍历每一个Store，对Store下面的每个HFile做元数据信息读取，取出每个HFile的最大sequenceId(对应FileInfo块的MAX_SEQ_ID_KEY信息)；然后综合比对每一个HFile的sequenceId值，从中选出最大的值来作为当前Store的最小MVCC(代码可参考HStore#getMaxSequenceId方法)；最后对每一个Store进行比对，取sequenceId的最小值来作为当前Region的最小MVCC。</tip>
+    			<para>由于整个过滤比对过程需要针对MVCC来进行判断，因此原生的recover.edits过滤逻辑并不适用于我们新引入的KafkaClientWAL(sequenceId的概念已经变成了kafka的offset，不能在和MVCC做统一对比)，而在基于Kafka构建SplitLogTask时，我们已经通过指定回放区间的方式来对无用数据做了相应的过滤处理，因此这里的recover.edits过滤逻辑其实可以忽略(代码改动可参考HRegion#replayRecoveredEditsIfAny方法)。</para>
+    			<para>另外在原生实现里，执行recover.edits数据回放的时候，Region还会去比对每个WALEntry的sequenceId值，如果其值高于当前Region的最小MVCC，则将该MVCC进行重新赋值，以此来确定Region加载完成之后的初始MVCC，并通过MultiVersionConcurrencyControl#advanceTo进行跳转。</para>
+    			<para>同样，这里sequenceId与MVCC的比对逻辑针对KafkaClientWAL并不适用，因此在回放过程中我们忽略掉了这部分的比对逻辑，并在回放数据写入memstore的时候将mvccId声明为当前Region的readpoint(代码参考HRegion#replayRecoveredEdits方法)，只通过HFile的元数据信息来确定Region完成加载后的初始MVCC值。</para>
+    			<tip>目前该方式有可能带来以下弊端：由于MVCC的事务ID是会在客户端进行保存的，当其值被序列化到Scan对象之后(参考ScannerCallable#openScanner)，如果基于failover后的Region重新发送了查询申请，则该MVCC值会再次传递到RS端，导致之前不可见的数据现在有可能变得可见，针对Scan#setBatch类型的请求可能会带来读一致性方面的影响。</tip>
     		</listitem>
     	</orderedlist>
+    </section>
+    <section>
+    	<title>Topic扩容缩容</title>
+    	<para>kafka的topic扩容/缩容可能会给日志回放操作带来以下影响：</para>
+        <para>(1)新扩容的region->partition映射关系在没有通知到HMaster之前RS宕掉，导致新partition上面的数据无法参与回放，进而引发数据丢失。</para>
+    	<para>(2)针对历史失效的region->partition映射，如果HMaster不能及时删除将会导致无效的映射关系也会参与到回放。</para>
+    	<para>因此LogSplit操作能够支持kafka分区动态扩容/缩容的核心是要处理好Region->partition映射在HMaster与RS之间的状态同步，为此引入了如下解决方案(代码逻辑主要封装在KafkaOffsetAccounting类实现中)：</para>
+    	<orderedlist>
+    		<listitem>
+    			<para>首先需要对region->partition映射关系进行持久化存储。</para>
+    			<para>以防HMaster与RS同时宕机时，无法确定目标Region的partition回放区间。目前持久层是通过ZK来提供的，对应的znode存储路径为/hbase/region-partition-persistent.</para>
+    		</listitem>
+    		<listitem>
+    			<para>其次RS端需要记录其上一次与HMaster心跳时所汇报的Region->partition映射关系。</para>
+    			<para>这样便可以通过前后两次心跳所产生的diff对映射关系做如下处理。</para>
+    			<itemizedlist make='bullet'>
+    				<listitem>
+    					<para>如果某个映射关系在上次心跳中存在，而当前心跳中不存在，将其从持久层移除。</para>
+    					<para>出现该情况可能由以下两个原因导致：</para>
+    					<para>(1)kafka扩容/缩容之后该映射关系已经失效，不在有新数据写入。</para>
+    					<para>(2)该映射关系对应的写活跃度很低，继上次flush之后已经很久没有新数据写入了。</para>
+    				</listitem>
+    				<listitem>
+    					<para>而如果某个映射关系在当前心跳中存在，而在上次心跳中不存在，则需要将其添加到持久层。</para>
+    					<para>出现该情况可能由以下两个原因导致：</para>
+    					<para>(1)该映射关系为kafka扩容之后的新增映射。</para>
+    					<para>(2)久不活跃的映射链路又有了新的数据写入。</para>
+    				</listitem>
+    			</itemizedlist>
+    		</listitem>
+    		<listitem>
+    			<para>另外当RS端有新的映射链路进来时(也即flush之后Partition写第一条记录到memstore时)，需要判断其上次与HMaster心跳时是否已经汇报了该映射关系。</para>
+    			<para>如果没有汇报，则需要将该映射关系记录到ZK的临时层(对应的znode路径为/hbase/region-partition-volatile)，这样便确保了即使在汇报该映射关系之前RS宕掉，HMaster依然可以从ZK上面拿到数据。</para>
+    			<para>反之如果上次心跳已经汇报过，那么便没有必要将其记录到ZK，因为HMaster已经有该映射关系了，不需要从ZK上去获取，以此减轻ZK的操作频率。</para>
+    		</listitem>
+    	</orderedlist>
+    	<para>引入该处理方案之后，HMaster在处理LogSplit操作时可通过如下方式来确定目标Region与partition的映射关系：首先以RS心跳过来的映射关系为基准，然后去查询ZK的持久层，判断心跳是否存在遗漏，最后去查询ZK的临时层，从而汇总出最终的映射关系集合。</para>
+    	<para>如果映射关系是从ZK的临时层获取的，那么在构造SplitLogTask任务时还需进行如下判定：如果从znode上拿到的offset值小于目标partition在10分钟(随机阈值，大于RS与HMaster的心跳周期即可)之前的offset值，则说明该映射关系并不来自于RS宕机前尚未来得及向HMaster进行汇报的记录，因此没有必要对其进行日志回放操作。否则需要基于该映射关系来构建splitLogTask，并在任务运行结束的时候将临时层的znode删除(代码封装在KafkaRecoveryManager功能类的TaskFinisher实现中)。</para>
+    </section>
+    <section>
+    	<title>功能使用约束</title>
+    	<para>在为表格定义切片信息的时候，每个表格的Region最好可以和kafka的partition形成一对一的水平映射关系，如下图所示：</para>
+    	<mediaobject>
+          <imageobject>
+            <imagedata contentdepth="100%" width="90%" fileref="../media/hbase/region-partition.png"></imagedata>
+          </imageobject>
+        </mediaobject>
+        <para>这样做的好处是在执行LogSplit操作时，针对每个Region只需要回放一个partition的数据即可，而且当父Region拆分以后，子Region依然可以保证和父Region映射到同一个partition上面，这样分区偏移量信息便可以有效继承。</para>
+        <para>另外，客户端的put数据写入到哪个partition是每次动态计算出来的，而不是通过元数据信息进行管理。相应的计算逻辑可参考KafkaUtil#getTablePartition方法，方法可以保证子Region和父Region会映射到相同的partition上面，但是使用前提是表格的rowkey前缀区间需要散列到0000~9999范围内。</para>
     </section>
 </section>

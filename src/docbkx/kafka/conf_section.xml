@@ -94,6 +94,9 @@ request.timeout.ms=30000
 # comes alive as the leader
 unclean.leader.election.enable=false
 metric.reporters=com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter
+
+# Define whether the timestamp in the message is message create time or log append time.
+log.message.timestamp.type=LogAppendTime
 					</programlisting>
 				</programlistingco>
 			</listitem>

@@ -10,4 +10,5 @@
 	<xi:include href="kafka_wal_section.xml"/>
 	<xi:include href="kafka_replication_section.xml"/>
 	<xi:include href="cluser_replica_section.xml"/>
+	<xi:include href="walless_section.xml"/>
 </section>

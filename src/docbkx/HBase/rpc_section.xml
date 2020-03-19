@@ -83,6 +83,7 @@ message RequestHeader {
 						<para>分配给priorityExecutor组的Handler数量通过hbase.regionserver.metahandler.count参数来指定，默认为10个；</para>
 						<para>分配给callExecutor组的Handler数量通过hbase.regionserver.handler.count参数来指定，默认为30个；</para>
 						<para>分配给replicationExecutor组的Handler数量通过hbase.regionserver.replication.handler.count参数来指定，默认为3个。</para>
+						<tip>产品分组的概念是通过RpcExecutor类来封装的，其中FastPathBalancedQueueRpcExecutor实现类官方测试可提升20%的随机读性能，如果请求链路的QueueCallTime较长，并且ActiveHandler又没有跑满，可考虑使用该实现类。</tip>
 						<para>每一个产品组还可细分成多个产品队列，默认情况下每个产品组只包含一个产品队列。这样产品组中的所有Handler都会去竞争该队列中的资源，为了防止竞争惨烈的情况发生，可将每一个产品组划分成多个产品队列，让每个Handler只去抢占指定队列中的资源。在HRegionServer中，可通过如下方法来计算callExecutor组可以划分成多少个产品队列：</para>
 						<para>Math.max(1,hbase.regionserver.handler.count*hbase.ipc.server.callqueue.handler.factor)</para>
 						<para>其中hbase.ipc.server.callqueue.handler.factor属性值默认为0，即在默认情况下只将该产品组划分成一个产品队列。</para>
@@ -119,7 +120,8 @@ message ResponseHeader {
 		<section>
 			<title>阻塞式通信</title>
 			<para>目前为止，所有HBase内部的通信都是基于阻塞式进行设计的，通信管道采用BlockingRpcChannelImplementation来实现，该类在功能上实现了protobuf的BlockingRpcChannel接口，可通过RpcClient的createBlockingRpcChannel方法进行获取。</para>
-			<para>在通信过程中，客户端向服务端发送请求信息之后，将会进入循环等待状态，直至服务端返回执行结果(代码可参考RpcClientImpl.Connection类的waitForWork方法)如果等待时间超过了2分钟(通过hbase.ipc.client.connection.minIdleTimeBeforeClose参数指定)，客户端将抛出以下异常并将当前链接进行关闭：idle connection closed with $size pending request(s)</para>
+			<para>在通信过程中，客户端向服务端发送请求信息之后，将会进入循环等待状态，直至服务端返回执行结果(代码可参考RpcClientImpl.Connection类的waitForWork方法)如果等待时间超过了2分钟(通过hbase.ipc.client.connection.minIdleTimeBeforeClose参数指定)，并且已经没有尚未发送的请求，客户端将抛出以下异常并将当前链接进行关闭：idle connection closed with $size pending request(s)</para>
+			<tip>读取response过程中如果出现了SocketTimeout异常，客户端并不会将链接关闭，而是发起retry逻辑，retry之后的线程处理依然采用该链接来发送请求。</tip>
 			<para>阻塞式通信的过程用代码描述大致如下(拿ClientService举例)：</para>
 			<programlistingco>
 				<programlisting>
@@ -203,6 +205,41 @@ channel.callMethod(method, new PayloadCarryingRpcController(), param, <co id="co
 					</callout>
 				</calloutlist>
 			</programlistingco>
+		</section>
+		<section>
+			<title>retry机制</title>
+			<para>HBase会为每个客户端的HConnection绑定一个固定的线程池(最大线程数默认256个，可通过hbase.hconnection.threads.max参数配置)，每当有RPC请求调用时主要是通过该线程池来进行处理。以multi请求为例，大体的执行流程如下：</para>
+			<orderedlist>
+				<listitem>
+					<para>首先将请求按照region粒度拆分成多个SingleServerRequestRunnable，然后将每一个runnable提交到线程池中去运行处理。</para>
+					<para>拆分runnable的逻辑可参考AsyncRequestFutureImpl#groupAndSendMultiAction方法，提交到线程池的逻辑可参考AsyncRequestFutureImpl#sendMultiAction方法。</para>
+				</listitem>
+				<listitem>
+					<para>SingleServerRequestRunnable在运行过程中会首先构建一个MultiServerCallable实例，然后通过当前线程对其进行处理。</para>
+					<para>构建MultiServerCallable的逻辑可参考AsyncRequestFutureImpl#createCallable方法。</para>
+				</listitem>
+				<listitem>
+					<para>MultiServerCallable在执行过程中会构造出相应的Request对象并采用pb的方式对其进行序列化管理，然后通过RPC的方式远程调用Server端的服务。</para>
+					<para>远程调用的逻辑主要是通过RpcClientImpl#call方法来封装的，请求发送之后将会进入循环等待状态，直到有相应的response信息到来。</para>
+					<para>另外如果客户端开启了hbase.client.rpc.codec配置，有关KV数据的序列化处理是不通过pb来完成的，而是通过配置引入的KeyValueCodec来完成。</para>
+				</listitem>
+				<listitem>
+					<para>在通过RpcClientImpl对目标服务进行远程调用时，会级联创建出目标服务所在机器的Connection线程，并将该链接缓存下来用于服务后续的请求。</para>
+					<para>Connection线程的主要目的是对socket通信的response信息进行不断的读取(代码可参考RpcClientImpl#Connection#readResponse方法)，并将读取到的信息传递给目标Call对象(setResponse或者setException)。</para>
+					<para>如果读取response过程中触发了SocketTimeoutException以外的其他IO异常，会尝试将该链接进行关闭(通过调用markClosed方法)，否则只是打印trace信息(SocketTimeoutException情况下考虑重建链接？)。</para>
+					<para>无论读取response成功与否，最后都会执行cleanupCalls操作，将运行结束以及运行超时的Call对象从队列中移除。</para>
+				</listitem>
+				<listitem>
+					<para>Connection读取response阶段，Call对象所运行的主线程会进入循环等待状态，直至有response信息传递过来，或者等待时间达到了hbase.client.operation.timeout阈值。</para>
+					<para>如果response显示服务端的执行出现了异常，或者等待response过程中超时，则RpcClientImpl#call方法会继续将异常向上抛出，以便触发接下来的retry逻辑。</para>
+				</listitem>
+				<listitem>
+					<para>异常最终会在SingleServerRequestRunnable中进行捕获，然后进入receiveGlobalFailure逻辑中进行处理，在处理的最后阶段会将失败的Action进程重新的提交。</para>
+				</listitem>
+				<listitem>
+					<para>重新提交后开始再次进入步骤1的处理逻辑，只不过无需在向线程池提交新的runnable，复用上一次运行时的线程实例即可。</para>
+				</listitem>
+			</orderedlist>
 		</section>
 	</section>
 	<section>

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>pipeline写入流程</title>
+	<para>整个pipeline的写入流程大致如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/memstore_pipeline.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>RS之间需要引入新的通信协议以便在memstore之间做数据同步，同时在每个Replica内部写memstore将会变成一个异步的过程，也即有可能memstore还没有写成功，ack响应便发送到了下游。所以这里面可能存在一个问题，如果部署primary和replica的三台机器同时宕机，那么有可能会因为部分数据还没有持久化而导致部分数据丢失。社区JIRA对此也有类似疑问，而Intel这边给出的答复是原生WAL写入也会存在类似问题，因为写入过程中我们调用的是hflush而不是hsync，相关DFSPacket有可能尚未持久化到磁盘。因此在写memstore这块为了提升pipeline的写入效率，采用的是异步处理机制，但是primary端的写入依然采用同步的方式来处理。</para>
+	<para>由于CSLM是异步写入的，这样当客户端的读请求从primary切换到Replica的时候，有可能会出现CSLM还未同步的情况，这时在对Replica执行读操作时，有可能读取不到这部分数据。因此在对Replica执行读操作之前，需要确保该Replica的全局mvccId已经大于等于客户端传递过来的readpoint，否则查询需要进入等待(代码可参考HRegion中有关RegionScannerImpl的构建过程)。</para>
+	<para>同时还有另外一种极端情况需要考虑，客户端发起读操作的时候(尚未从primary获取readpoint)，正好Primary发生了宕机，此时需要将读请求路由到Replica，在对Replica做读取时并不能使用其当前全局的mvccId来作为readpoint，因为部分数据由于异步的原因可能还没有保存到CSLM，如果采用当前全局的mvccId来作为readpoint便会导致这部分数据不可见。对此，新架构的解决方案是新引入了一个seqNo，当某一个批次的数据保存到MSLAB之后(异步原因可能还未同步到CSLM)，将seqNo指定成该批次中所有记录最大的mvccId，这样在对Replica进行数据读取的时候需要将readpoint指定成seqNo，然后等待Replica的全局mvccId大于等于seqNo之后在对数据进行读取。</para>
+	<section>
+		<title>写入细节</title>
+		<para>pipeline写入过程中所牵扯到的类关系调用时序图大致如下：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/pipeline_seq.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>从primary视角来看，收到客户端的请求之后开始调用HRegion#doMiniBatchMutate进行如下处理：</para>
+		<orderedlist>
+			<listitem>
+				<para>首先生成此次操作对应的MemstoreEdits</para>
+				<para>与原生WALEdit相类似，MemstoreEdits主要用来封装当前操作批次所对应的KV，构造方法可参考BatchOperation#buildMemstoreEdit实现。</para>
+				<para>通过引入自定义的WALProvider来实现更为合适？这样便可做成热插拔的功能。</para>
+			</listitem>
+			<listitem>
+				<para>然后开始触发replicateCurrentBatch操作，以便将MemstoreEdits数据同步到Replica端去做处理。</para>
+				<para>数据的同步过程大致如图所示(代码逻辑主要通过SimpleMemstoreReplicator#replicate来封装)：</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/pipeline_primary.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>首先构造出MemstoreReplicationEntry(同原生的WALEntry功能类似)，然后通过调用RegionReplicaCoordinator#append方法将其加入到entryBuffer队列中。</para>
+				<para>针对entryBuffer队列，SimpleMemstoreReplicator会开启多个ReplicationThread线程对其进行消费处理(从队列中拿数据的操作可参考RegionReplicaCoordinator#pullEntries方法)，消费过程主要是构建RegionReplicaReplayCallable实例，然后通过当前线程来运行处理。</para>
+				<para>RegionReplicaReplayCallable是通过RpcRetryingCaller来进行调用的，因此其执行失败的话会有retry逻辑，每次执行都会对远端的Replica服务进行调用(通过RsRpcServcie#replicateMemstore方法)。</para>
+				<para>需要向哪些Replica做下游的数据同步是通过RegionReplicaCoordinator#createPipeline来确定的，方法在执行过程中会做如下判断处理：</para>
+				<itemizedlist make='bullet'>
+					<listitem>
+						<para>如果内存状态显示目前存在不健康的Replica，但是还没有同步到META表格，直接抛出PipelineException异常给调用端，以便后续触发retry逻辑。</para>
+						<para>需要这样处理的原因如下：如果primary内存状态显示某个replica处于不健康的状态，则后续不在向其做数据同步处理。但是由于状态还没有同步到META表格，如果此时HMaster宕掉，其他HMaster在接管服务时还会认为该Replica是健康的，这样便有可能将primary切换到该Replica上，从而造成数据丢失。因此在replica状态还没有同步到META之前，primary端应该禁止做数据写入。</para>
+					</listitem>
+					<listitem>
+						<para>如果内存状态显示当前处于健康状态的Replica数量不满足min-replica要求，直接抛出PipelineException异常给调用端。</para>
+					</listitem>
+					<listitem>
+						<para>否则遍历目标Replica集合，如果其处于健康或者"过度"状态，将其加入到最终的pipline。</para>
+					</listitem>
+				</itemizedlist>
+				<tip>primary端的pipline初始状态并不是通过加载META表格来获取的，而是Replica端自己汇报过来的。因为每当有Replica启动完成，都会对其触发flush调用进而将自己所在机器的location进行上报。因此region在分配过程中必须要先分配primary。</tip>
+			</listitem>
+			<listitem>
+				<para>收到下游Replica端返回的ack响应之后，需要判断已完成数据同步的Replica数量是否达到了min-replica需求。</para>
+				<para>代码实现可参考HRegion#checkIfMinWriteReplicSatisfied方法，如果存在失败的Replica，需要在内存和META中将其更新成不健康的状态(通过远程调用Master端的RPC服务)。</para>
+				<para>在将状态同步到META的过程中，如果primary有写入进来，需要将该请求标记成失败，然后返回异常给客户端以便其发起重试，详细可参考pipeline创建过程。</para>
+			</listitem>
+			<listitem>
+				<para>如果数据同步满足min-replica需求，将对应的MemstoreEdits数据同步到本地memstore，并提交此次MVCC事务。代码实现可参考BatchOperation#writeMiniBatchOperationsToMemStore实现。</para>
+			</listitem>
+		</orderedlist>
+		<para>而从replica视角来看，收到primary或其他replica的同步请求后，开始调用HRegion#replicateMemstore进行如下处理。</para>
+		<orderedlist>
+			<listitem>
+				<para>如果在pipeline排序上还存在下一个replica需要同步，首先向其发送同步请求。</para>
+				<para>同步过程可参考SimpleMemstoreReplicator#replicate方法实现，首先通过RegionReplicaCoordinator#verifyPipeline来对本地的pipeline内存状态进行同步，然后构造RegionReplicaReplayCallable对远端的Replica服务进行调用处理。</para>
+			</listitem>
+			<listitem>
+				<para>最后通过调用HRegion#doBatchOpForMemstoreReplication将对应的KV数据同步到本地memstore.</para>
+			</listitem>
+		</orderedlist>
+	</section>
+	<section>
+		<title>异常处理</title>
+		<para>针对pipeline写入异常的情况，Intel的概要设计文档中给出了3种可能的场景(假设Region共有3个副本，Min-Replica指定为2)。</para>
+		<orderedlist>
+			<listitem>
+				<para>同步第三个Replica过程中出现超时</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/replica2_failed.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>此时会先舍弃第三个Replica的更新，并将其标记成不健康的状态(内存和meta)，第二个replica在执行Ack时会将失败的第三个Replica汇报给Primary，以便其去做更新。后续的写入会将第三个Replica进行exclude，Replica重新加载后会触发primary进行flush，以保证数据在Replica之间的状态同步，flush成功后便可将目标Replica标记回健康状态。</para>
+			</listitem>
+			<listitem>
+				<para>同步第二个replica过程中出现超时</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/replica1_failed.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>primary会重新创建写入pipeline并将第二个Replica进行exclude，发送Ack响应给客户端之前，将第二个Replica标记成不健康的状态。</para>
+			</listitem>
+			<listitem>
+				<para>所有Replica的同步都出现了失败</para>
+				<mediaobject>
+					<imageobject>
+						<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/replicaAll_failed.png"></imagedata>
+					</imageobject>
+				</mediaobject>
+				<para>由于满足不了min-replica需求，primary不会对memstore做更新处理，而是将更新失败的消息返回给客户端，向Client发送ack之前会先将每个Replica标记成不健康的状态。</para>
+			</listitem>
+		</orderedlist>
+	</section>
+</section>

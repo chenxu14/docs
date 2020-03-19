@@ -37,7 +37,9 @@
 	</orderedlist>
 	<section>
 		<title>MemStoreLAB</title>
-		<para>MemStore在使用上面临与BlockCache同样的问题，即如果内存空间分配不当，有可能会产生大量的内存碎片，从而降低整个堆内存的使用效率。对此，MemStore的处理办法是将内存数据划分成多个Chunk，每个Chunk称之为一个存储单元，其大小通过hbase.hregion.memstore.mslab.chunksize参数来指定，并且在内存上占据着连续的地址空间。当新增记录时，将KeyValue数据保存到Chunk里，待Chunk写满之后，在申请下一个Chunk进行写入，如果MemStore执行了flush操作，那么便可以对对整个chunk进行回收，从而防止了内存碎片的产生，Chunk结构如图所示：</para>
+		<para>MemStore在使用上面临与BlockCache同样的问题，即如果内存空间分配不当，有可能会产生大量的内存碎片，从而降低整个堆内存的使用效率。对此，MemStore的处理办法是将内存数据划分成多个Chunk，每个Chunk称之为一个存储单元，其大小通过hbase.hregion.memstore.mslab.chunksize参数来指定，并且在内存上占据着连续的地址空间。当新增记录时，将KeyValue数据保存到Chunk里，POJO对象保留对该Chunk的指针引用。待Chunk写满之后，在申请下一个Chunk进行写入，如果MemStore执行了flush操作，那么便可以对对整个chunk进行回收，从而防止了内存碎片的产生。</para>
+		<para>另外需要注意的是Chunk是以memstore为粒度进行抢占的，如果RS部署的Region比较多，或者Region的列族比较多，而大部分列族的写入又不是很频繁，有可能会造成chunk空间的浪费(memstore抢占到Chunk后只使用了部分空间)。</para>
+		<para>Chunk结构如图所示：</para>
 		<mediaobject>
 			<imageobject>
 				<imagedata contentdepth="100%" width="100%" scalefit="1" fileref="../media/hbase/mslab.jpg"></imagedata>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>flush操作同步</title>
+	<para>在原生的Replica实现里，flush操作在primary端触发，然后通过写marker的方式将相关事件写入WAL，再通过Replication机制异步传递到Replica端去做回放处理。primary端的flush流程大致如下：</para>
+	<orderedlist>
+		<listitem><para>获取updatesLock锁，阻止新的事务向memstore中写入数据。</para></listitem>
+		<listitem><para>通过MVCC获取一个事务ID，等待该ID之前的事务全部提交(即等待未提交的数据写入memstore)</para></listitem>
+		<listitem><para>向WAL写入START_FLUSH_MARKER事件。</para></listitem>
+		<listitem><para>针对memstore生成snapshot数据。</para></listitem>
+		<listitem><para>释放updatesLock锁，允许memstore接受新的数据。</para></listitem>
+		<listitem><para>将snapshot数据持久化写入HFile。</para></listitem>
+		<listitem><para>向WAL写入COMMIT_FLUSH_Marker事件，并将生成的HFile路径包含在事件内。</para></listitem>
+	</orderedlist>
+	<para>Replica端收到相关的事件以后，按照状态机回放的机制，对WAL数据内容进行同步，只不过回放过程中可以跳过步骤3和步骤7的执行。步骤6的执行也会进行一些变更，无需在生成HFile，只需将snapshot舍弃，然后加载primary传递过来的HFile即可。</para>
+	<para>由以上流程来看，在执行步骤1到步骤5期间，hbase的数据写入将会处于一个阻塞的状态，无论是primary端还是replica端。但由于写链路的传递是一个异步的过程，因此总的阻塞时间只跟primary端有关，并不会产生叠加。但是将memstore重构成基于pipeline的写入方式之后，flush事件的传递变成了一个同步的过程，这样总的阻塞时间将会产生一个叠加，客户端的响应时延将会受到很大影响，为此需要针对该情况做特殊的考量。</para>
+	<para>一种解决办法是针对START_FLUSH_MARKER的写入做成异步化处理。即在执行步骤3的时候，将START_FLUSH_MARKER事件扔到一个队列里，然后通过单独的线程对其进行消费和处理。这样Replica端的写入阻塞时间便不会叠加到Primary里，但是后续会产生以下问题：经过异步化处理之后，写marker和写KV的顺序同步性便不能保证，比如primary端的写入顺序是KV1, MARKER, KV2，同步到Replica端之后，写入顺序有可能会变成KV1，KV2，MARKER。这样当Replica端在打包生成snapshot的时候会将KV2也包含进去，而在对snapshot进行drop之后，将会导致KV2数据丢失，对该Replica进行访问将不能保证数据的正确性。</para>
+	<para>另外还有一种异常情况需要考虑的是当不健康的Replica重新上线恢复的时候，会对primary触发一次flush操作，为了同步其数据内容。primary端收到flush事件之后，可以知道目标Replica已经处于了存活的状态(但尚不是健康状态，因为其还没有和primary做数据同步)，这个时候，primary可以向其发送START_FLUSH_MARKER事件，但是不会向其发送KV数据(pipeline只会选择健康的Replica)，导致的结果是Replica重新上线以后，只同步到了primary步骤5之前的数据，而步骤5到步骤7之间写入的数据将丢失。</para>
+	<para>因此需要对方案做如下调整：</para>
+	<orderedlist>
+		<listitem>
+			<para>发送START_FLUSH_MARKER事件依然做成同步，但是Replica端收到事件之后的处理做成异步。</para>
+			<para>primary在向replica发送START_FLUSH_MARKER的时候(步骤2中生成)，将对应的mvccId一并传递过去，replica收到事件以后先将对应的mvccId记录下来，然后开始异步执行生成快照的操作，由于异步执行并不会对primary形成阻塞。</para>
+		</listitem>
+		<listitem>
+			<para>primary收到Replica有关START_FLUSH_MARKER的ack响应之后，需要做如下判断处理。</para>
+			<para>如果有replica之前处于不健康状态，将其标记为“过度”状态，标记成该状态的目的是primary可以向其同步步骤5之后新写入的KV数据，但是客户端不可以访问该Replica，因其数据还没有完全同步，这样便缓解了上面提到的异常情况。</para>
+		</listitem>
+		<listitem>
+			<para>而Replica端在收到primary步骤5之后的数据同步时，需要先跟自己记录的mvccId值进行比较。</para>
+			<para>如果大于该值将其写入memstore，生成快照过程中，写入会被阻塞，但由于Replica端的memstore写入已经做了异步化的处理，所以并不会对primary端造成阻塞影响。</para>
+		</listitem>
+		<listitem>
+			<para>最后primary端收到不健康Replica有关COMMIT_FLUSH_Marker的ack响应后，将其从“过度”状态标记回健康状态。</para>
+		</listitem>
+	</orderedlist>
+	<para>疑问：不写HDFS的Marker如何解决类似HBASE-2231这样的问题？因此关于marker的写入需要向WAL也写入一份？</para>
+</section>

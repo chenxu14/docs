@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>primary热切</title>
+	<para>primary热切逻辑主要是在部署它的RS宕机时触发的，在收到RS宕机事件以后，HMaster端会开启ServerCrashProcedure进行回掉处理，以便将其他健康的replica热切成primary。将Replica热切成primary的过程主要复用了原有的openRegion操作流程，只不过现在需要向RS端传递两个Region：一个是需要加载成primary的region，一个是需要替换掉的replica。</para>
+	<para>RS端收到热切请求之后，会开启ConvertReplicaToPrimaryRegionHandler线程进行如下处理：</para>
+	<orderedlist>
+		<listitem>
+			<para>首先通过调用HRegion#convertAsPrimaryRegion将目标Replica切换成primary状态。</para>
+		</listitem>
+		<listitem>
+			<para>然后同步priamry状态到META表格(通过MasterRpcServices#reportRegionStateTransition)。</para>
+		</listitem>
+	</orderedlist>
+	<para>HMaster端收到primary加载完成的ack响应后，还需将被替换的replica在其他RS上重新部署(先下线，标记成不健康状态，在上线，代码逻辑可参考AssignReplicaAsPrimaryRegionProcedure#finishTransition方法)</para>
+</section>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Intel WALLess方案</title>
+	<para>写WAL的主要目的是为了能够在异常情况下恢复memstore遗失的数据，如果memstore可以持久化存储，那么便可以忽略WAL的写入。当前基于LSM树的架构如图所示：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/walless_lsm.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>目前该架构方式主要存在以下短板：</para>
+	<orderedlist>
+		<listitem>
+			<para>Replica数据同步做不到强一致性</para>
+			<para>Primary与Replica之间是异步备份的，写操作不能热切。</para>
+		</listitem>
+		<listitem>
+			<para>MTTR时间长</para>
+			<para>大批量的RS宕机时，会触发大量的WAL回放操作，数据的恢复时间需要很久。</para>
+		</listitem>
+		<listitem>
+			<para>memstore不能设置太大</para>
+			<para>宕机时间触发时，需要回放的WAL数据量也变增多，MTTR时间变得更长</para>
+		</listitem>
+	</orderedlist>
+	<para>对此Intel提供了一种基于PMEM的WALless解决方案，不在基于LSM的方式做写入管理。</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/walless_pmem.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>主要的变动调整如下：</para>
+	<orderedlist>
+		<listitem>
+			<para>memstore基于pipeline的方式同步，Replica之间可实现同步备份。</para>
+		</listitem>
+		<listitem>
+			<para>Chunk数据基于pmem进行存储</para>
+			<para>Chunk数据本质上是通过ByteBuffer来封装的，基于pmem构建ByteBuffer的可选类库(Apache Mnemonic，PCJ)</para>
+		</listitem>
+	</orderedlist>
+	<xi:include href="memstore_pipeline_section.xml"/>
+	<xi:include href="failover_section.xml"/>
+	<xi:include href="flush_pipeline_section.xml"/>
+	<xi:include href="region_assign_section.xml"/>
+	<xi:include href="chunk_replay_section.xml"/>
+</section>

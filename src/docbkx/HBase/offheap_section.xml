@@ -10,7 +10,9 @@
 	<para>gc问题是java开发中比较难以规避的一类性能问题，执行链路如果创建的临时对象比较多会导致新生代GC异常频繁，从而增加系统STW用时开销。为了缓解GC的回收压力，可考虑将部分内存数据移植到堆外进行管理使其不参与GC回收。目前HBase主要在以下几个方面对内存数据做了offheap处理。</para>
 	<section>
 		<title>RPC通信层面</title>
-		<para>RpcServer从buffers池中获取对等大小的内存资源用来存放客户端发送过来的通信报文(代码参考RpcServer.Connection#initByteBuffToReadInto方法)，buffers池的管理方式与内存分页相类似，每个分页大小可通过hbase.ipc.server.allocator.buffer.size参数进行指定，默认为65KB。分页数量可通过hbase.ipc.server.allocator.max.buffer.count参数进行声明，如不指定按如下公式进行计算得出(代码可参考ByteBuffAllocator.create)</para>
+		<para>当客户端开启hbase.client.rpc.codec配置时，有关KV数据的序列化处理是不走pb的，而是通过配置引入的KeyValueCodec来完成。这样做的好处是可以采用池化的机制来对KV所占用的内存空间进行管理，避免临时空间的申请与释放操作，从而一定程度上改善GC的性能。但同时需要保证客户端与服务端采用的是同一套KeyValueCodec处理逻辑，否则客户端所序列化的KV数据在服务端有可能不被识别，而采用pb来做序列化处理则不会有这样的问题发生，因为hbase已经对pb做了shade处理，客户端与服务端采用的是同一套序列化逻辑。</para>
+		<tip>有关客户端的池化管理可参考IPCUtil的buildCellBlockStream方法，主要借助于netty的PooledByteBufAllocator来实现(需要考虑客户端与服务端的netty兼容性？)。</tip>
+		<para>请求发送到服务端以后，RpcServer会从buffers池中获取对等大小的内存资源来存放客户端所发送过来的KV数据(代码参考RpcServer.Connection#initByteBuffToReadInto方法)，buffers池的管理方式与内存分页相类似，每个分页大小可通过hbase.ipc.server.allocator.buffer.size参数进行指定，默认为65KB。分页数量可通过hbase.ipc.server.allocator.max.buffer.count参数进行声明，如不指定按如下公式进行计算得出(代码可参考ByteBuffAllocator.create)</para>
 		<blockquote><para>handler数量 ＊ 2 ＊ 2M/分页大小</para></blockquote>
 		<para>其中handler数量主要是考虑到了请求的最大并发数，而之所以要乘2是因为服务端的response信息在被客户端完全接受前有可能又接受了新的请求，2M大小考虑到hbase的单次rpc请求返回的数据量上限。</para>
 		<tip>为尽量保证块数据保存在同一个分页上，通常将分页大小设置成块的大小加1Kb，另外如果申请的内存空间小于hbase.ipc.server.reservoir.minimal.allocating.size阈值(默认为分页大小的6分之一)，是不走buffers池分配的，而是直接从堆内存上申请，防止buffers空间的过度浪费。</tip>
@@ -157,10 +159,10 @@
       }
 +     res = commitWriter(writer, fd, request);
     } finally {
-      Closeables.close(scanner, true); <co id="co.offheap.lastcell" linkends="co.note.offheap.lastcell"/>
       if (!finished &amp;&amp; writer != null) {
         abortWriter(writer);
       }
+      Closeables.close(scanner, true); <co id="co.offheap.lastcell" linkends="co.note.offheap.lastcell"/>
     }
     assert finished : "We should have exited the method on all error paths";
     assert writer != null : "Writer should be non-null if no error";
@@ -176,7 +178,7 @@
 				</programlistingco>
 			</listitem>
 			<listitem>
-				<para>序列化response到CellBlock之前，封装response的ByteBuffer有可能已被释放回资源池。</para>
+				<para>异常情况下(客户端请求被cancel)ServerCall#cellBlockStream所占用的资源有可能不会被释放</para>
 				<programlistingco>
 					<programlisting>
 +++ org/apache/hadoop/hbase/ipc/CallRunner.java
@@ -195,7 +197,7 @@
 -         sucessful = true;
         }
       }
-      // return back the RPC request read BB we can do here. It is done by now.
+-     // return back the RPC request read BB we can do here. It is done by now.
 -     call.cleanup(); <co id="co.offheap.clear" linkends="co.note.offheap.clear"/>
       ...
       call.setResponse(param, cells, errorThrowable, error);
@@ -204,8 +206,8 @@
       ...
     } finally {
       if (!sucessful) {
++       call.releaseResource(); <co id="co.offheap.fail" linkends="co.note.offheap.fail"/>
         this.rpcServer.addCallSize(call.getSize() * -1);
-+       call.cleanup(); <co id="co.offheap.fail" linkends="co.note.offheap.fail"/>
       }
       cleanup();
     }
@@ -215,16 +217,75 @@
       ...
     } finally {
       if (!sucessful) {
++       call.releaseResource();
         this.rpcServer.addCallSize(call.getSize() * -1);
-+       call.cleanup();
       }
       cleanup();
     }
   }
-					</programlisting>
+
++++ org/apache/hadoop/hbase/ipc/ServerCall.java
+  @Override
+  public void done() {
+-   if (this.cellBlockStream != null) {
+-     // This will return back the BBs which we got from pool.
+-     this.cellBlockStream.releaseResources();
+-     this.cellBlockStream = null;
+-   }
+-   // If the call was run successfuly, we might have already returned the BB
+-   // back to pool. No worries..Then inputCellBlock will be null
+-   cleanup(); <co id="co.offheap.cleanup" linkends="co.note.offheap.cleanup"/>
+    releaseResource();
+  }
+  ...
++ public void releaseResource() {
++   if (this.cellBlockStream != null) {
++     // This will return back the BBs which we got from pool.
++     this.cellBlockStream.releaseResources();
++     this.cellBlockStream = null;
++   }
++ }
+  ...
+- public synchronized void setResponse(Message m, final CellScanner cells,
++ public void setResponse(Message m, final CellScanner cells, <co id="co.offheap.sync" linkends="co.note.offheap.sync"/>
+    Throwable t, String errorMsg) {
+  ...
+- public synchronized void setCallBack(RpcCallback callback) {
++ public void setCallBack(RpcCallback callback) {
+  ...
+- public synchronized BufferChain getResponse() {
++ public BufferChain getResponse() {
+
++++ org/apache/hadoop/hbase/ipc/NettyRpcServerResponseEncoder.java
+ public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
+   ...
+   ctx.write(Unpooled.wrappedBuffer(buf.getBuffers()), promise).addListener(f -> {
+-    resp.done(); <co id="co.offheap.done" linkends="co.note.offheap.done"/>
+     if (f.isSuccess()) {
+       metrics.sentBytes(buf.size());
+     }
+     ...
+  }
+
++++ org/apache/hadoop/hbase/ipc/NettyServerCall.java
+- public synchronized void sendResponseIfReady() throws IOException {
++ public void sendResponseIfReady() throws IOException {
+    // set param null to reduce memory pressure
+    this.param = null;
+-   connection.channel.writeAndFlush(this);
++   connection.channel.writeAndFlush(this).addListener(f -> {
++     this.done();
++   });
+  }
+  
+     
+				</programlisting>
 					<calloutlist>
-						<callout id="co.note.offheap.clear" arearefs="co.offheap.clear"><para>对目标Call执行cleanup方法时，会释放其所申请的ByteBuffer，因此要在setResponse方法执行之后在调用，防止CellBlock报文序列化失败。</para></callout>
-						<callout id="co.note.offheap.fail" arearefs="co.offheap.fail"><para>针对执行成功的RPC请求，相关资源会在Call#done方法中进行释放，如果RPC执行失败会在这里进行相关资源的清理操作。</para></callout>
+						<callout id="co.note.offheap.clear" arearefs="co.offheap.clear"><para>finally模块中已经做了调用处理，这里无需在做调用。</para></callout>
+						<callout id="co.note.offheap.fail" arearefs="co.offheap.fail"><para>如果RPC请求执行失败，执行releaseResource操作对ServerCall所申请的ByteBuffer进行释放。</para></callout>
+						<callout id="co.note.offheap.cleanup" arearefs="co.offheap.cleanup"><para>CallRunner运行结束的最后(finally代码块中)已经对cleanup做了相关的调用处理，done方法中无需在重复调用。</para></callout>
+						<callout id="co.note.offheap.sync" arearefs="co.offheap.sync"><para>ServerCall中的相关方法并无线程抢占冲突，synchronized关键字可去掉。</para></callout>
+						<callout id="co.note.offheap.done" arearefs="co.offheap.done"><para>将done方法的调用上移到NettyServerCall类中(sendResponseIfReady方法里)。</para></callout>
 					</calloutlist>
 				</programlistingco>
 			</listitem>

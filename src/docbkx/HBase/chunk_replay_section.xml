@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section version="5.0" xmlns="http://docbook.org/ns/docbook"
+	xmlns:xlink="http://www.w3.org/1999/xlink"
+	xmlns:xi="http://www.w3.org/2001/XInclude"
+	xmlns:ns5="http://www.w3.org/2000/svg"
+	xmlns:ns4="http://www.w3.org/1998/Math/MathML"
+	xmlns:ns3="http://www.w3.org/1999/xhtml"
+	xmlns:db="http://docbook.org/ns/docbook">
+	<title>Chunk回放操作</title>
+	<para>Chunk回放逻辑是在Region加载过程中触发的，可回放的前提是RS上面持久化了对应的memstore数据，为此，RS在启动过程中需要对已持久化的Chunk进行如下判断，来决定是否将其保留。</para>
+	<orderedlist>
+		<listitem><para>目标Chunk对应的Region目前所有副本都处于健康状态。</para></listitem>
+		<listitem><para>META表格中所标识的Region地址并不包含当前启动的RS。</para></listitem>
+	</orderedlist>
+	<para>如果不满足以上判断条件，需要将chunk保留下来，这样当primary在当前RS加载时便可以做相应的回放处理。为此需要在HMaster端引入新的通信服务供RS端去调用使用，用来判断目标Region是否满足以上约束要求。</para>
+	<tip>优化点：无需对每个chunk都执行这样的判断，会增加RPC的调用频率，可在RS端先做汇总，然后统一发送到HMaster端去做判断处理。</tip>
+	<para>另外需要注意的是chunk回放逻辑只需要出现在primary加载过程中即可，Replica加载过程中是无需回放的，因其可以对primary触发flush事件以便同步到最新的数据。为此需要在HRegion#initializeRegionInternals执行过程中进行相应的判断，与原生Replica无需回放recover.edits的逻辑类似。</para>
+	<para>HBase原生提供了两种Chunk的实现，一种是基于堆内的(OnheapChunk)，另外一种是基于堆外的(OffheapChunk)，由于写链路基于LSM树进行管理，因此Chunk数据并不需要具备持久化存储的能力。基于WALLess的架构引入后，memstore数据无法在通过回放日志的方式来进行恢复，所以我们需要提供一种具备持久化存储能力的Chunk，比如基于pmem进行chunk管理，或者借助于mmap将内存空间映射到磁盘上。</para>
+	<para>另外Region的memstore数据是会分散到多个chunk进行存储的，为了能够区分对哪些chunk进行回放，需要为chunk引入如下元数据声明。</para>
+	<orderedlist>
+		<listitem>
+			<para>regionName &amp; cfName</para>
+			<para>用来确定当前Chunk属于哪个Region的哪个列族。</para>
+		</listitem>
+		<listitem>
+			<para>seqId</para>
+			<para>chunk要有排序的概念，需要延着seqId做顺序回放。</para>
+		</listitem>
+		<listitem>
+			<para>offsetMeta</para>
+			<para>采用8个字节进行存储，其中高4位用来标识最后一个待回放Chunk的seqId，低4位用来标识最后一个待回放Chunk的结束偏移量，以此来确定chunk回放的结束位置。</para>
+			<para>由于memstore执行flush的时候其所占用的chunk并不是立刻释放的，如果还有scanner在使用，需要等待scanner都关闭的时候才会释放，所以需要引入该元数据信息来进行无用chunk过滤，在执行回放的时候可以对每个Chunk所记录的lastChunkId进行判断，如果其值小于当前chunk集合中最大的seqId，则没有必要对其进行回放(已被flush)</para>
+		</listitem>
+		<listitem>
+			<para>Chunk结束标识</para>
+			<para>对每个chunk进行memstore回放的时候，通过该标识来判断是否可以跳转到下一个chunk。目前结束标识通过数字0来定义，存储需要4个字节，如果chunk剩余空间不足4个字节，或者读取到了0，说明可以跳转到下一个chunk进行回放。</para>
+		</listitem>
+	</orderedlist>
+	<para>因此每个Chunk的存储结构大致如下：</para>
+	<mediaobject>
+		<imageobject>
+			<imagedata contentdepth="100%" width="100%" fileref="../media/hbase/chunk_format.png"></imagedata>
+		</imageobject>
+	</mediaobject>
+	<para>其中每个cell的组织结构为：cellLen(4) | cellData | mvccId(8)</para>
+	<para>通过以上定义，在对整个chunkpool进行加载的时候，便可通过解析每个chunk的元数据信息来将其按如下数据结构组织：(region,cfName) --> sort(seqId, seqId2, seqId3..)</para>
+	<para>这样通过region和cfName可确定待回放的chunk集合，对目标chunk集合按seqId进行排序，然后顺序回放即可(代码层面可借鉴DurableChunkRetriever的实现)</para>
+	<para>除了要考虑dataChunkPool还需对indexChunkPool的持久化进行考虑，Intel的POC测试代码中没有单独启用indexChunkPool.</para>
+</section>

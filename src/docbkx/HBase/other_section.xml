@@ -7,6 +7,7 @@
 	xmlns:ns3="http://www.w3.org/1999/xhtml"
 	xmlns:db="http://docbook.org/ns/docbook">
 	<title>其他相关</title>
+	<xi:include href="config_section.xml"/>
 	<xi:include href="migrate_section.xml"/>
 	<section>
 		<title>自定义负载均衡</title>

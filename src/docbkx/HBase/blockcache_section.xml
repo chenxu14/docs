@@ -7,7 +7,7 @@
 	xmlns:ns3="http://www.w3.org/1999/xhtml"
 	xmlns:db="http://docbook.org/ns/docbook">
 	<title>BlockCache功能</title>
-	<para>BlockCache主要用于读缓存功能，以此来加快数据块的访问效率，目前HBase提供了两种该缓存功能的实现类，分别是LruBlockCache和BucketCache(国人研发)，其中LruBlockCache是较早的实现版本，采用LRU算法淘汰缓存中久不使用的数据，该缓存的主要问题在于每次执行CMS垃圾回收时，有可能会产生大量的内存碎片，从而降低了整个堆内存的可用率，为此BucketCache应运而生。</para>
+	<para>BlockCache主要用于块缓存操作，按照不同的存储媒介来划分，hbase原生可提供三种类型的BlockCache，分别是LruBlockCache用于缓存索引块和布隆数据块(基于堆内进行管理)；BucketCache用于缓存数据块，块数据保存在堆外；MemcachedBlockCache基于外部缓存系统来做块数据管理。</para>
 	<section>
 		<title>LruBlockCache</title>
 		<para>LruBlockCache是最早的缓存功能实现类，其内部主要采用HashMap来存储每一个要缓存的数据块。在LruBlockCache缓存中，缓存数据是分3个区域来存储的，不同区域存储着不同性质的block数据，这些区域包括：</para>
@@ -70,7 +70,7 @@
 	</section>
 	<section>
 		<title>BucketCache</title>
-		<para>BucketCache的产生主要用于解决CMS过程中内存碎片的问题，不同于LruBlockCache采用HashMap作为block的存储媒介，在BucketCache中缓存数据是通过ByteBuffer(存储媒介为内存)或file(存储媒介为高速磁盘，比如SSD)来存储的。在使用内存作为存储媒介时，考虑到如果采用单个ByteBuffer来存储所有的数据，数据的寻址时间和读写效率可能会有影响，因此，BucketCache的做法是采用一组ByteBuffer进行存储，每个ByteBuffer存储着4M的缓存数据，在根据BucketCache的大小(hbase.bucketcache.size参数指定)来决定需要申请的ByteBuffer个数。这些ByteBuffer数组在物理存储上可能并不是连续的地址空间，但是在逻辑上我们可以认为它们是连续的，从而形成一个更为庞大的ByteBuffer实体，存储着全部的缓存数据。</para>
+		<para>不同于LruBlockCache直接采用ConcurrentHashMap来管理块缓存数据，BucketCache只通过Map来管理缓存数据的索引，而真正的缓存数据内容是通过ByteBuffer来进行存储的。在使用内存作为存储媒介时，考虑到如果采用单个ByteBuffer来存储所有的数据，数据的寻址时间和读写效率可能会有影响，因此，BucketCache的做法是采用一组ByteBuffer进行存储，每个ByteBuffer存储着4M的缓存数据，在根据BucketCache的大小(hbase.bucketcache.size参数指定)来决定需要申请的ByteBuffer个数。这些ByteBuffer数组在物理存储上可能并不是连续的地址空间，但是在逻辑上我们可以认为它们是连续的，从而形成一个更为庞大的ByteBuffer实体，存储着全部的缓存数据。</para>
 		<para>在物理层面缓存数据是通过ByteBuffe或file来存储的，而在逻辑层面存储单元是通过Bucket来封装的。BucketCache将所有的缓存空间划分成了多个Bucket，每个Bucket负责封装2M的block数据。同时这些Bucket又是分组管理的，不同的Bucket分组存储着不同size的block数据，假设hbase.bucketcache.bucket.sizes的属性值为(64kb,96kb,512kb)，则BucketCache在初始化时会创建3个Bucket分组来分别存储64kb大小的block、96kb大小的block和512kb大小的block。而每个Bucket分组所包含的Bucket数量是通过如下方式来计算出来的：</para>
 		<blockquote>
 			<itemizedlist make='bullet'>
@@ -237,6 +237,67 @@
 					<para>缓存容错时间，默认为1分钟。</para>
 				</listitem>
 			</orderedlist>
+		</section>
+	</section>
+	<section>
+		<title>CompositeBucketCache</title>
+		<para>基于hbase原生提供的3种类型的BlockCache，我们可以通过如下两两组合来形成一个复合型的BlockCache。</para>
+		<orderedlist>
+			<listitem>
+				<para>CombinedBlockCache</para>
+				<para>采用LruBlockCache作为一级缓存用来存储索引块和bloom块，采用BucketCache作为二级缓存用来存储数据块以及LruBlockCache中淘汰的块。</para>
+			</listitem>
+			<listitem>
+				<para>InclusiveCombinedBlockCache</para>
+				<para>采用LruBlockCache作为一级缓存用来存储索引块和bloom块，采用MemcachedBlockCache用来存储数据块以及LruBlockCache中淘汰的块。</para>
+			</listitem>
+		</orderedlist>
+		<para>目前这两种复合型的BlockCache都是采用LruBlockCache来作为L1缓存，在大数据容量场景下可能会存在以下局限：由于LruBlockCache是基于堆内存进行管理的，如果分配过大将会导致堆内存的使用空间变大并可能带来严重的碎片问题(假设每台机器能够存储60T左右的数据，每个HFileBlock指定为64字节，全部的索引块和布隆块缓存下来需要近百G的内存)。另一方面LruBlockCache所管理的缓存数据是需要通过GC来进行回收的，如果空间分配量过小，那么缓存的驱逐频率会更加频繁，随之而来的GC压力也会变得更加明显，尤其在启用cacheOnWrite或者prefetchOnOpen特性时。</para>
+		<para>既然大数据容量场景下采用LruBlockCache不太能满足我们的需求，那么我们自然会想到能否采用堆外BucketCache来做替换处理，形成一种新的复合型BlockCache，如下图所示：</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="80%" scalefit="1" fileref="../media/hbase/compositeBucketCache.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>在此模式下，L1层级的BucketCache主要通过堆外内存来进行管理，而L2层级的BucketCache可通过SSD或PMEM进行管理，以此来解决大容量的缓存需求。也即需要针对BucketCache提供分层存储的能力支持。引入该复合型的BlockCache之后，我们甚至还可以再次将其与LruBlockCache组合使用，形成更加复杂的cache模型，如下图所示。</para>
+		<mediaobject>
+			<imageobject>
+				<imagedata contentdepth="100%" width="90%" scalefit="1" fileref="../media/hbase/compositeBucketCache2.png"></imagedata>
+			</imageobject>
+		</mediaobject>
+		<para>在功能实现上，分层的BucketCache主要是通过CompositeBucketCache类来封装的，其延用了原生的CombinedBlockCache的处理逻辑，只不过将L1缓存从FirstLevelBlockCache替换成了BucketCache。因此在类结构上我们只需将CombinedBlockCache的代码逻辑上移到超类(即CompositeBlockCache)，然后将CompositeBucketCache和CombinedBlockCache分别继承该超类即可。</para>
+		<section>
+			<title>测试情况</title>
+			<para>基于统一数据集，YCSB开启40个线程随机执行4亿次get，由于测试数据集不是很大，BlockCache缓存可以全部命中，因此测试没有体现出块驱逐而导致的GC压力。在排除GC差异的情况下，不同缓存模型的时延比对如下：</para>
+			<table frame='all'>
+				<title>CombinedBlockCache和CompositeBucketCache性能测试对比</title>
+				<tgroup cols='6' align='left' colsep='1' rowsep='1'>
+					<colspec colname='c1' colwidth="12em"/>
+					<colspec colname='c2' colwidth="7em"/>
+					<colspec colname='c3'/>
+					<colspec colname='c4'/>
+					<colspec colname='c5'/>
+					<colspec colname='c6'/>
+					<thead>
+						<row><entry>缓存类型</entry><entry>执行用时(ms)</entry><entry>每秒吞吐</entry><entry>平均时延(us)</entry><entry>P99时延(us)</entry><entry>L1存储媒介</entry></row>
+					</thead>
+					<tbody>
+						<row><entry>CombinedBlockCache</entry><entry>7108826.0</entry><entry>56268.08</entry><entry>707.59</entry><entry>1551.0</entry><entry>堆内</entry></row>
+						<row><entry>CompositeBucketCache</entry><entry>7178596.0</entry><entry>55721.20</entry><entry>715.10</entry><entry>1598.0</entry><entry>堆内</entry></row>
+						<row><entry>CompositeBucketCache</entry><entry>7652746.0</entry><entry>52268.81</entry><entry>762.41</entry><entry>1715.0</entry><entry>堆外</entry></row>
+					</tbody>
+				</tgroup>
+			</table>
+			<para>除去GC因素带来的时延影响，LruBlockCache在访问效率上是要优于BucketCache的，原因如下：</para>
+			<orderedlist>
+				<listitem>
+					<para>LruBlockCache采用的是堆内存，而BucketCache采用的是堆外，堆内存的访问效率是要优于堆外的(通过比对第二行和第三行可以得知)。</para>
+				</listitem>
+				<listitem>
+					<para>LruBlockCache直接从ConcurrentHashMap获取目标缓存块，BucketCache只能通过Map定位到Bucket，然后从Bucket读取出目标块，多了Bucket数据解析的过程(通过比对第一行和第二行可以得知)。</para>
+				</listitem>
+			</orderedlist>
+			<para>但是在大缓存容量场景下，并且缓存的淘汰驱逐频率比较高的时候，BucketCache的性能表现将会更加稳定，这也是BucketCache当时的设计意图。</para>
 		</section>
 	</section>
 </section>
